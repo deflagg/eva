@@ -40,9 +40,8 @@ collision:
 abandoned:
   enabled: true
   object_classes:
-    - backpack
-    - suitcase
-    - handbag
+    - bottle
+    - cellphone
   associate_max_distance_px: 120
   associate_min_ms: 1000
   abandon_delay_ms: 5000
@@ -58,6 +57,10 @@ insights:
   pre_frames: 3
   post_frames: 2
   insight_cooldown_ms: 10000
+  downsample:
+    enabled: true
+    max_dim: 640
+    jpeg_quality: 75
 
 surprise:
   enabled: true

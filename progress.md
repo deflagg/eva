@@ -1220,3 +1220,48 @@
 - The detector uses class-name matching for object classes and assumes person tracks are named `person`.
 - This fills the `abandoned_object` event path referenced by Iteration 20 surprise weights.
 - No dedicated automated detector test suite exists yet; verification remains build checks plus targeted smoke checks/manual validation.
+
+## Iteration 21 — Downsample before LLM (QuickVision-only)
+
+**Status:** ✅ Completed (2026-02-16)
+
+### Completed
+- Added insight payload downsample settings + validation in `packages/quickvision/app/insights.py`:
+  - `insights.downsample.enabled`
+  - `insights.downsample.max_dim` (must be `>= 1`)
+  - `insights.downsample.jpeg_quality` (must be in `1..100`)
+- Added clip payload downsampling pipeline in `packages/quickvision/app/insights.py` (request payload only):
+  - base64 decode -> Pillow image decode
+  - resize longest side to `max_dim` when needed
+  - JPEG re-encode using `jpeg_quality`
+  - replace outgoing `image_b64` in VisionAgent request frames
+- Kept YOLO inference path unchanged (downsampling only affects the Insight/VisionAgent payload path).
+- Updated QuickVision startup + health observability in `packages/quickvision/app/main.py` with downsample config fields.
+- Updated QuickVision committed defaults in `packages/quickvision/settings.yaml` with `insights.downsample` block.
+- Updated docs:
+  - `packages/quickvision/README.md`
+  - `README.md`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/vision-agent && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+
+### Manual test steps
+1. Configure downsampling in `packages/quickvision/settings.local.yaml`:
+   ```yaml
+   insights:
+     downsample:
+       enabled: true
+       max_dim: 640
+       jpeg_quality: 75
+   ```
+2. Start VisionAgent, QuickVision, Eva, and UI.
+3. Trigger `insight_test` in UI and capture resulting `insight.usage.input_tokens`.
+4. Disable downsampling (`insights.downsample.enabled: false`), restart QuickVision, trigger the same scene again, and compare `insight.usage.input_tokens`.
+   - Expect lower input-token usage with downsampling enabled.
+5. Compare generated summaries/tags between on/off runs and confirm insight quality remains acceptable.
+
+### Notes
+- This iteration intentionally changes only the clip payload sent to VisionAgent; detector/inference frame flow remains unchanged.

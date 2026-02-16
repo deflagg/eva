@@ -82,7 +82,10 @@ async def on_startup() -> None:
         f"max_frames={_insight_settings.max_frames} "
         f"pre_frames={_insight_settings.pre_frames} "
         f"post_frames={_insight_settings.post_frames} "
-        f"insight_cooldown_ms={_insight_settings.insight_cooldown_ms}"
+        f"insight_cooldown_ms={_insight_settings.insight_cooldown_ms} "
+        f"downsample_enabled={_insight_settings.downsample.enabled} "
+        f"downsample_max_dim={_insight_settings.downsample.max_dim} "
+        f"downsample_jpeg_quality={_insight_settings.downsample.jpeg_quality}"
     )
     print(
         "[quickvision] surprise config: "
@@ -145,6 +148,9 @@ async def health() -> dict[str, object]:
         "model_loaded": is_model_loaded(),
         "insights_enabled": _insight_settings.enabled if _insight_settings is not None else False,
         "insight_cooldown_ms": _insight_settings.insight_cooldown_ms if _insight_settings is not None else 0,
+        "insight_downsample_enabled": _insight_settings.downsample.enabled if _insight_settings is not None else False,
+        "insight_downsample_max_dim": _insight_settings.downsample.max_dim if _insight_settings is not None else 0,
+        "insight_downsample_jpeg_quality": _insight_settings.downsample.jpeg_quality if _insight_settings is not None else 0,
         "surprise_enabled": _insight_settings.surprise.enabled if _insight_settings is not None else False,
         "surprise_threshold": _insight_settings.surprise.threshold if _insight_settings is not None else 0,
         "surprise_cooldown_ms": _insight_settings.surprise.cooldown_ms if _insight_settings is not None else 0,

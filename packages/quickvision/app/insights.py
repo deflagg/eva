@@ -7,8 +7,11 @@ import uuid
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Any
 from urllib.parse import urlparse
+
+from PIL import Image, UnidentifiedImageError
 
 from .protocol import EventEntry, FrameBinaryMetaMessage, InsightMessage
 from .settings import settings
@@ -16,6 +19,8 @@ from .vision_agent_client import VisionAgentClient, VisionAgentClientError, Visi
 
 HARD_MAX_INSIGHT_FRAMES = 6
 DEFAULT_SURPRISE_THRESHOLD = 5.0
+DEFAULT_DOWNSAMPLE_MAX_DIM = 640
+DEFAULT_DOWNSAMPLE_JPEG_QUALITY = 75
 DEFAULT_SURPRISE_WEIGHTS = {
     "abandoned_object": 5.0,
     "near_collision": 5.0,
@@ -41,6 +46,13 @@ class SurpriseSettings:
 
 
 @dataclass(slots=True)
+class InsightDownsampleSettings:
+    enabled: bool
+    max_dim: int
+    jpeg_quality: int
+
+
+@dataclass(slots=True)
 class InsightSettings:
     enabled: bool
     vision_agent_url: str
@@ -49,6 +61,7 @@ class InsightSettings:
     pre_frames: int
     post_frames: int
     insight_cooldown_ms: int
+    downsample: InsightDownsampleSettings
     surprise: SurpriseSettings
 
 
@@ -128,15 +141,7 @@ class InsightBuffer:
 
         clip_id = str(uuid.uuid4())
 
-        request_frames = [
-            VisionAgentFrame(
-                frame_id=frame.frame_id,
-                ts_ms=frame.ts_ms,
-                mime=frame.mime,
-                image_b64=base64.b64encode(frame.image_bytes).decode("ascii"),
-            )
-            for frame in clip_frames
-        ]
+        request_frames = [self._build_request_frame(frame) for frame in clip_frames]
 
         try:
             insight = await self._vision_agent.request_insight(
@@ -154,6 +159,62 @@ class InsightBuffer:
             summary=insight.summary.model_dump(exclude_none=True),
             usage=insight.usage.model_dump(exclude_none=True),
         )
+
+    def _build_request_frame(self, frame: BufferedFrame) -> VisionAgentFrame:
+        image_b64 = base64.b64encode(frame.image_bytes).decode("ascii")
+        if self.config.downsample.enabled:
+            image_b64 = self._downsample_payload_image(image_b64)
+
+        return VisionAgentFrame(
+            frame_id=frame.frame_id,
+            ts_ms=frame.ts_ms,
+            mime="image/jpeg",
+            image_b64=image_b64,
+        )
+
+    def _downsample_payload_image(self, image_b64: str) -> str:
+        try:
+            source_bytes = base64.b64decode(image_b64, validate=True)
+        except Exception as exc:
+            raise InsightError(
+                "INSIGHT_DOWNSAMPLE_DECODE_FAILED",
+                "Failed to decode insight frame payload for downsampling.",
+            ) from exc
+
+        try:
+            with Image.open(BytesIO(source_bytes)) as source_image:
+                image = source_image.convert("RGB")
+        except (UnidentifiedImageError, OSError) as exc:
+            raise InsightError(
+                "INSIGHT_DOWNSAMPLE_DECODE_FAILED",
+                "Failed to parse insight frame image for downsampling.",
+            ) from exc
+
+        width, height = image.size
+        longest_side = max(width, height)
+        if longest_side > self.config.downsample.max_dim:
+            scale = self.config.downsample.max_dim / float(longest_side)
+            target_size = (
+                max(1, int(round(width * scale))),
+                max(1, int(round(height * scale))),
+            )
+            image = image.resize(target_size, Image.Resampling.LANCZOS)
+
+        output = BytesIO()
+        try:
+            image.save(
+                output,
+                format="JPEG",
+                quality=self.config.downsample.jpeg_quality,
+                optimize=True,
+            )
+        except OSError as exc:
+            raise InsightError(
+                "INSIGHT_DOWNSAMPLE_ENCODE_FAILED",
+                "Failed to encode downsampled insight frame payload.",
+            ) from exc
+
+        return base64.b64encode(output.getvalue()).decode("ascii")
 
     async def _build_clip(self, trigger: BufferedFrame) -> list[BufferedFrame]:
         selected_pre = self._collect_pre_frames(trigger.seq)
@@ -371,6 +432,23 @@ def load_insight_settings() -> InsightSettings:
         key="insights.insight_cooldown_ms",
         default=10000,
     )
+    downsample_enabled = _as_bool(settings.get("insights.downsample.enabled", default=True), default=True)
+    downsample_max_dim = _as_non_negative_int(
+        settings.get("insights.downsample.max_dim", default=DEFAULT_DOWNSAMPLE_MAX_DIM),
+        key="insights.downsample.max_dim",
+        default=DEFAULT_DOWNSAMPLE_MAX_DIM,
+    )
+    downsample_jpeg_quality = _as_non_negative_int(
+        settings.get("insights.downsample.jpeg_quality", default=DEFAULT_DOWNSAMPLE_JPEG_QUALITY),
+        key="insights.downsample.jpeg_quality",
+        default=DEFAULT_DOWNSAMPLE_JPEG_QUALITY,
+    )
+
+    if downsample_max_dim <= 0:
+        raise RuntimeError("QuickVision config error: insights.downsample.max_dim must be >= 1")
+
+    if downsample_jpeg_quality < 1 or downsample_jpeg_quality > 100:
+        raise RuntimeError("QuickVision config error: insights.downsample.jpeg_quality must be between 1 and 100")
 
     surprise_enabled = _as_bool(settings.get("surprise.enabled", default=True), default=True)
     surprise_threshold = _as_non_negative_float(
@@ -397,6 +475,11 @@ def load_insight_settings() -> InsightSettings:
         pre_frames=pre_frames,
         post_frames=post_frames,
         insight_cooldown_ms=insight_cooldown_ms,
+        downsample=InsightDownsampleSettings(
+            enabled=downsample_enabled,
+            max_dim=downsample_max_dim,
+            jpeg_quality=downsample_jpeg_quality,
+        ),
         surprise=SurpriseSettings(
             enabled=surprise_enabled,
             threshold=surprise_threshold,

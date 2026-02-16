@@ -2,7 +2,7 @@
 
 Python daemon that hosts YOLO inference and (optional) insight triggering.
 
-## Current behavior (Iteration 20)
+## Current behavior (Iteration 21)
 
 - HTTP health endpoint at `/health`
 - WebSocket endpoint at `/infer`
@@ -36,6 +36,10 @@ Python daemon that hosts YOLO inference and (optional) insight triggering.
   - enforces both cooldown layers:
     - `surprise.cooldown_ms` (trigger cooldown)
     - `insights.insight_cooldown_ms` (insight call cooldown)
+  - downsample/re-encode pipeline for clip payload frames before VisionAgent call (QuickVision payload only; YOLO inference input unchanged):
+    - decode frame base64 -> Pillow Image
+    - resize longest side to `insights.downsample.max_dim`
+    - re-encode JPEG with `insights.downsample.jpeg_quality`
   - calls VisionAgent via HTTP
   - emits protocol `insight` message on success (no `frame_id` field)
 
@@ -90,6 +94,9 @@ Configured keys currently used:
 - `insights.pre_frames`
 - `insights.post_frames`
 - `insights.insight_cooldown_ms`
+- `insights.downsample.enabled` (default `true`)
+- `insights.downsample.max_dim`
+- `insights.downsample.jpeg_quality` (1-100)
 - `surprise.enabled` (default `true`)
 - `surprise.threshold`
 - `surprise.cooldown_ms`
@@ -109,6 +116,7 @@ QuickVision fails fast at startup if:
 - motion settings are invalid (history/threshold/cooldown must be valid numeric values)
 - collision settings are invalid (pairs/thresholds/cooldown must be valid values)
 - abandoned-object settings are invalid (class list/thresholds/roi/cooldown must be valid values)
+- insight downsample settings are invalid (`insights.downsample.max_dim >= 1`, `insights.downsample.jpeg_quality` in `1..100`)
 - surprise settings are invalid (threshold/cooldown/weights must be valid values)
 - `insights.vision_agent_url` is invalid
 

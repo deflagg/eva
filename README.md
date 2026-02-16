@@ -87,4 +87,4 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 20** (includes abandoned-object detection plus automatic surprise-triggered insight calls with QuickVision cooldown guardrails and Eva insight relay dedupe/cooldown protections).
+Implemented through **Iteration 21** (adds QuickVision insight payload downsampling/re-encoding before VisionAgent calls, while keeping YOLO inference frames unchanged).
