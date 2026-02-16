@@ -2,10 +2,10 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 
 import { captureJpegFrame, isCameraSupported, startCamera, stopCamera } from './camera';
-import { loadUiRuntimeConfig, type UiRuntimeConfig } from './config';
+import { loadUiRuntimeConfig, type UiDebugOverlayConfig, type UiRuntimeConfig } from './config';
 import { encodeBinaryFrameEnvelope } from './frameBinary';
 import { clearOverlay, drawDetectionsOverlay } from './overlay';
-import type { DetectionsMessage, FrameBinaryMeta } from './types';
+import type { DetectionsMessage, EventEntry, FrameBinaryMeta, InsightMessage, InsightSeverity } from './types';
 import { createEvaWsClient, type EvaWsClient, type WsConnectionStatus } from './ws';
 
 type LogDirection = 'system' | 'outgoing' | 'incoming';
@@ -20,6 +20,15 @@ interface LogEntry {
   ts: string;
   direction: LogDirection;
   text: string;
+}
+
+interface EventFeedEntry {
+  id: number;
+  ts: string;
+  name: string;
+  severity: InsightSeverity;
+  trackId: number | null;
+  summary: string;
 }
 
 interface InFlightFrame {
@@ -41,8 +50,15 @@ const CAMERA_STATUS_COLOR: Record<CameraStatus, string> = {
   error: '#b91c1c',
 };
 
+const SEVERITY_COLOR: Record<InsightSeverity, string> = {
+  low: '#166534',
+  medium: '#92400e',
+  high: '#b91c1c',
+};
+
 const FRAME_TIMEOUT_MS = 500;
 const FRAME_LOOP_INTERVAL_MS = 100;
+const EVENT_FEED_LIMIT = 60;
 
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -80,8 +96,72 @@ function isDetectionsMessage(message: unknown): message is DetectionsMessage {
   );
 }
 
+function isInsightMessage(message: unknown): message is InsightMessage {
+  if (!message || typeof message !== 'object') {
+    return false;
+  }
+
+  const candidate = message as Record<string, unknown>;
+  return (
+    candidate.type === 'insight' &&
+    candidate.v === 1 &&
+    typeof candidate.clip_id === 'string' &&
+    typeof candidate.trigger_frame_id === 'string' &&
+    typeof candidate.summary === 'object' &&
+    candidate.summary !== null &&
+    typeof candidate.usage === 'object' &&
+    candidate.usage !== null
+  );
+}
+
+function formatTime(tsMs: number): string {
+  return new Date(tsMs).toLocaleTimeString();
+}
+
+function formatEventValue(value: unknown): string {
+  if (typeof value === 'string') {
+    return value.length > 48 ? `${value.slice(0, 45)}…` : value;
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
+    return String(value);
+  }
+
+  try {
+    const json = JSON.stringify(value);
+    if (typeof json !== 'string') {
+      return String(value);
+    }
+
+    return json.length > 48 ? `${json.slice(0, 45)}…` : json;
+  } catch {
+    return String(value);
+  }
+}
+
+function summarizeEventData(data: Record<string, unknown>): string {
+  const entries = Object.entries(data);
+  if (entries.length === 0) {
+    return 'no data';
+  }
+
+  return entries
+    .slice(0, 3)
+    .map(([key, value]) => `${key}=${formatEventValue(value)}`)
+    .join(', ');
+}
+
+function hasDebugOverlayGeometry(config: UiDebugOverlayConfig | undefined): boolean {
+  if (!config) {
+    return false;
+  }
+
+  return Object.keys(config.regions).length > 0 || Object.keys(config.lines).length > 0;
+}
+
 function App({ runtimeConfig }: AppProps): JSX.Element {
   const evaWsUrl = runtimeConfig.eva.wsUrl;
+  const debugOverlayConfig = runtimeConfig.debugOverlay;
 
   const [status, setStatus] = React.useState<WsConnectionStatus>('connecting');
   const [logs, setLogs] = React.useState<LogEntry[]>([]);
@@ -98,8 +178,12 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const [inFlightFrameId, setInFlightFrameId] = React.useState<string | null>(null);
   const [lastDetectionsCount, setLastDetectionsCount] = React.useState(0);
   const [lastDetectionsModel, setLastDetectionsModel] = React.useState<string | null>(null);
+  const [recentEvents, setRecentEvents] = React.useState<EventFeedEntry[]>([]);
+  const [latestInsight, setLatestInsight] = React.useState<InsightMessage | null>(null);
+  const [debugOverlayEnabled, setDebugOverlayEnabled] = React.useState(false);
 
   const cameraSupported = React.useMemo(() => isCameraSupported(), []);
+  const debugOverlayConfigured = React.useMemo(() => hasDebugOverlayGeometry(debugOverlayConfig), [debugOverlayConfig]);
 
   const clientRef = React.useRef<EvaWsClient | null>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
@@ -107,8 +191,10 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const captureCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const overlayCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const nextLogIdRef = React.useRef(1);
+  const nextEventIdRef = React.useRef(1);
   const inFlightRef = React.useRef<InFlightFrame | null>(null);
   const captureInProgressRef = React.useRef(false);
+  const latestDetectionsRef = React.useRef<DetectionsMessage | null>(null);
 
   const frameLoopTimerRef = React.useRef<number | null>(null);
   const framesSentRef = React.useRef(0);
@@ -125,6 +211,29 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
     nextLogIdRef.current += 1;
     setLogs((prev) => [...prev.slice(-199), entry]);
+  }, []);
+
+  const appendEvents = React.useCallback((events: EventEntry[]) => {
+    if (events.length === 0) {
+      return;
+    }
+
+    const mapped: EventFeedEntry[] = [];
+
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      mapped.push({
+        id: nextEventIdRef.current,
+        ts: formatTime(event.ts_ms),
+        name: event.name,
+        severity: event.severity,
+        trackId: event.track_id ?? null,
+        summary: summarizeEventData(event.data),
+      });
+      nextEventIdRef.current += 1;
+    }
+
+    setRecentEvents((prev) => [...mapped, ...prev].slice(0, EVENT_FEED_LIMIT));
   }, []);
 
   const dropInFlight = React.useCallback(
@@ -159,12 +268,25 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         return;
       }
 
-      drawDetectionsOverlay(videoElement, overlayCanvas, message);
+      drawDetectionsOverlay(videoElement, overlayCanvas, message, {
+        debugOverlayEnabled,
+        debugOverlay: debugOverlayConfig,
+      });
+      latestDetectionsRef.current = message;
       setLastDetectionsCount(message.detections.length);
       setLastDetectionsModel(message.model);
     },
-    [],
+    [debugOverlayConfig, debugOverlayEnabled],
   );
+
+  React.useEffect(() => {
+    const lastDetections = latestDetectionsRef.current;
+    if (!lastDetections) {
+      return;
+    }
+
+    renderDetections(lastDetections);
+  }, [debugOverlayEnabled, renderDetections]);
 
   React.useEffect(() => {
     const client = createEvaWsClient(evaWsUrl, {
@@ -180,9 +302,18 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       onMessage: (message) => {
         const inFlight = inFlightRef.current;
         const detectionsMessage = isDetectionsMessage(message) ? message : null;
+        const insightMessage = isInsightMessage(message) ? message : null;
 
         if (detectionsMessage) {
           renderDetections(detectionsMessage);
+
+          if (detectionsMessage.events && detectionsMessage.events.length > 0) {
+            appendEvents(detectionsMessage.events);
+          }
+        }
+
+        if (insightMessage) {
+          setLatestInsight(insightMessage);
         }
 
         if (detectionsMessage && inFlight && detectionsMessage.frame_id === inFlight.frameId) {
@@ -225,7 +356,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       client.disconnect();
       clientRef.current = null;
     };
-  }, [appendLog, connectionAttempt, dropInFlight, evaWsUrl, renderDetections]);
+  }, [appendEvents, appendLog, connectionAttempt, dropInFlight, evaWsUrl, renderDetections]);
 
   const handleSendTestMessage = React.useCallback(() => {
     const payload = {
@@ -269,6 +400,19 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     setLogs([]);
   }, []);
 
+  const handleToggleDebugOverlay = React.useCallback(() => {
+    if (!debugOverlayConfigured) {
+      appendLog('system', 'Debug overlay is not configured (set debugOverlay.regions/lines in UI runtime config).');
+      return;
+    }
+
+    setDebugOverlayEnabled((prev) => {
+      const next = !prev;
+      appendLog('system', `Debug ROI/line overlay ${next ? 'enabled' : 'disabled'}.`);
+      return next;
+    });
+  }, [appendLog, debugOverlayConfigured]);
+
   const handleStartCamera = React.useCallback(async () => {
     if (!cameraSupported) {
       setCameraStatus('error');
@@ -295,6 +439,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       streamRef.current = stream;
 
       clearOverlayCanvas();
+      latestDetectionsRef.current = null;
       setLastDetectionsCount(0);
       setLastDetectionsModel(null);
 
@@ -320,6 +465,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     }
 
     clearOverlayCanvas();
+    latestDetectionsRef.current = null;
     setLastDetectionsCount(0);
     setLastDetectionsModel(null);
 
@@ -472,7 +618,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
   return (
     <main style={{ fontFamily: 'sans-serif', padding: 16, lineHeight: 1.4 }}>
-      <h1>Eva UI (Iteration 13)</h1>
+      <h1>Eva UI (Iteration 22)</h1>
 
       <p>
         WebSocket target: <code>{evaWsUrl}</code>
@@ -487,7 +633,10 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         <strong style={{ color: CAMERA_STATUS_COLOR[cameraStatus], textTransform: 'capitalize' }}>
           {cameraStatus}
         </strong>{' '}
-        · Streaming: <strong>{streamingEnabled ? 'on' : 'off'}</strong>
+        · Streaming: <strong>{streamingEnabled ? 'on' : 'off'}</strong> · Debug overlay:{' '}
+        <strong>
+          {debugOverlayEnabled ? 'on' : debugOverlayConfigured ? 'off' : 'not configured'}
+        </strong>
       </p>
 
       {cameraError ? (
@@ -502,6 +651,9 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         </button>
         <button type="button" onClick={handleTriggerInsightTest} disabled={status !== 'connected'}>
           Trigger insight test
+        </button>
+        <button type="button" onClick={handleToggleDebugOverlay} disabled={!debugOverlayConfigured}>
+          {debugOverlayEnabled ? 'Hide ROI/line overlay' : 'Show ROI/line overlay'}
         </button>
         <button type="button" onClick={handleReconnect}>
           Reconnect
@@ -549,7 +701,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         <p style={{ marginTop: 8 }}>
           Frames sent: <strong>{framesSent}</strong> · acknowledged: <strong>{framesAcked}</strong> · timed out:{' '}
           <strong>{framesTimedOut}</strong> · in-flight: <strong>{inFlightFrameId ? 'yes' : 'no'}</strong> · detections:{' '}
-          <strong>{lastDetectionsCount}</strong>
+          <strong>{lastDetectionsCount}</strong> · events in feed: <strong>{recentEvents.length}</strong>
           {lastDetectionsModel ? (
             <>
               {' '}
@@ -563,6 +715,87 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
             </>
           ) : null}
         </p>
+      </section>
+
+      <section style={{ marginBottom: 16 }}>
+        <h2 style={{ marginBottom: 8 }}>Latest insight</h2>
+        <div
+          style={{
+            border: '1px solid #ddd',
+            borderRadius: 6,
+            backgroundColor: '#fafafa',
+            padding: 12,
+          }}
+        >
+          {!latestInsight ? (
+            <p style={{ margin: 0 }}>No insight received yet.</p>
+          ) : (
+            <>
+              <p style={{ marginTop: 0, marginBottom: 8 }}>
+                <strong style={{ color: SEVERITY_COLOR[latestInsight.summary.severity] }}>
+                  {latestInsight.summary.severity.toUpperCase()}
+                </strong>{' '}
+                · {latestInsight.summary.one_liner}
+              </p>
+              <p style={{ marginTop: 0, marginBottom: 8 }}>
+                Tags:{' '}
+                {latestInsight.summary.tags.length > 0 ? (
+                  latestInsight.summary.tags.map((tag) => <code key={tag} style={{ marginRight: 6 }}>{tag}</code>)
+                ) : (
+                  <em>none</em>
+                )}
+              </p>
+              {latestInsight.summary.what_changed.length > 0 ? (
+                <ul style={{ marginTop: 0, marginBottom: 8, paddingLeft: 20 }}>
+                  {latestInsight.summary.what_changed.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              ) : null}
+              <p style={{ marginTop: 0, marginBottom: 0 }}>
+                <small>
+                  clip_id=<code>{latestInsight.clip_id}</code> · trigger=<code>{latestInsight.trigger_frame_id}</code> ·
+                  tokens in/out={latestInsight.usage.input_tokens}/{latestInsight.usage.output_tokens} · cost=$
+                  {latestInsight.usage.cost_usd.toFixed(4)}
+                </small>
+              </p>
+            </>
+          )}
+        </div>
+      </section>
+
+      <section style={{ marginBottom: 16 }}>
+        <h2 style={{ marginBottom: 8 }}>Recent events</h2>
+        <div
+          style={{
+            border: '1px solid #ddd',
+            borderRadius: 6,
+            backgroundColor: '#fafafa',
+            padding: 12,
+            minHeight: 120,
+            maxHeight: 260,
+            overflow: 'auto',
+          }}
+        >
+          {recentEvents.length === 0 ? (
+            <p style={{ margin: 0 }}>No detector events yet.</p>
+          ) : (
+            <ul style={{ margin: 0, paddingLeft: 20 }}>
+              {recentEvents.map((event) => (
+                <li key={event.id}>
+                  <code>{event.ts}</code> <strong>{event.name}</strong>{' '}
+                  <strong style={{ color: SEVERITY_COLOR[event.severity] }}>[{event.severity}]</strong>{' '}
+                  {event.trackId !== null ? (
+                    <>
+                      track_id=<code>{event.trackId}</code> ·{' '}
+                    </>
+                  ) : null}
+                  {event.summary}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </section>
 
       <section>

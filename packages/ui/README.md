@@ -2,7 +2,7 @@
 
 React + Vite client for webcam capture and overlays.
 
-## Current behavior (Iteration 13)
+## Current behavior (Iteration 22)
 
 - Loads runtime config from:
   - `/config.local.json` first (if present)
@@ -13,6 +13,7 @@ React + Vite client for webcam capture and overlays.
 - Provides controls:
   - **Send test message**
   - **Trigger insight test** (sends `{"type":"command","v":1,"name":"insight_test"}`)
+  - **Show/Hide ROI/line overlay** (when debug overlay geometry is configured)
   - **Start camera** / **Stop camera**
   - **Start/Pause streaming**
 - Captures JPEG frames from the video stream via a hidden `<canvas>`
@@ -29,8 +30,13 @@ React + Vite client for webcam capture and overlays.
   - `scaleX = video.clientWidth / frame.width`
   - `scaleY = video.clientHeight / frame.height`
   - `drawRect(x1*scaleX, y1*scaleY, (x2-x1)*scaleX, (y2-y1)*scaleY)`
-- Shows frame counters and latest detection count/model
-- Logs protocol extension payloads (for example `detections.events[]` and `insight`)
+- Shows **recent event feed** from `detections.events[]`:
+  - event `name`, `severity`, optional `track_id`, and compact `data` summary
+- Shows **latest insight panel** from `insight` messages:
+  - one-liner, severity, tags, change bullets, usage/cost summary
+- Supports optional **debug ROI/line overlay** from UI runtime config:
+  - `debugOverlay.regions` (`x1,y1,x2,y2`)
+  - `debugOverlay.lines` (`x1,y1,x2,y2`)
 
 ## Runtime config files
 
@@ -43,6 +49,14 @@ Example:
 {
   "eva": {
     "wsUrl": "ws://localhost:8787/eye"
+  },
+  "debugOverlay": {
+    "regions": {
+      "left_half": { "x1": 0, "y1": 0, "x2": 640, "y2": 720 }
+    },
+    "lines": {
+      "doorway": { "x1": 640, "y1": 0, "x2": 640, "y2": 720 }
+    }
   }
 }
 ```

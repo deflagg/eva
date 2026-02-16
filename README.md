@@ -87,4 +87,4 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 21** (adds QuickVision insight payload downsampling/re-encoding before VisionAgent calls, while keeping YOLO inference frames unchanged).
+Implemented through **Iteration 22** (adds UI observability: recent event feed, latest insight panel, and optional ROI/line debug overlay toggle).

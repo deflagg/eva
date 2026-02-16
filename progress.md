@@ -1265,3 +1265,47 @@
 
 ### Notes
 - This iteration intentionally changes only the clip payload sent to VisionAgent; detector/inference frame flow remains unchanged.
+
+## Iteration 22 — UI: event feed + insight panel + optional debug overlay
+
+**Status:** ✅ Completed (2026-02-16)
+
+### Completed
+- Enhanced UI message handling in `packages/ui/src/main.tsx`:
+  - collects and displays a rolling recent event feed from `detections.events[]`
+  - event rows include `name`, `severity`, optional `track_id`, and compact `data` summaries
+  - captures and displays latest `insight` message details (one-liner, tags, what_changed, usage/cost)
+- Added optional ROI/line debug overlay toggle in UI (`packages/ui/src/main.tsx`):
+  - added control button to show/hide debug geometry overlay without interrupting streaming
+  - overlay state shown in status line (`on/off/not configured`)
+- Extended overlay renderer in `packages/ui/src/overlay.ts`:
+  - supports optional drawing of configured ROI rectangles and line segments
+  - keeps existing detection-box rendering and scaling behavior
+- Extended runtime config parsing in `packages/ui/src/config.ts`:
+  - added optional `debugOverlay.regions` and `debugOverlay.lines` schema parsing/validation
+  - validates coordinate fields as finite numbers
+- Updated docs:
+  - `packages/ui/README.md`
+  - root `README.md` status line
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/vision-agent && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+
+### Manual test steps
+1. Start VisionAgent, QuickVision, Eva, and UI.
+2. Start camera + streaming in UI.
+3. Trigger detector events (for example ROI enter/exit, line crossing, motion).
+4. Confirm **Recent events** panel populates with:
+   - event name
+   - severity
+   - optional `track_id`
+   - compact data summary text
+5. Trigger `insight_test` (or a surprise-triggered insight) and confirm **Latest insight** panel updates with one-liner + tags.
+6. (Optional) Add ROI/line geometry under `debugOverlay` in `packages/ui/public/config.local.json`, reload UI, and toggle **Show/Hide ROI/line overlay**.
+7. Confirm streaming + frame acknowledgements continue normally while events/insights panels and overlay are active.
+
+### Notes
+- Debug ROI/line overlay geometry is intentionally sourced from UI runtime config so this iteration remains UI-only and does not require protocol/backend changes.
