@@ -2,18 +2,21 @@
 
 TypeScript daemon for UI/WebSocket orchestration.
 
-## Current behavior (Iteration 4)
+## Current behavior (Iteration 8)
 
 - HTTP server on `EVA_PORT` (default `8787`)
 - Eva opens a WebSocket client to `QUICKVISION_WS_URL` (default `ws://localhost:8000/infer`)
+  - reconnects automatically with exponential backoff (`250ms` -> `5000ms` cap)
 - WebSocket endpoint at `/eye`
   - sends a `hello` message on connect
-  - validates incoming payloads as JSON (`INVALID_JSON` on parse errors)
-  - forwards valid UI messages to QuickVision
-  - forwards QuickVision responses back to the connected UI client
-  - returns `QV_UNAVAILABLE` when QuickVision is not connected
+  - validates incoming payloads as protocol `frame` messages (`INVALID_JSON`, `INVALID_PAYLOAD`, `UNSUPPORTED_TYPE`, `INVALID_FRAME`)
+  - forwards valid frames to QuickVision
+  - tracks `frame_id -> ui client` routes with 5s TTL eviction
+  - routes QuickVision `detections` (and frame-scoped `error`) back to the originating client
+  - returns `QV_UNAVAILABLE` immediately when QuickVision is not connected
+  - cleans up all in-flight `frame_id` routes when a UI client disconnects
 
-### Iteration 4 limitation
+### Current limitation (still in place until Iteration 9)
 
 - Only **one UI client** is supported at a time.
 - A second concurrent UI connection receives `SINGLE_CLIENT_ONLY` and is closed.

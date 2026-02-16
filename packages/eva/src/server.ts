@@ -1,10 +1,12 @@
 import { createServer, type Server } from 'node:http';
 import WebSocket, { WebSocketServer, type RawData } from 'ws';
 
-import { makeError, makeHello } from './protocol.js';
+import { makeError, makeHello, FrameMessageSchema, QuickVisionInboundMessageSchema } from './protocol.js';
 import { createQuickVisionClient } from './quickvisionClient.js';
+import { FrameRouter } from './router.js';
 
 const EYE_PATH = '/eye';
+const FRAME_ROUTE_TTL_MS = 5_000;
 
 export interface StartServerOptions {
   port: number;
@@ -35,6 +37,19 @@ function sendJson(ws: WebSocket, payload: unknown): void {
   ws.send(JSON.stringify(payload));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function getOptionalFrameId(payload: unknown): string | undefined {
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+
+  const frameId = payload.frame_id;
+  return typeof frameId === 'string' ? frameId : undefined;
+}
+
 export function startServer(options: StartServerOptions): Server {
   const { port, quickvisionWsUrl } = options;
 
@@ -46,6 +61,13 @@ export function startServer(options: StartServerOptions): Server {
 
   let activeUiClient: WebSocket | null = null;
 
+  const frameRouter = new FrameRouter({
+    ttlMs: FRAME_ROUTE_TTL_MS,
+    onExpire: (frameId) => {
+      console.warn(`[eva] frame route expired after ${FRAME_ROUTE_TTL_MS}ms: ${frameId}`);
+    },
+  });
+
   const quickvisionClient = createQuickVisionClient({
     url: quickvisionWsUrl,
     handlers: {
@@ -55,15 +77,50 @@ export function startServer(options: StartServerOptions): Server {
       onClose: () => {
         console.warn('[eva] QuickVision connection closed');
       },
+      onReconnectScheduled: (delayMs) => {
+        console.warn(`[eva] scheduling QuickVision reconnect in ${delayMs}ms`);
+      },
       onError: (error) => {
         console.error(`[eva] QuickVision connection error: ${error.message}`);
       },
       onMessage: (payload) => {
+        const parsedMessage = QuickVisionInboundMessageSchema.safeParse(payload);
+        if (!parsedMessage.success) {
+          console.warn('[eva] QuickVision message failed schema validation; dropping payload');
+          return;
+        }
+
+        const message = parsedMessage.data;
+
+        if (message.type === 'detections') {
+          const targetClient = frameRouter.take(message.frame_id);
+
+          if (!targetClient) {
+            console.warn(`[eva] no route for frame_id ${message.frame_id}; dropping QuickVision response`);
+            return;
+          }
+
+          sendJson(targetClient, message);
+          return;
+        }
+
+        if (message.type === 'error' && message.frame_id) {
+          const targetClient = frameRouter.take(message.frame_id);
+
+          if (!targetClient) {
+            console.warn(`[eva] no route for frame_id ${message.frame_id}; dropping QuickVision response`);
+            return;
+          }
+
+          sendJson(targetClient, message);
+          return;
+        }
+
         if (!activeUiClient || activeUiClient.readyState !== WebSocket.OPEN) {
           return;
         }
 
-        sendJson(activeUiClient, payload);
+        sendJson(activeUiClient, message);
       },
       onInvalidMessage: (raw) => {
         console.warn(`[eva] received non-JSON payload from QuickVision: ${raw}`);
@@ -74,6 +131,13 @@ export function startServer(options: StartServerOptions): Server {
   quickvisionClient.connect();
 
   const wss = new WebSocketServer({ noServer: true });
+
+  const cleanupClientRoutes = (client: WebSocket, reason: string): void => {
+    const removed = frameRouter.deleteByClient(client);
+    if (removed > 0) {
+      console.log(`[eva] cleaned up ${removed} frame route(s) on ${reason}`);
+    }
+  };
 
   server.on('upgrade', (request, socket, head) => {
     const requestUrl = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
@@ -99,28 +163,58 @@ export function startServer(options: StartServerOptions): Server {
     sendJson(ws, makeHello('eva'));
 
     ws.on('message', (data) => {
-      let parsed: unknown;
+      let parsedPayload: unknown;
 
       try {
-        parsed = JSON.parse(decodeRawData(data));
+        parsedPayload = JSON.parse(decodeRawData(data));
       } catch {
         sendJson(ws, makeError('INVALID_JSON', 'Expected valid JSON payload.'));
         return;
       }
 
-      const forwarded = quickvisionClient.sendJson(parsed);
+      if (!isRecord(parsedPayload)) {
+        sendJson(ws, makeError('INVALID_PAYLOAD', 'Expected JSON object payload.'));
+        return;
+      }
+
+      if (parsedPayload.type !== 'frame') {
+        sendJson(ws, makeError('UNSUPPORTED_TYPE', 'Eva currently expects frame messages on /eye.'));
+        return;
+      }
+
+      const parsedFrame = FrameMessageSchema.safeParse(parsedPayload);
+      if (!parsedFrame.success) {
+        sendJson(ws, makeError('INVALID_FRAME', 'Invalid frame payload.', getOptionalFrameId(parsedPayload)));
+        return;
+      }
+
+      const frame = parsedFrame.data;
+
+      if (!quickvisionClient.isConnected()) {
+        sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.', frame.frame_id));
+        return;
+      }
+
+      frameRouter.set(frame.frame_id, ws);
+
+      const forwarded = quickvisionClient.sendJson(frame);
       if (!forwarded) {
-        sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.'));
+        frameRouter.delete(frame.frame_id);
+        sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.', frame.frame_id));
       }
     });
 
     ws.on('close', () => {
+      cleanupClientRoutes(ws, 'UI disconnect');
+
       if (activeUiClient === ws) {
         activeUiClient = null;
       }
     });
 
     ws.on('error', () => {
+      cleanupClientRoutes(ws, 'UI socket error');
+
       if (activeUiClient === ws) {
         activeUiClient = null;
       }
@@ -131,6 +225,12 @@ export function startServer(options: StartServerOptions): Server {
     console.log(`[eva] listening on http://localhost:${port}`);
     console.log(`[eva] websocket endpoint ws://localhost:${port}${EYE_PATH}`);
     console.log(`[eva] QuickVision target ${quickvisionClient.getUrl()}`);
+  });
+
+  server.on('close', () => {
+    frameRouter.clear();
+    quickvisionClient.disconnect();
+    wss.close();
   });
 
   return server;

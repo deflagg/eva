@@ -377,3 +377,49 @@
 
 ### Notes
 - This resolves the NumPy 2.x ABI/runtime warning/error from QuickVision.
+
+## Iteration 8 — Hardening: routing map + TTL + error handling
+
+**Status:** ✅ Completed (2026-02-16)
+
+### Completed
+- Implemented a real `FrameRouter` in Eva with `frame_id -> client` mapping and TTL eviction (default `5000ms`).
+- Added TTL-expiry logging for dropped/expired frame routes to avoid silent unbounded growth.
+- Wired route cleanup on UI disconnect/socket error so all pending `frame_id` entries for that client are removed.
+- Hardened Eva UI inbound handling:
+  - JSON parse validation (`INVALID_JSON`)
+  - object-shape validation (`INVALID_PAYLOAD`)
+  - message-type guard (`UNSUPPORTED_TYPE`)
+  - zod frame schema validation (`INVALID_FRAME`)
+- Hardened Eva QuickVision inbound handling with zod schema validation for `hello|detections|error` messages.
+- Added strict frame-scoped routing behavior:
+  - `detections` and frame-scoped `error` resolve through router map (`take + evict`)
+  - unmatched/expired frame responses are dropped with a warning log
+- Added QuickVision reconnect with exponential backoff in Eva (`250ms` doubling to `5000ms` cap).
+- Retained Iteration 4 single-client behavior (multi-client remains Iteration 9).
+- Updated `packages/eva/README.md` to document Iteration 8 behavior.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+
+### Manual test steps
+1. Start QuickVision:
+   - `cd packages/quickvision`
+   - `source .venv/bin/activate`
+   - `uvicorn app.main:app --reload --port 8000`
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+4. Open UI, start camera + streaming, confirm detections continue to arrive normally.
+5. Stop QuickVision and confirm Eva returns `QV_UNAVAILABLE` for new frames.
+6. Restart QuickVision and confirm Eva reconnects automatically (check Eva logs for reconnect backoff/success).
+7. With streaming active, close the UI tab and confirm Eva logs route cleanup (pending frame routes removed).
+
+### Notes
+- No dedicated automated test suite exists yet; verification remains build checks + manual end-to-end validation.
+- Iteration 9 will remove single-client restriction and use the same route map for concurrent clients.

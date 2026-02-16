@@ -1,11 +1,15 @@
 import WebSocket, { type RawData } from 'ws';
 
+const RECONNECT_INITIAL_DELAY_MS = 250;
+const RECONNECT_MAX_DELAY_MS = 5_000;
+
 export interface QuickVisionClientHandlers {
   onOpen?: () => void;
   onClose?: () => void;
   onError?: (error: Error) => void;
   onMessage?: (payload: unknown, raw: string) => void;
   onInvalidMessage?: (raw: string) => void;
+  onReconnectScheduled?: (delayMs: number) => void;
 }
 
 export interface QuickVisionClientOptions {
@@ -42,49 +46,91 @@ export function createQuickVisionClient(options: QuickVisionClientOptions): Quic
 
   let ws: WebSocket | null = null;
   let connected = false;
+  let shouldReconnect = true;
+  let reconnectDelayMs = RECONNECT_INITIAL_DELAY_MS;
+  let reconnectTimer: NodeJS.Timeout | null = null;
+
+  const clearReconnectTimer = (): void => {
+    if (!reconnectTimer) {
+      return;
+    }
+
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  };
+
+  const scheduleReconnect = (): void => {
+    if (!shouldReconnect || reconnectTimer || ws) {
+      return;
+    }
+
+    const delayMs = reconnectDelayMs;
+    handlers.onReconnectScheduled?.(delayMs);
+
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connectSocket();
+    }, delayMs);
+    reconnectTimer.unref?.();
+
+    reconnectDelayMs = Math.min(reconnectDelayMs * 2, RECONNECT_MAX_DELAY_MS);
+  };
+
+  const connectSocket = (): void => {
+    if (ws) {
+      return;
+    }
+
+    ws = new WebSocket(options.url);
+
+    ws.on('open', () => {
+      connected = true;
+      reconnectDelayMs = RECONNECT_INITIAL_DELAY_MS;
+      handlers.onOpen?.();
+    });
+
+    ws.on('close', () => {
+      connected = false;
+      ws = null;
+      handlers.onClose?.();
+      scheduleReconnect();
+    });
+
+    ws.on('error', (error) => {
+      handlers.onError?.(error);
+    });
+
+    ws.on('message', (data) => {
+      const raw = decodeRawData(data);
+
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        handlers.onMessage?.(parsed, raw);
+      } catch {
+        handlers.onInvalidMessage?.(raw);
+      }
+    });
+  };
 
   return {
     connect() {
-      if (ws) {
-        return;
-      }
-
-      ws = new WebSocket(options.url);
-
-      ws.on('open', () => {
-        connected = true;
-        handlers.onOpen?.();
-      });
-
-      ws.on('close', () => {
-        connected = false;
-        ws = null;
-        handlers.onClose?.();
-      });
-
-      ws.on('error', (error) => {
-        handlers.onError?.(error);
-      });
-
-      ws.on('message', (data) => {
-        const raw = decodeRawData(data);
-
-        try {
-          const parsed = JSON.parse(raw) as unknown;
-          handlers.onMessage?.(parsed, raw);
-        } catch {
-          handlers.onInvalidMessage?.(raw);
-        }
-      });
+      shouldReconnect = true;
+      clearReconnectTimer();
+      connectSocket();
     },
 
     disconnect() {
+      shouldReconnect = false;
+      clearReconnectTimer();
+
       if (!ws) {
         connected = false;
         return;
       }
 
       ws.close();
+      ws = null;
+      connected = false;
     },
 
     sendJson(payload: unknown): boolean {
