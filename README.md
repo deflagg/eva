@@ -56,4 +56,7 @@ npm run dev
 
 ## Current status
 
-Iteration 0 only scaffolds build/run structure and protocol docs. Functional WS routing/camera/inference is added in later iterations.
+- Iteration 0 complete: scaffolding + protocol docs/schema.
+- Iteration 1 complete: Eva `/eye` WebSocket endpoint with `hello` + JSON echo + parse-error responses.
+- Iteration 2 complete: UI connects to Eva, shows connection state, logs messages, and sends a test JSON payload.
+- QuickVision is still a scaffold and will be expanded in upcoming iterations.
