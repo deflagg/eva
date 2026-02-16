@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .motion import MotionEventEngine, MotionSettings
 from .protocol import DetectionsMessage, EventEntry
 from .roi import RoiSettings, box_centroid, line_side, point_in_region
 
@@ -18,12 +19,14 @@ class TrackEventState:
 
 
 class DetectionEventEngine:
-    def __init__(self, roi_settings: RoiSettings):
+    def __init__(self, roi_settings: RoiSettings, motion_settings: MotionSettings):
         self._roi_settings = roi_settings
+        self._motion_settings = motion_settings
         self._tracks: dict[int, TrackEventState] = {}
+        self._motion_engine = MotionEventEngine(motion_settings)
 
     def process(self, detections_message: DetectionsMessage) -> list[EventEntry]:
-        if not self._roi_settings.enabled:
+        if not self._roi_settings.enabled and not self._motion_settings.enabled:
             return []
 
         events: list[EventEntry] = []
@@ -38,31 +41,46 @@ class DetectionEventEngine:
                 continue
 
             seen_track_ids.add(track_id)
-
-            state = self._tracks.get(track_id)
-            if state is None:
-                state = TrackEventState(last_seen_ts_ms=detections_message.ts_ms)
-                self._tracks[track_id] = state
-
-            state.last_seen_ts_ms = detections_message.ts_ms
-
             point = box_centroid(detection.box)
-            self._append_region_events(
-                events=events,
-                track_id=track_id,
-                ts_ms=detections_message.ts_ms,
-                point=point,
-                state=state,
-            )
-            self._append_line_events(
-                events=events,
-                track_id=track_id,
-                ts_ms=detections_message.ts_ms,
-                point=point,
-                state=state,
-            )
 
-        self._evict_stale_track_state(now_ts_ms=detections_message.ts_ms)
+            if self._roi_settings.enabled:
+                state = self._tracks.get(track_id)
+                if state is None:
+                    state = TrackEventState(last_seen_ts_ms=detections_message.ts_ms)
+                    self._tracks[track_id] = state
+
+                state.last_seen_ts_ms = detections_message.ts_ms
+
+                self._append_region_events(
+                    events=events,
+                    track_id=track_id,
+                    ts_ms=detections_message.ts_ms,
+                    point=point,
+                    state=state,
+                )
+                self._append_line_events(
+                    events=events,
+                    track_id=track_id,
+                    ts_ms=detections_message.ts_ms,
+                    point=point,
+                    state=state,
+                )
+
+            if self._motion_settings.enabled:
+                events.extend(
+                    self._motion_engine.process_sample(
+                        track_id=track_id,
+                        ts_ms=detections_message.ts_ms,
+                        point=point,
+                    )
+                )
+
+        if self._roi_settings.enabled:
+            self._evict_stale_track_state(now_ts_ms=detections_message.ts_ms)
+
+        if self._motion_settings.enabled:
+            self._motion_engine.evict_stale(now_ts_ms=detections_message.ts_ms)
+
         return events
 
     def _append_region_events(

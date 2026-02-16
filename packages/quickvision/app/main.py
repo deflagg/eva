@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from .events import DetectionEventEngine
 from .insights import InsightBuffer, InsightError, InsightSettings, load_insight_settings
+from .motion import MotionSettings, load_motion_settings
 from .protocol import BinaryFrameParseError, CommandMessage, decode_binary_frame_envelope, make_error, make_hello
 from .roi import RoiSettings, load_roi_settings
 from .tracking import TrackingSettings, load_tracking_settings, should_use_latest_pending_slot
@@ -26,12 +27,13 @@ app = FastAPI(title="quickvision", version="0.1.0")
 _insight_settings: InsightSettings | None = None
 _tracking_settings: TrackingSettings | None = None
 _roi_settings: RoiSettings | None = None
+_motion_settings: MotionSettings | None = None
 
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    """Fail fast if YOLO/tracking/ROI/insight config is missing/invalid."""
-    global _insight_settings, _tracking_settings, _roi_settings
+    """Fail fast if YOLO/tracking/ROI/motion/insight config is missing/invalid."""
+    global _insight_settings, _tracking_settings, _roi_settings, _motion_settings
 
     try:
         load_model()
@@ -50,6 +52,11 @@ async def on_startup() -> None:
 
     try:
         _roi_settings = load_roi_settings()
+    except Exception as exc:
+        raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
+
+    try:
+        _motion_settings = load_motion_settings()
     except Exception as exc:
         raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
 
@@ -78,6 +85,15 @@ async def on_startup() -> None:
         f"dwell_default_threshold_ms={_roi_settings.dwell_default_threshold_ms} "
         f"dwell_region_overrides={len(_roi_settings.dwell_region_threshold_ms)}"
     )
+    print(
+        "[quickvision] motion config: "
+        f"enabled={_motion_settings.enabled} "
+        f"history_frames={_motion_settings.history_frames} "
+        f"sudden_motion_speed_px_s={_motion_settings.sudden_motion_speed_px_s} "
+        f"stop_speed_px_s={_motion_settings.stop_speed_px_s} "
+        f"stop_duration_ms={_motion_settings.stop_duration_ms} "
+        f"event_cooldown_ms={_motion_settings.event_cooldown_ms}"
+    )
 
 
 @app.get("/health")
@@ -94,6 +110,12 @@ async def health() -> dict[str, object]:
         "roi_lines": len(_roi_settings.lines) if _roi_settings is not None else 0,
         "roi_dwell_default_threshold_ms": _roi_settings.dwell_default_threshold_ms if _roi_settings is not None else 0,
         "roi_dwell_region_overrides": len(_roi_settings.dwell_region_threshold_ms) if _roi_settings is not None else 0,
+        "motion_enabled": _motion_settings.enabled if _motion_settings is not None else False,
+        "motion_history_frames": _motion_settings.history_frames if _motion_settings is not None else 0,
+        "motion_sudden_motion_speed_px_s": _motion_settings.sudden_motion_speed_px_s if _motion_settings is not None else 0,
+        "motion_stop_speed_px_s": _motion_settings.stop_speed_px_s if _motion_settings is not None else 0,
+        "motion_stop_duration_ms": _motion_settings.stop_duration_ms if _motion_settings is not None else 0,
+        "motion_event_cooldown_ms": _motion_settings.event_cooldown_ms if _motion_settings is not None else 0,
     }
 
 
@@ -104,10 +126,11 @@ async def infer_socket(websocket: WebSocket) -> None:
     insight_settings = _insight_settings if _insight_settings is not None else load_insight_settings()
     tracking_settings = _tracking_settings if _tracking_settings is not None else load_tracking_settings()
     roi_settings = _roi_settings if _roi_settings is not None else load_roi_settings()
+    motion_settings = _motion_settings if _motion_settings is not None else load_motion_settings()
     use_latest_pending_slot = should_use_latest_pending_slot(tracking_settings)
 
     insight_buffer = InsightBuffer(insight_settings)
-    detection_event_engine = DetectionEventEngine(roi_settings)
+    detection_event_engine = DetectionEventEngine(roi_settings, motion_settings)
 
     send_lock = asyncio.Lock()
 

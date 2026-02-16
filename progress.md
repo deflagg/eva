@@ -926,3 +926,70 @@
 ### Notes
 - Loitering depends on stable `track_id` continuity; keep tracking enabled for reliable behavior.
 - No dedicated automated detector test suite exists yet; verification remains build checks plus manual runtime validation.
+
+## Iteration 17 — Sudden motion / stop detectors (per-track kinematics)
+
+**Status:** ✅ Completed (2026-02-16)
+
+### Completed
+- Added motion settings + kinematics detector module: `packages/quickvision/app/motion.py`.
+  - loads and validates Dynaconf motion keys:
+    - `motion.enabled`
+    - `motion.history_frames`
+    - `motion.sudden_motion_speed_px_s`
+    - `motion.stop_speed_px_s`
+    - `motion.stop_duration_ms`
+    - `motion.event_cooldown_ms`
+  - enforces fail-fast config validation for invalid/non-numeric/negative settings.
+  - maintains per-track centroid history (bounded by `history_frames`) and computes motion metrics.
+- Implemented per-track kinematics event logic in `motion.py`:
+  - emits `sudden_motion` when per-track speed (or abrupt speed delta proxy) crosses threshold.
+    - event data shape: `{"speed_px_s": <number>}`
+  - emits `track_stop` when speed stays below stop threshold for configured duration.
+    - event data shape: `{"stopped_ms": <number>}`
+  - applies per-track per-event cooldown (`event_cooldown_ms`) to reduce event spam.
+  - includes stale track-state eviction to avoid unbounded memory growth.
+- Updated detector orchestration in `packages/quickvision/app/events.py`:
+  - integrated `MotionEventEngine` alongside existing ROI/line/dwell detectors.
+  - `DetectionEventEngine` now supports ROI-only, motion-only, or combined operation.
+- Updated QuickVision startup/runtime wiring in `packages/quickvision/app/main.py`:
+  - startup now loads motion settings with fail-fast behavior.
+  - startup logs include motion configuration summary.
+  - `/health` now includes motion configuration fields.
+  - frame processing now emits combined ROI + motion events in `detections.events[]`.
+- Updated QuickVision committed defaults in `packages/quickvision/settings.yaml` with `motion` block.
+- Updated docs:
+  - `packages/quickvision/README.md` (Iteration 17 behavior + motion config keys)
+  - root `README.md` status line.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/vision-agent && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+
+### Manual test steps
+1. Add/adjust motion settings in `packages/quickvision/settings.local.yaml`:
+   ```yaml
+   motion:
+     enabled: true
+     history_frames: 8
+     sudden_motion_speed_px_s: 250
+     stop_speed_px_s: 20
+     stop_duration_ms: 1500
+     event_cooldown_ms: 1500
+   ```
+2. Start QuickVision/Eva/UI and begin camera streaming.
+3. For `sudden_motion`:
+   - move quickly across frame and confirm `events[]` includes:
+     - `{"name":"sudden_motion", ..., "data":{"speed_px_s":...}}`
+4. For `track_stop`:
+   - move, then remain mostly still for > `stop_duration_ms`.
+   - confirm a `track_stop` event with `stopped_ms` appears.
+5. Continue standing still and confirm cooldown behavior prevents rapid repeated events.
+6. Move again, then stop again to confirm stop event can be emitted on a new stop phase.
+
+### Notes
+- Motion detectors depend on stable `track_id` continuity; tracking should remain enabled for best results.
+- `track_resume` remains optional and is intentionally not implemented in this iteration.
+- No dedicated automated detector test suite exists yet; verification remains build checks plus manual runtime validation.

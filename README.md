@@ -87,4 +87,4 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 16** (QuickVision loitering detector via `roi_dwell` events with per-ROI dwell thresholds and once-per-track-per-ROI emission semantics).
+Implemented through **Iteration 17** (QuickVision per-track kinematics detectors emitting `sudden_motion` and `track_stop` events with configurable thresholds/history/cooldown).

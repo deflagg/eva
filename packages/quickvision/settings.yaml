@@ -21,6 +21,14 @@ roi:
     default_threshold_ms: 5000
     region_threshold_ms: {}
 
+motion:
+  enabled: true
+  history_frames: 8
+  sudden_motion_speed_px_s: 250
+  stop_speed_px_s: 20
+  stop_duration_ms: 1500
+  event_cooldown_ms: 1500
+
 insights:
   enabled: true
   vision_agent_url: http://localhost:8790/insight
