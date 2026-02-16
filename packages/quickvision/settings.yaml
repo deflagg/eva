@@ -6,6 +6,12 @@ yolo:
   model_source: yolo26n.pt
   device: auto
 
+tracking:
+  enabled: true
+  persist: true
+  tracker: bytetrack.yaml
+  busy_policy: latest
+
 insights:
   enabled: true
   vision_agent_url: http://localhost:8790/insight

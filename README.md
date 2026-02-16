@@ -87,4 +87,4 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 13** (QuickVision insight plumbing: frame ring buffer, `insight_test` command trigger, VisionAgent HTTP call, and insight relay).
+Implemented through **Iteration 14** (QuickVision tracking mode with `track(persist=true)`, per-detection `track_id`, and sequential per-connection inference with latest-frame-wins busy policy when tracking is enabled).

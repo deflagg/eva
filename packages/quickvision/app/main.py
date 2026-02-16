@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from .insights import InsightBuffer, InsightError, InsightSettings, load_insight_settings
 from .protocol import BinaryFrameParseError, CommandMessage, decode_binary_frame_envelope, make_error, make_hello
+from .tracking import TrackingSettings, load_tracking_settings, should_use_latest_pending_slot
 from .yolo import (
     FrameDecodeError,
     InferenceFrame,
@@ -21,12 +22,13 @@ from .yolo import (
 app = FastAPI(title="quickvision", version="0.1.0")
 
 _insight_settings: InsightSettings | None = None
+_tracking_settings: TrackingSettings | None = None
 
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    """Fail fast if YOLO model config is missing/invalid."""
-    global _insight_settings
+    """Fail fast if YOLO/tracking/insight config is missing/invalid."""
+    global _insight_settings, _tracking_settings
 
     try:
         load_model()
@@ -35,6 +37,11 @@ async def on_startup() -> None:
 
     try:
         _insight_settings = load_insight_settings()
+    except Exception as exc:
+        raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
+
+    try:
+        _tracking_settings = load_tracking_settings()
     except Exception as exc:
         raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
 
@@ -47,6 +54,13 @@ async def on_startup() -> None:
         f"pre_frames={_insight_settings.pre_frames} "
         f"post_frames={_insight_settings.post_frames}"
     )
+    print(
+        "[quickvision] tracking config: "
+        f"enabled={_tracking_settings.enabled} "
+        f"persist={_tracking_settings.persist} "
+        f"tracker={_tracking_settings.tracker} "
+        f"busy_policy={_tracking_settings.busy_policy}"
+    )
 
 
 @app.get("/health")
@@ -56,6 +70,8 @@ async def health() -> dict[str, object]:
         "status": "ok",
         "model_loaded": is_model_loaded(),
         "insights_enabled": _insight_settings.enabled if _insight_settings is not None else False,
+        "tracking_enabled": _tracking_settings.enabled if _tracking_settings is not None else False,
+        "tracking_busy_policy": _tracking_settings.busy_policy if _tracking_settings is not None else None,
     }
 
 
@@ -64,6 +80,9 @@ async def infer_socket(websocket: WebSocket) -> None:
     await websocket.accept()
 
     insight_settings = _insight_settings if _insight_settings is not None else load_insight_settings()
+    tracking_settings = _tracking_settings if _tracking_settings is not None else load_tracking_settings()
+    use_latest_pending_slot = should_use_latest_pending_slot(tracking_settings)
+
     insight_buffer = InsightBuffer(insight_settings)
 
     send_lock = asyncio.Lock()
@@ -78,7 +97,9 @@ async def infer_socket(websocket: WebSocket) -> None:
 
     await send_payload(make_hello("quickvision"))
 
-    inference_task: asyncio.Task[None] | None = None
+    pending_frame: InferenceFrame | None = None
+    pending_frame_event = asyncio.Event()
+    inference_running = False
     insight_task: asyncio.Task[None] | None = None
 
     async def process_frame(frame: InferenceFrame) -> None:
@@ -98,6 +119,24 @@ async def infer_socket(websocket: WebSocket) -> None:
             await send_payload(make_error(exc.code, str(exc)))
         except Exception as exc:
             await send_payload(make_error("INSIGHT_ERROR", f"Insight test failed: {exc}"))
+
+    async def inference_worker() -> None:
+        nonlocal inference_running, pending_frame
+
+        while True:
+            await pending_frame_event.wait()
+            pending_frame_event.clear()
+
+            while pending_frame is not None:
+                frame = pending_frame
+                pending_frame = None
+                inference_running = True
+                try:
+                    await process_frame(frame)
+                finally:
+                    inference_running = False
+
+    inference_worker_task = asyncio.create_task(inference_worker())
 
     try:
         while True:
@@ -176,7 +215,12 @@ async def infer_socket(websocket: WebSocket) -> None:
                 image_bytes=envelope.image_payload,
             )
 
-            if inference_task is not None and not inference_task.done():
+            if use_latest_pending_slot:
+                pending_frame = frame
+                pending_frame_event.set()
+                continue
+
+            if inference_running or pending_frame is not None:
                 await send_payload(
                     make_error(
                         "BUSY",
@@ -186,14 +230,15 @@ async def infer_socket(websocket: WebSocket) -> None:
                 )
                 continue
 
-            inference_task = asyncio.create_task(process_frame(frame))
+            pending_frame = frame
+            pending_frame_event.set()
     except WebSocketDisconnect:
         pass
     finally:
-        if inference_task and not inference_task.done():
-            inference_task.cancel()
+        if inference_worker_task and not inference_worker_task.done():
+            inference_worker_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await inference_task
+                await inference_worker_task
 
         if insight_task and not insight_task.done():
             insight_task.cancel()

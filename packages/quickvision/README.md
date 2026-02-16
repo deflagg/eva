@@ -2,7 +2,7 @@
 
 Python daemon that hosts YOLO inference and (optional) insight triggering.
 
-## Current behavior (Iteration 13)
+## Current behavior (Iteration 14)
 
 - HTTP health endpoint at `/health`
 - WebSocket endpoint at `/infer`
@@ -12,7 +12,11 @@ Python daemon that hosts YOLO inference and (optional) insight triggering.
   - decodes raw JPEG bytes with Pillow + numpy
   - runs YOLO inference in a worker thread (`asyncio.to_thread(...)`)
   - returns protocol `detections` with `model: "yoloe-26"`
-  - if inference already running for that connection, drops new frame with `error.code = "BUSY"`
+  - supports optional tracking mode using Ultralytics `track(..., persist=true)`
+    - includes `track_id` on detections when tracker IDs are available
+  - enforces sequential per-connection inference pipeline
+    - when tracking is enabled and `tracking.busy_policy=latest`, uses a single **latest-frame-wins** pending slot
+    - otherwise retains BUSY-drop behavior (`error.code = "BUSY"`)
   - supports temporary debug command payload:
     - `{"type":"command","v":1,"name":"insight_test"}`
 - Insight plumbing (manual trigger path):
@@ -35,7 +39,11 @@ Configured keys currently used:
 - `server.port`
 - `yolo.model_source`
 - `yolo.device` (`auto` | `cpu` | `cuda`)
-- `insights.enabled` (default `false`)
+- `tracking.enabled` (default `false`)
+- `tracking.persist` (default `true`)
+- `tracking.tracker` (default `bytetrack.yaml`)
+- `tracking.busy_policy` (`drop` | `latest`, default `latest`)
+- `insights.enabled` (default `true`)
 - `insights.vision_agent_url`
 - `insights.timeout_ms`
 - `insights.max_frames` (hard-capped at `6`)
@@ -49,6 +57,8 @@ QuickVision fails fast at startup if:
 
 - `yolo.model_source` cannot be loaded/downloaded
 - `yolo.device` is invalid
+- `tracking.busy_policy` is invalid
+- `tracking.tracker` is invalid
 - `insights.vision_agent_url` is invalid
 
 ## Run (dev)

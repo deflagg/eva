@@ -11,6 +11,7 @@ from ultralytics import YOLO
 
 from .protocol import DetectionEntry, DetectionsMessage
 from .settings import settings
+from .tracking import load_tracking_settings
 
 MODEL_LABEL = "yoloe-26"
 DEFAULT_MODEL_SOURCE = "yolo26n.pt"
@@ -77,6 +78,12 @@ def load_model() -> LoadedYoloModel:
     except Exception as exc:
         raise YoloConfigError(f"Failed to load YOLO model source '{model_source}': {exc}") from exc
 
+    try:
+        # Validate tracking configuration once at startup (fail-fast on invalid values).
+        load_tracking_settings()
+    except Exception as exc:
+        raise YoloConfigError(str(exc)) from exc
+
     _loaded_model = LoadedYoloModel(
         model=model,
         model_source=model_source,
@@ -131,10 +138,21 @@ def _clamp(value: float, lower: float, upper: float) -> float:
 
 def _run_inference_sync(frame: InferenceFrame) -> DetectionsMessage:
     model_state = get_loaded_model()
+    tracking_settings = load_tracking_settings()
     image_np = _decode_frame_to_numpy(frame)
 
     predict_device = None if model_state.device == "auto" else model_state.device
-    results = model_state.model.predict(source=image_np, verbose=False, device=predict_device)
+
+    if tracking_settings.enabled:
+        results = model_state.model.track(
+            source=image_np,
+            verbose=False,
+            device=predict_device,
+            persist=tracking_settings.persist,
+            tracker=tracking_settings.tracker,
+        )
+    else:
+        results = model_state.model.predict(source=image_np, verbose=False, device=predict_device)
 
     detections: list[DetectionEntry] = []
 
@@ -148,7 +166,25 @@ def _run_inference_sync(frame: InferenceFrame) -> DetectionsMessage:
             conf_list = boxes.conf.tolist()
             cls_list = boxes.cls.tolist()
 
-            for raw_cls, raw_conf, raw_xyxy in zip(cls_list, conf_list, xyxy_list, strict=False):
+            track_id_list: list[int | None]
+            raw_track_ids = getattr(boxes, "id", None)
+            if tracking_settings.enabled and raw_track_ids is not None:
+                track_id_list = []
+                for raw_track_id in raw_track_ids.tolist():
+                    if raw_track_id is None:
+                        track_id_list.append(None)
+                        continue
+
+                    try:
+                        track_id_list.append(int(raw_track_id))
+                    except (TypeError, ValueError):
+                        track_id_list.append(None)
+            else:
+                track_id_list = [None] * len(cls_list)
+
+            for index, (raw_cls, raw_conf, raw_xyxy) in enumerate(
+                zip(cls_list, conf_list, xyxy_list, strict=False)
+            ):
                 cls_id = int(raw_cls)
                 conf = _clamp(float(raw_conf), 0.0, 1.0)
 
@@ -163,12 +199,15 @@ def _run_inference_sync(frame: InferenceFrame) -> DetectionsMessage:
                 x2 = _clamp(max(x1_raw, x2_raw), 0.0, float(frame.width))
                 y2 = _clamp(max(y1_raw, y2_raw), 0.0, float(frame.height))
 
+                track_id = track_id_list[index] if index < len(track_id_list) else None
+
                 detections.append(
                     DetectionEntry(
                         cls=cls_id,
                         name=_resolve_class_name(names, cls_id),
                         conf=conf,
                         box=(x1, y1, x2, y2),
+                        track_id=track_id,
                     )
                 )
 

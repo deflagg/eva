@@ -724,3 +724,59 @@
 ### Notes
 - This iteration intentionally uses a manual debug trigger (`insight_test`) and does not yet auto-trigger from detector events.
 - Insight clip payload is still full-resolution frame data; downsampling is planned for Iteration 21.
+
+## Iteration 14 — Tracking: Ultralytics track(persist=true) + sequential pipeline (tracking continuity guardrail)
+
+**Status:** ✅ Completed (2026-02-16)
+
+### Completed
+- Added new QuickVision tracking config module: `packages/quickvision/app/tracking.py`.
+  - validates and loads:
+    - `tracking.enabled`
+    - `tracking.persist`
+    - `tracking.tracker`
+    - `tracking.busy_policy` (`drop|latest`)
+- Updated QuickVision startup (`packages/quickvision/app/main.py`) to fail fast on invalid tracking config and log active tracking settings.
+- Updated YOLO inference path (`packages/quickvision/app/yolo.py`) to support tracking mode:
+  - when `tracking.enabled=true`, runs `model.track(..., persist=..., tracker=...)`
+  - continues using predict mode when tracking is disabled
+  - maps tracker IDs from `boxes.id` to optional protocol `detection.track_id`.
+- Reworked QuickVision per-connection inference flow (`packages/quickvision/app/main.py`) into a sequential single-worker pipeline.
+- Implemented `busy_policy=latest` behavior (when tracking is enabled):
+  - maintains a one-slot latest-frame-wins pending frame
+  - overwrites pending frame while inference is running
+  - processes pending frame immediately after current inference completes
+- Kept existing BUSY-drop behavior when tracking is disabled or `busy_policy=drop`.
+- Added default tracking settings in `packages/quickvision/settings.yaml`.
+- Updated docs:
+  - `packages/quickvision/README.md`
+  - root `README.md`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/vision-agent && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+
+### Manual test steps
+1. Enable tracking locally:
+   - create/edit `packages/quickvision/settings.local.yaml`:
+     ```yaml
+     tracking:
+       enabled: true
+       persist: true
+       tracker: bytetrack.yaml
+       busy_policy: latest
+     ```
+2. Start QuickVision:
+   - `cd packages/quickvision`
+   - `source .venv/bin/activate`
+   - `python -m app.run`
+3. Start Eva/UI and stream frames from UI.
+4. Confirm detections include stable-ish `track_id` values for moving objects.
+5. While streaming, confirm QuickVision no longer emits BUSY spam under `busy_policy=latest` and continues processing newest frames.
+6. Switch to `busy_policy: drop` (or disable tracking) and confirm prior BUSY-drop behavior is restored.
+
+### Notes
+- No dedicated automated test suite exists yet; verification remains build checks plus manual runtime validation.
+- This iteration intentionally does not introduce detector/event logic beyond track-id continuity plumbing.
