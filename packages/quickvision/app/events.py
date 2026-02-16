@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .collision import CollisionEventEngine, CollisionSample, CollisionSettings
 from .motion import MotionEventEngine, MotionSettings
 from .protocol import DetectionsMessage, EventEntry
 from .roi import RoiSettings, box_centroid, line_side, point_in_region
@@ -19,18 +20,26 @@ class TrackEventState:
 
 
 class DetectionEventEngine:
-    def __init__(self, roi_settings: RoiSettings, motion_settings: MotionSettings):
+    def __init__(
+        self,
+        roi_settings: RoiSettings,
+        motion_settings: MotionSettings,
+        collision_settings: CollisionSettings,
+    ):
         self._roi_settings = roi_settings
         self._motion_settings = motion_settings
+        self._collision_settings = collision_settings
         self._tracks: dict[int, TrackEventState] = {}
         self._motion_engine = MotionEventEngine(motion_settings)
+        self._collision_engine = CollisionEventEngine(collision_settings)
 
     def process(self, detections_message: DetectionsMessage) -> list[EventEntry]:
-        if not self._roi_settings.enabled and not self._motion_settings.enabled:
+        if not self._roi_settings.enabled and not self._motion_settings.enabled and not self._collision_settings.enabled:
             return []
 
         events: list[EventEntry] = []
         seen_track_ids: set[int] = set()
+        collision_samples: list[CollisionSample] = []
 
         for detection in detections_message.detections:
             track_id = detection.track_id
@@ -42,6 +51,15 @@ class DetectionEventEngine:
 
             seen_track_ids.add(track_id)
             point = box_centroid(detection.box)
+
+            if self._collision_settings.enabled:
+                collision_samples.append(
+                    CollisionSample(
+                        track_id=track_id,
+                        class_name=detection.name,
+                        point=point,
+                    )
+                )
 
             if self._roi_settings.enabled:
                 state = self._tracks.get(track_id)
@@ -74,6 +92,15 @@ class DetectionEventEngine:
                         point=point,
                     )
                 )
+
+        if self._collision_settings.enabled:
+            events.extend(
+                self._collision_engine.process_samples(
+                    ts_ms=detections_message.ts_ms,
+                    samples=collision_samples,
+                )
+            )
+            self._collision_engine.evict_stale(now_ts_ms=detections_message.ts_ms)
 
         if self._roi_settings.enabled:
             self._evict_stale_track_state(now_ts_ms=detections_message.ts_ms)

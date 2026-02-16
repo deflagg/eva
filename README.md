@@ -87,4 +87,4 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 17** (QuickVision per-track kinematics detectors emitting `sudden_motion` and `track_stop` events with configurable thresholds/history/cooldown).
+Implemented through **Iteration 18** (QuickVision near-collision detector emitting `near_collision` events using eligible class pairs, centroid distance, closing speed, and per-pair cooldown).

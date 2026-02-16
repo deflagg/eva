@@ -993,3 +993,68 @@
 - Motion detectors depend on stable `track_id` continuity; tracking should remain enabled for best results.
 - `track_resume` remains optional and is intentionally not implemented in this iteration.
 - No dedicated automated detector test suite exists yet; verification remains build checks plus manual runtime validation.
+
+## Iteration 18 — Near-collision detector (pair distance + closing speed)
+
+**Status:** ✅ Completed (2026-02-16)
+
+### Completed
+- Added new collision settings + detector module: `packages/quickvision/app/collision.py`.
+  - loads and validates Dynaconf collision keys:
+    - `collision.enabled`
+    - `collision.pairs` (list of `[classA, classB]` class-name pairs)
+    - `collision.distance_px`
+    - `collision.closing_speed_px_s`
+    - `collision.pair_cooldown_ms`
+  - enforces fail-fast config validation for invalid pair shapes/types and invalid numeric thresholds.
+  - normalizes pair matching as order-insensitive class pairs.
+  - maintains per-pair state (`track_id` pair) with stale-state eviction to avoid unbounded growth.
+  - computes centroid distance + closing speed (`delta_distance / delta_time`) and emits `near_collision` when both thresholds are met.
+  - applies per-pair event cooldown to suppress repeated spam from repeated close frames.
+- Updated detector orchestration in `packages/quickvision/app/events.py`:
+  - integrated `CollisionEventEngine` alongside existing ROI and motion engines.
+  - collision processing now runs on unique tracked detections per frame.
+  - `DetectionEventEngine` now supports ROI-only, motion-only, collision-only, or combined operation.
+- Updated QuickVision startup/runtime wiring in `packages/quickvision/app/main.py`:
+  - startup now loads collision settings with fail-fast behavior.
+  - startup logs include collision configuration summary.
+  - `/health` now includes collision configuration fields.
+  - frame processing now emits combined ROI + motion + collision events in `detections.events[]`.
+- Updated QuickVision committed defaults in `packages/quickvision/settings.yaml` with a `collision` block.
+- Updated docs:
+  - `packages/quickvision/README.md` (Iteration 18 behavior + collision config keys)
+  - root `README.md` status line.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/vision-agent && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+- Collision logic smoke-check via local QuickVision venv script confirms:
+  - event emitted when distance threshold + closing-speed threshold are crossed
+  - cooldown suppresses immediate repeats.
+
+### Manual test steps
+1. Add/adjust collision settings in `packages/quickvision/settings.local.yaml`:
+   ```yaml
+   collision:
+     enabled: true
+     pairs:
+       - [person, person]
+     distance_px: 90
+     closing_speed_px_s: 120
+     pair_cooldown_ms: 1500
+   ```
+2. Start QuickVision/Eva/UI and begin camera streaming.
+3. Move two eligible tracked objects quickly toward each other until within `distance_px`.
+4. Confirm `events[]` includes a `near_collision` entry with data:
+   - `a_track_id`, `b_track_id`
+   - `a_class`, `b_class`
+   - `distance_px`
+   - `closing_speed_px_s`
+5. Keep objects close across repeated frames and confirm rapid repeats are suppressed by `pair_cooldown_ms`.
+
+### Notes
+- Near-collision detector depends on stable `track_id` continuity; tracking should remain enabled for reliable behavior.
+- Class matching is order-insensitive and name-based (e.g. `[person, bicycle]` matches either direction).
+- No dedicated automated detector test suite exists yet; verification remains build checks plus manual/runtime validation.

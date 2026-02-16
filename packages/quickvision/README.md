@@ -2,7 +2,7 @@
 
 Python daemon that hosts YOLO inference and (optional) insight triggering.
 
-## Current behavior (Iteration 17)
+## Current behavior (Iteration 18)
 
 - HTTP health endpoint at `/health`
 - WebSocket endpoint at `/infer`
@@ -23,6 +23,7 @@ Python daemon that hosts YOLO inference and (optional) insight triggering.
     - `roi_dwell` once per track-per-ROI after dwell threshold is reached
     - `sudden_motion` from per-track kinematics thresholding
     - `track_stop` when per-track speed remains below threshold for configured duration
+    - `near_collision` when an eligible tracked pair is both close and rapidly closing
   - supports temporary debug command payload:
     - `{"type":"command","v":1,"name":"insight_test"}`
 - Insight plumbing (manual trigger path):
@@ -63,6 +64,11 @@ Configured keys currently used:
 - `motion.stop_speed_px_s`
 - `motion.stop_duration_ms`
 - `motion.event_cooldown_ms`
+- `collision.enabled` (default `true`)
+- `collision.pairs` (list of `[classA, classB]` pairs)
+- `collision.distance_px`
+- `collision.closing_speed_px_s`
+- `collision.pair_cooldown_ms`
 - `insights.enabled` (default `true`)
 - `insights.vision_agent_url`
 - `insights.timeout_ms`
@@ -83,6 +89,7 @@ QuickVision fails fast at startup if:
 - `roi.regions` / `roi.lines` contain invalid geometry
 - ROI dwell settings are invalid (negative/non-integer threshold or unknown region override)
 - motion settings are invalid (history/threshold/cooldown must be valid numeric values)
+- collision settings are invalid (pairs/thresholds/cooldown must be valid values)
 - `insights.vision_agent_url` is invalid
 
 ## Run (dev)

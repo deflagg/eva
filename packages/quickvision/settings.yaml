@@ -29,6 +29,14 @@ motion:
   stop_duration_ms: 1500
   event_cooldown_ms: 1500
 
+collision:
+  enabled: true
+  pairs:
+    - [person, person]
+  distance_px: 90
+  closing_speed_px_s: 120
+  pair_cooldown_ms: 1500
+
 insights:
   enabled: true
   vision_agent_url: http://localhost:8790/insight

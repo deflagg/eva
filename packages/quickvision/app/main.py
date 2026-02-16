@@ -7,6 +7,7 @@ import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from .collision import CollisionSettings, load_collision_settings
 from .events import DetectionEventEngine
 from .insights import InsightBuffer, InsightError, InsightSettings, load_insight_settings
 from .motion import MotionSettings, load_motion_settings
@@ -28,12 +29,13 @@ _insight_settings: InsightSettings | None = None
 _tracking_settings: TrackingSettings | None = None
 _roi_settings: RoiSettings | None = None
 _motion_settings: MotionSettings | None = None
+_collision_settings: CollisionSettings | None = None
 
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    """Fail fast if YOLO/tracking/ROI/motion/insight config is missing/invalid."""
-    global _insight_settings, _tracking_settings, _roi_settings, _motion_settings
+    """Fail fast if YOLO/tracking/ROI/motion/collision/insight config is missing/invalid."""
+    global _insight_settings, _tracking_settings, _roi_settings, _motion_settings, _collision_settings
 
     try:
         load_model()
@@ -57,6 +59,11 @@ async def on_startup() -> None:
 
     try:
         _motion_settings = load_motion_settings()
+    except Exception as exc:
+        raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
+
+    try:
+        _collision_settings = load_collision_settings()
     except Exception as exc:
         raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
 
@@ -94,6 +101,14 @@ async def on_startup() -> None:
         f"stop_duration_ms={_motion_settings.stop_duration_ms} "
         f"event_cooldown_ms={_motion_settings.event_cooldown_ms}"
     )
+    print(
+        "[quickvision] collision config: "
+        f"enabled={_collision_settings.enabled} "
+        f"pairs={len(_collision_settings.pairs)} "
+        f"distance_px={_collision_settings.distance_px} "
+        f"closing_speed_px_s={_collision_settings.closing_speed_px_s} "
+        f"pair_cooldown_ms={_collision_settings.pair_cooldown_ms}"
+    )
 
 
 @app.get("/health")
@@ -116,6 +131,11 @@ async def health() -> dict[str, object]:
         "motion_stop_speed_px_s": _motion_settings.stop_speed_px_s if _motion_settings is not None else 0,
         "motion_stop_duration_ms": _motion_settings.stop_duration_ms if _motion_settings is not None else 0,
         "motion_event_cooldown_ms": _motion_settings.event_cooldown_ms if _motion_settings is not None else 0,
+        "collision_enabled": _collision_settings.enabled if _collision_settings is not None else False,
+        "collision_pairs": len(_collision_settings.pairs) if _collision_settings is not None else 0,
+        "collision_distance_px": _collision_settings.distance_px if _collision_settings is not None else 0,
+        "collision_closing_speed_px_s": _collision_settings.closing_speed_px_s if _collision_settings is not None else 0,
+        "collision_pair_cooldown_ms": _collision_settings.pair_cooldown_ms if _collision_settings is not None else 0,
     }
 
 
@@ -127,10 +147,11 @@ async def infer_socket(websocket: WebSocket) -> None:
     tracking_settings = _tracking_settings if _tracking_settings is not None else load_tracking_settings()
     roi_settings = _roi_settings if _roi_settings is not None else load_roi_settings()
     motion_settings = _motion_settings if _motion_settings is not None else load_motion_settings()
+    collision_settings = _collision_settings if _collision_settings is not None else load_collision_settings()
     use_latest_pending_slot = should_use_latest_pending_slot(tracking_settings)
 
     insight_buffer = InsightBuffer(insight_settings)
-    detection_event_engine = DetectionEventEngine(roi_settings, motion_settings)
+    detection_event_engine = DetectionEventEngine(roi_settings, motion_settings, collision_settings)
 
     send_lock = asyncio.Lock()
 
