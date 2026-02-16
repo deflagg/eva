@@ -1,0 +1,20 @@
+# Node dependencies
+node_modules/
+packages/*/node_modules/
+
+# Build output
+packages/*/dist/
+packages/ui/*.tsbuildinfo
+packages/ui/vite.config.js
+packages/ui/vite.config.d.ts
+
+# Python
+packages/quickvision/.venv/
+packages/quickvision/**/__pycache__/
+packages/quickvision/*.pt
+*.pyc
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/

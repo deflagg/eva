@@ -46,9 +46,9 @@ Env vars:
   - QUICKVISION_WS_URL=ws://localhost:8000/infer
 - QuickVision:
   - QV_PORT=8000
-  - YOLO_MODEL_PATH=<path to yoloe-26 weights file>
   - YOLO_DEVICE=auto|cpu|cuda (default: auto)
-NOTE: Don’t hardcode a model filename you can’t guarantee exists. If YOLO_MODEL_PATH missing or invalid: fail fast with a clear startup error.
+  - Model source hardcoded in code as `YOLO("yolo26n.pt")` (no `YOLO_MODEL_PATH` env)
+NOTE: If hardcoded model source fails to load/download: fail fast with a clear startup error.
 
 ────────────────────────────────────────────────────────────
 MESSAGE PROTOCOL (v1) — JSON over WS (base64 images)
@@ -238,7 +238,7 @@ Acceptance:
 
 Iteration 7 — QuickVision: real YOLOE-26 inference
 Goal:
-- Load model once at startup in yolo.py
+- Load model once at startup in yolo.py (hardcoded alias: `yolo26n.pt`)
 - For each frame:
   - decode base64 -> bytes -> PIL Image -> numpy
   - run ultralytics model in `asyncio.to_thread(...)`
