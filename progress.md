@@ -471,3 +471,256 @@
 ### Notes
 - No dedicated automated test suite exists yet; verification remains build checks + manual end-to-end validation.
 - Single-client UI limitation remains in Eva (unchanged in this iteration).
+
+## Iteration 10 — Config migration (cosmiconfig + Dynaconf + UI runtime config)
+
+**Status:** ✅ Completed (2026-02-16)
+
+### Completed
+- Migrated Eva runtime configuration from env/hardcoded values to config files loaded via cosmiconfig + zod:
+  - added `packages/eva/eva.config.json` (committed defaults)
+  - added `packages/eva/src/config.ts` with local-first search order:
+    1. `eva.config.local.json`
+    2. `eva.config.json`
+  - updated `packages/eva/src/index.ts` to load `server.port`, `server.eyePath`, and `quickvision.wsUrl`
+  - updated `packages/eva/src/server.ts` to use configurable WS path (`eyePath`) instead of hardcoded `/eye`
+- Migrated QuickVision runtime configuration to Dynaconf layered YAML settings:
+  - added `packages/quickvision/settings.yaml` (committed defaults)
+  - added `packages/quickvision/app/settings.py` (Dynaconf instance)
+  - added `packages/quickvision/app/run.py` so QuickVision can start via `python -m app.run` using configured host/port
+  - updated `packages/quickvision/app/yolo.py` to read `yolo.model_source` and `yolo.device` from settings
+  - added `dynaconf` dependency in `packages/quickvision/requirements.txt`
+- Migrated UI WebSocket target to runtime config JSON:
+  - added `packages/ui/public/config.json`
+  - added `packages/ui/src/config.ts` loader (tries `/config.local.json`, falls back to `/config.json` when local file is missing/404 or dev server returns HTML fallback)
+  - updated `packages/ui/src/ws.ts` to accept a URL argument (no hardcoded Eva URL)
+  - updated `packages/ui/src/main.tsx` to load config before connecting WebSocket
+- Updated ignores for local override and secrets-style files in root `.gitignore`.
+- Updated component docs (`README.md` files) to reflect Iteration 10 config behavior and run commands.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+
+### Manual run steps
+1. Start QuickVision using settings-based launcher:
+   - `cd packages/quickvision`
+   - `source .venv/bin/activate`
+   - `python -m app.run`
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+4. Open UI and confirm it connects to the configured `eva.wsUrl` and detections still render.
+
+### Notes
+- Existing `uvicorn app.main:app --reload --port 8000` startup flow remains supported.
+- Runtime behavior is intentionally unchanged from Iteration 9 except configuration source migration.
+
+## Iteration 11 — Protocol v1 extensions: track_id + events[] + insight message + UI ack fix
+
+**Status:** ✅ Completed (2026-02-16)
+
+### Completed
+- Extended protocol docs/schema to support detector and insight payloads:
+  - updated `packages/protocol/schema.json` with:
+    - optional `detection.track_id`
+    - optional `detections.events[]` event envelope
+    - new `insight` message schema (`clip_id`, `trigger_frame_id`, `summary`, `usage`)
+  - updated `packages/protocol/README.md` with examples for `track_id`, `events[]`, and `insight`.
+- Updated Eva protocol validation/types (`packages/eva/src/protocol.ts`):
+  - added optional `track_id` and `events[]` on detections
+  - added `insight` schema/type
+  - expanded `QuickVisionInboundMessageSchema` to accept `insight` so Eva relays it instead of dropping it.
+- Updated QuickVision Pydantic protocol models (`packages/quickvision/app/protocol.py`):
+  - optional `DetectionEntry.track_id`
+  - optional `DetectionsMessage.events`
+  - new `EventEntry`, `InsightSummary`, `InsightUsage`, and `InsightMessage` models.
+- Updated UI protocol types (`packages/ui/src/types.ts`) for the new fields/messages.
+- Fixed UI in-flight ACK gating (`packages/ui/src/main.tsx`):
+  - ACK now occurs only when `message.type === "detections"` and `frame_id` matches the in-flight frame
+  - non-detection messages (including `error` and `insight`) no longer clear in-flight state.
+- Updated READMEs (`README.md`, `packages/eva/README.md`, `packages/quickvision/README.md`, `packages/ui/README.md`) to reflect Iteration 11 behavior.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+
+### Manual test steps
+1. Start QuickVision:
+   - `cd packages/quickvision`
+   - `source .venv/bin/activate`
+   - `python -m app.run`
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+4. Inject a fake `insight` message from QuickVision to Eva (no `frame_id`) and confirm UI logs it without clearing in-flight frame state.
+5. Inject a fake `detections` payload with `events[]` and confirm UI logs the events payload and continues normal rendering.
+
+### Notes
+- No dedicated automated test suite exists yet; verification remains build checks + manual end-to-end validation.
+
+## Iteration 12 — Add VisionAgent daemon (pi-mono) with guardrails
+
+**Status:** ✅ Completed (2026-02-16)
+
+### Completed
+- Added new `packages/vision-agent` package:
+  - `.nvmrc`
+  - `package.json`
+  - `tsconfig.json`
+  - `README.md`
+  - `vision-agent.config.json`
+  - `vision-agent.secrets.local.example.json`
+  - `src/index.ts`
+  - `src/config.ts`
+  - `src/server.ts`
+  - `src/prompts.ts`
+  - `src/tools.ts`
+- Implemented config loading for VisionAgent with cosmiconfig + zod:
+  - local-first search order:
+    1. `vision-agent.config.local.json`
+    2. `vision-agent.config.json`
+  - validated config schema includes:
+    - `server.port`
+    - `model.provider`
+    - `model.id`
+    - `guardrails.cooldownMs`
+    - `guardrails.maxFrames` (hard-capped at 6)
+    - `guardrails.maxBodyBytes`
+    - `secretsFile`
+- Implemented secrets loading from gitignored local JSON file:
+  - reads `openaiApiKey` from configured `secretsFile`
+  - no env-var API key usage in VisionAgent runtime path.
+- Implemented HTTP server endpoints:
+  - `GET /health`
+  - `POST /insight`
+- Implemented required guardrails on `POST /insight`:
+  - request max body size (`413 PAYLOAD_TOO_LARGE`)
+  - max frames (`400 TOO_MANY_FRAMES`)
+  - request cooldown (`429 COOLDOWN_ACTIVE`)
+- Implemented pi-ai model call with explicit API key passed in request options.
+- Implemented structured tool-call output path:
+  - tool schema defined via TypeBox (`submit_insight`)
+  - prompt instructs model to call the tool exactly once
+  - tool arguments validated with `validateToolCall(...)`
+  - response returns structured `summary` + `usage`.
+- Updated root docs (`README.md`) to include VisionAgent in component list/config/run instructions.
+- Updated root `.gitignore` to explicitly include `packages/vision-agent/vision-agent.config.local.json` along with existing local/secrets ignore patterns.
+
+### Verification
+- `cd packages/vision-agent && npm install` passes.
+- `cd packages/vision-agent && npm run build` passes.
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+
+### Manual test steps / results
+1. Start VisionAgent:
+   - `cd packages/vision-agent`
+   - create `vision-agent.secrets.local.json` with `openaiApiKey`
+   - `npm run dev`
+2. Health endpoint:
+   - `curl http://localhost:8790/health`
+   - ✅ returned `200` with service/model/guardrails metadata.
+3. Max frames guardrail:
+   - POST `/insight` with 7 frames
+   - ✅ returned `400 TOO_MANY_FRAMES`.
+4. Cooldown guardrail:
+   - POST `/insight` twice quickly
+   - ✅ second request returned `429 COOLDOWN_ACTIVE`.
+5. Max body bytes guardrail:
+   - POST oversized payload
+   - ✅ returned `413 PAYLOAD_TOO_LARGE`.
+
+### Notes
+- Full happy-path `POST /insight` (<=6 frames -> 200 structured summary) requires a valid OpenAI API key in `vision-agent.secrets.local.json`.
+- Current implementation intentionally keeps endpoint contract minimal (`summary`, `usage`) for QuickVision integration in later iterations.
+
+## Iteration 13 — QuickVision insights plumbing: ring buffer + clip builder (max 6) + call VisionAgent (manual trigger)
+
+**Status:** ✅ Completed (2026-02-16)
+
+### Completed
+- Added QuickVision insight plumbing modules:
+  - `packages/quickvision/app/insights.py`
+    - per-connection frame ring buffer
+    - clip selection around trigger frame (pre/trigger/post)
+    - max-frames enforcement (`<=6`)
+    - post-frame collection bounded by timeout
+    - insight cooldown enforcement
+  - `packages/quickvision/app/vision_agent_client.py`
+    - async HTTP client to VisionAgent using `httpx`
+    - request/response validation with Pydantic models
+    - normalized client errors for timeout/unreachable/invalid-response paths
+- Added `httpx` dependency to QuickVision requirements.
+- Added/updated insights Dynaconf keys in `packages/quickvision/settings.yaml`:
+  - `insights.enabled`
+  - `insights.vision_agent_url`
+  - `insights.timeout_ms`
+  - `insights.max_frames`
+  - `insights.pre_frames`
+  - `insights.post_frames`
+  - `insights.insight_cooldown_ms`
+- Updated QuickVision WS handling (`packages/quickvision/app/main.py`):
+  - supports temporary JSON command:
+    - `{ "type":"command", "v":1, "name":"insight_test" }`
+  - on `insight_test`:
+    - selects latest frame as trigger
+    - builds bounded clip from ring buffer
+    - calls VisionAgent
+    - emits protocol `insight` message (no `frame_id`) on success
+- Extended protocol models for command support:
+  - `packages/quickvision/app/protocol.py`: added `CommandMessage`
+  - `packages/eva/src/protocol.ts`: added `CommandMessageSchema`
+  - `packages/protocol/schema.json`: added `command` schema
+  - `packages/protocol/README.md`: documented temporary `command` message type
+- Enabled command relay path through Eva (`packages/eva/src/server.ts`):
+  - forwards validated JSON `command` payloads to QuickVision
+  - preserves existing binary-frame path for normal streaming
+- Added temporary UI trigger control (`packages/ui/src/main.tsx`):
+  - **Trigger insight test** button sends command payload through Eva
+- Updated docs for Iteration 13 behavior:
+  - `README.md`
+  - `packages/eva/README.md`
+  - `packages/quickvision/README.md`
+  - `packages/ui/README.md`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/vision-agent && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+
+### Manual test steps
+1. Start VisionAgent:
+   - `cd packages/vision-agent`
+   - ensure `vision-agent.secrets.local.json` has a valid `openaiApiKey`
+   - `npm run dev`
+2. Start QuickVision:
+   - `cd packages/quickvision`
+   - `source .venv/bin/activate`
+   - `pip install -r requirements.txt`
+   - `python -m app.run`
+3. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+4. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+5. In UI:
+   - start camera + streaming
+   - click **Trigger insight test**
+   - confirm `insight` message appears in UI logs.
+6. Click **Trigger insight test** repeatedly and confirm cooldown suppression errors are returned until cooldown elapses.
+
+### Notes
+- This iteration intentionally uses a manual debug trigger (`insight_test`) and does not yet auto-trigger from detector events.
+- Insight clip payload is still full-resolution frame data; downsampling is planned for Iteration 21.

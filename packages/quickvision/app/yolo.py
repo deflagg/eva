@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import os
 import time
 from dataclasses import dataclass
 
@@ -11,9 +10,10 @@ from PIL import Image
 from ultralytics import YOLO
 
 from .protocol import DetectionEntry, DetectionsMessage
+from .settings import settings
 
 MODEL_LABEL = "yoloe-26"
-HARD_CODED_MODEL_SOURCE = "yolo26n.pt"
+DEFAULT_MODEL_SOURCE = "yolo26n.pt"
 VALID_DEVICES = {"auto", "cpu", "cuda"}
 
 
@@ -43,34 +43,43 @@ class InferenceFrame:
 _loaded_model: LoadedYoloModel | None = None
 
 
-def _read_device_from_env() -> str:
-    device = os.getenv("YOLO_DEVICE", "auto").strip().lower() or "auto"
+def _read_model_source_from_settings() -> str:
+    source = settings.get("yolo.model_source", default=DEFAULT_MODEL_SOURCE)
+    if not isinstance(source, str) or not source.strip():
+        raise YoloConfigError("yolo.model_source must be a non-empty string")
+
+    return source.strip()
+
+
+def _read_device_from_settings() -> str:
+    raw_device = settings.get("yolo.device", default="auto")
+    device = str(raw_device).strip().lower() or "auto"
+
     if device not in VALID_DEVICES:
         allowed_values = ", ".join(sorted(VALID_DEVICES))
-        raise YoloConfigError(f"YOLO_DEVICE must be one of {{{allowed_values}}}, got: {device}")
+        raise YoloConfigError(f"yolo.device must be one of {{{allowed_values}}}, got: {device}")
 
     return device
 
 
 def load_model() -> LoadedYoloModel:
-    """Load YOLO model once from hard-coded source and device config."""
+    """Load YOLO model once from Dynaconf settings."""
     global _loaded_model
 
     if _loaded_model is not None:
         return _loaded_model
 
-    device = _read_device_from_env()
+    model_source = _read_model_source_from_settings()
+    device = _read_device_from_settings()
 
     try:
-        model = YOLO(HARD_CODED_MODEL_SOURCE)
+        model = YOLO(model_source)
     except Exception as exc:
-        raise YoloConfigError(
-            f"Failed to load hardcoded YOLO model source '{HARD_CODED_MODEL_SOURCE}': {exc}"
-        ) from exc
+        raise YoloConfigError(f"Failed to load YOLO model source '{model_source}': {exc}") from exc
 
     _loaded_model = LoadedYoloModel(
         model=model,
-        model_source=HARD_CODED_MODEL_SOURCE,
+        model_source=model_source,
         device=device,
     )
     return _loaded_model

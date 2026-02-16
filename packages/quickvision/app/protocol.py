@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
 PROTOCOL_VERSION: Literal[1] = 1
 RoleType = Literal["ui", "eva", "quickvision"]
+InsightSeverity = Literal["low", "medium", "high"]
 
 BINARY_META_LENGTH_BYTES = 4
 
@@ -37,6 +38,12 @@ class ErrorMessage(ProtocolMessage):
     message: str = Field(min_length=1)
 
 
+class CommandMessage(ProtocolMessage):
+    type: Literal["command"] = "command"
+    v: Literal[1] = PROTOCOL_VERSION
+    name: str = Field(min_length=1)
+
+
 class FrameBinaryMetaMessage(ProtocolMessage):
     type: Literal["frame_binary"] = "frame_binary"
     v: Literal[1] = PROTOCOL_VERSION
@@ -59,6 +66,15 @@ class DetectionEntry(BaseModel):
     name: str = Field(min_length=1)
     conf: float = Field(ge=0, le=1)
     box: tuple[float, float, float, float]
+    track_id: int | None = None
+
+
+class EventEntry(BaseModel):
+    name: str = Field(min_length=1)
+    ts_ms: int = Field(ge=0)
+    severity: InsightSeverity
+    track_id: int | None = None
+    data: dict[str, Any]
 
 
 class DetectionsMessage(ProtocolMessage):
@@ -70,6 +86,30 @@ class DetectionsMessage(ProtocolMessage):
     height: int = Field(ge=1)
     model: str = Field(min_length=1)
     detections: list[DetectionEntry]
+    events: list[EventEntry] | None = None
+
+
+class InsightSummary(BaseModel):
+    one_liner: str = Field(min_length=1)
+    what_changed: list[str]
+    severity: InsightSeverity
+    tags: list[str]
+
+
+class InsightUsage(BaseModel):
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    cost_usd: float = Field(ge=0)
+
+
+class InsightMessage(ProtocolMessage):
+    type: Literal["insight"] = "insight"
+    v: Literal[1] = PROTOCOL_VERSION
+    clip_id: str = Field(min_length=1)
+    trigger_frame_id: str = Field(min_length=1)
+    ts_ms: int = Field(ge=0)
+    summary: InsightSummary
+    usage: InsightUsage
 
 
 def _extract_optional_frame_id(payload: object) -> str | None:

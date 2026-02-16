@@ -1,0 +1,5 @@
+{
+  "eva": {
+    "wsUrl": "ws://localhost:8787/eye"
+  }
+}

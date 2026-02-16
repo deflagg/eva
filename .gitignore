@@ -14,6 +14,12 @@ packages/quickvision/**/__pycache__/
 packages/quickvision/*.pt
 *.pyc
 
+# Local overrides / secrets
+packages/**/**/*.local.*
+packages/vision-agent/vision-agent.config.local.json
+packages/vision-agent/*.secrets.local.json
+packages/ui/public/config.local.json
+
 # OS/editor
 .DS_Store
 .vscode/

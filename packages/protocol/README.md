@@ -47,13 +47,71 @@ Rules:
       "cls": 0,
       "name": "person",
       "conf": 0.91,
-      "box": [120, 80, 420, 640]
+      "box": [120, 80, 420, 640],
+      "track_id": 17
+    }
+  ],
+  "events": [
+    {
+      "name": "line_cross",
+      "ts_ms": 1700000000123,
+      "severity": "medium",
+      "track_id": 17,
+      "data": {
+        "line": "doorway",
+        "direction": "A->B"
+      }
     }
   ]
 }
 ```
 
-### 3) `error` (any direction) JSON
+Notes:
+- `detection.track_id` is optional.
+- `detections.events` is optional.
+- `events[].severity` is one of `low | medium | high`.
+
+### 3) `insight` (QuickVision -> Eva -> UI) JSON
+
+> Important: insight messages do **not** include `frame_id`.
+
+```json
+{
+  "type": "insight",
+  "v": 1,
+  "clip_id": "2b84b71b-2db6-4781-bdc5-f2b35e643b1f",
+  "trigger_frame_id": "550e8400-e29b-41d4-a716-446655440000",
+  "ts_ms": 1700000000456,
+  "summary": {
+    "one_liner": "Two people crossed paths quickly near the entry.",
+    "what_changed": [
+      "Person A entered from left",
+      "Person B moved toward doorway"
+    ],
+    "severity": "medium",
+    "tags": ["entry", "motion"]
+  },
+  "usage": {
+    "input_tokens": 812,
+    "output_tokens": 92,
+    "cost_usd": 0.0021
+  }
+}
+```
+
+### 4) `command` (UI -> Eva -> QuickVision, debug) JSON
+
+> Temporary debug command introduced in Iteration 13.
+
+```json
+{
+  "type": "command",
+  "v": 1,
+  "name": "insight_test"
+}
+```
+
+### 5) `error` (any direction) JSON
 
 ```json
 {
@@ -65,7 +123,7 @@ Rules:
 }
 ```
 
-### 4) Optional `hello` (debug) JSON
+### 6) Optional `hello` (debug) JSON
 
 ```json
 {

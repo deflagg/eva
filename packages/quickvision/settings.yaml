@@ -1,0 +1,16 @@
+server:
+  host: 127.0.0.1
+  port: 8000
+
+yolo:
+  model_source: yolo26n.pt
+  device: auto
+
+insights:
+  enabled: true
+  vision_agent_url: http://localhost:8790/insight
+  timeout_ms: 20000
+  max_frames: 6
+  pre_frames: 3
+  post_frames: 2
+  insight_cooldown_ms: 10000

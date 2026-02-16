@@ -1,9 +1,10 @@
+import { loadEvaConfig } from './config.js';
 import { startServer } from './server.js';
 
-const port = Number(process.env.EVA_PORT ?? 8787);
-const quickvisionWsUrl = process.env.QUICKVISION_WS_URL ?? 'ws://localhost:8000/infer';
+const config = loadEvaConfig();
 
 startServer({
-  port,
-  quickvisionWsUrl,
+  port: config.server.port,
+  eyePath: config.server.eyePath,
+  quickvisionWsUrl: config.quickvision.wsUrl,
 });

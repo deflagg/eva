@@ -3,6 +3,7 @@ import WebSocket, { WebSocketServer, type RawData } from 'ws';
 
 import {
   BinaryFrameDecodeError,
+  CommandMessageSchema,
   decodeBinaryFrameEnvelope,
   makeError,
   makeHello,
@@ -11,11 +12,11 @@ import {
 import { createQuickVisionClient } from './quickvisionClient.js';
 import { FrameRouter } from './router.js';
 
-const EYE_PATH = '/eye';
 const FRAME_ROUTE_TTL_MS = 5_000;
 
 export interface StartServerOptions {
   port: number;
+  eyePath: string;
   quickvisionWsUrl: string;
 }
 
@@ -73,7 +74,7 @@ function getOptionalFrameId(payload: unknown): string | undefined {
 }
 
 export function startServer(options: StartServerOptions): Server {
-  const { port, quickvisionWsUrl } = options;
+  const { port, eyePath, quickvisionWsUrl } = options;
 
   const server = createServer((_req, res) => {
     res.statusCode = 200;
@@ -164,7 +165,7 @@ export function startServer(options: StartServerOptions): Server {
   server.on('upgrade', (request, socket, head) => {
     const requestUrl = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
 
-    if (requestUrl.pathname !== EYE_PATH) {
+    if (requestUrl.pathname !== eyePath) {
       socket.destroy();
       return;
     }
@@ -230,6 +231,26 @@ export function startServer(options: StartServerOptions): Server {
         return;
       }
 
+      if (parsedPayload.type === 'command') {
+        const parsedCommand = CommandMessageSchema.safeParse(parsedPayload);
+        if (!parsedCommand.success) {
+          sendJson(ws, makeError('INVALID_COMMAND', 'Invalid command payload.'));
+          return;
+        }
+
+        if (!quickvisionClient.isConnected()) {
+          sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.'));
+          return;
+        }
+
+        const forwarded = quickvisionClient.sendJson(parsedCommand.data);
+        if (!forwarded) {
+          sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.'));
+        }
+
+        return;
+      }
+
       const frameId = getOptionalFrameId(parsedPayload);
 
       if (parsedPayload.type === 'frame') {
@@ -240,7 +261,10 @@ export function startServer(options: StartServerOptions): Server {
         return;
       }
 
-      sendJson(ws, makeError('UNSUPPORTED_TYPE', 'Eva currently expects binary frame payloads on /eye.', frameId));
+      sendJson(
+        ws,
+        makeError('UNSUPPORTED_TYPE', `Eva currently expects binary frame payloads on ${eyePath}.`, frameId),
+      );
     });
 
     ws.on('close', () => {
@@ -262,7 +286,7 @@ export function startServer(options: StartServerOptions): Server {
 
   server.listen(port, () => {
     console.log(`[eva] listening on http://localhost:${port}`);
-    console.log(`[eva] websocket endpoint ws://localhost:${port}${EYE_PATH}`);
+    console.log(`[eva] websocket endpoint ws://localhost:${port}${eyePath}`);
     console.log(`[eva] QuickVision target ${quickvisionClient.getUrl()}`);
   });
 

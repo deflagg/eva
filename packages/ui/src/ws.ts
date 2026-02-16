@@ -1,5 +1,3 @@
-const EVA_WS_URL = 'ws://localhost:8787/eye';
-
 export type WsConnectionStatus = 'disconnected' | 'connecting' | 'connected';
 
 export interface EvaWsHandlers {
@@ -16,10 +14,6 @@ export interface EvaWsClient {
   sendJson: (payload: unknown) => boolean;
   sendBinary: (payload: ArrayBuffer | Blob | ArrayBufferView) => boolean;
   getStatus: () => WsConnectionStatus;
-}
-
-export function getEvaWsUrl(): string {
-  return EVA_WS_URL;
 }
 
 async function decodeMessageData(data: MessageEvent['data']): Promise<string> {
@@ -42,7 +36,7 @@ async function decodeMessageData(data: MessageEvent['data']): Promise<string> {
   return String(data);
 }
 
-export function createEvaWsClient(handlers: EvaWsHandlers = {}): EvaWsClient {
+export function createEvaWsClient(url: string, handlers: EvaWsHandlers = {}): EvaWsClient {
   let ws: WebSocket | null = null;
   let status: WsConnectionStatus = 'disconnected';
 
@@ -53,7 +47,7 @@ export function createEvaWsClient(handlers: EvaWsHandlers = {}): EvaWsClient {
       }
 
       status = 'connecting';
-      ws = new WebSocket(EVA_WS_URL);
+      ws = new WebSocket(url);
 
       ws.addEventListener('open', () => {
         status = 'connected';

@@ -2,13 +2,18 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 
 import { captureJpegFrame, isCameraSupported, startCamera, stopCamera } from './camera';
+import { loadUiRuntimeConfig, type UiRuntimeConfig } from './config';
 import { encodeBinaryFrameEnvelope } from './frameBinary';
 import { clearOverlay, drawDetectionsOverlay } from './overlay';
 import type { DetectionsMessage, FrameBinaryMeta } from './types';
-import { createEvaWsClient, getEvaWsUrl, type EvaWsClient, type WsConnectionStatus } from './ws';
+import { createEvaWsClient, type EvaWsClient, type WsConnectionStatus } from './ws';
 
 type LogDirection = 'system' | 'outgoing' | 'incoming';
 type CameraStatus = 'idle' | 'starting' | 'running' | 'error';
+
+interface AppProps {
+  runtimeConfig: UiRuntimeConfig;
+}
 
 interface LogEntry {
   id: number;
@@ -59,15 +64,6 @@ function summarizeMessage(message: unknown): string {
   }
 }
 
-function getFrameId(message: unknown): string | undefined {
-  if (!message || typeof message !== 'object') {
-    return undefined;
-  }
-
-  const candidate = (message as Record<string, unknown>).frame_id;
-  return typeof candidate === 'string' ? candidate : undefined;
-}
-
 function isDetectionsMessage(message: unknown): message is DetectionsMessage {
   if (!message || typeof message !== 'object') {
     return false;
@@ -84,7 +80,9 @@ function isDetectionsMessage(message: unknown): message is DetectionsMessage {
   );
 }
 
-function App(): JSX.Element {
+function App({ runtimeConfig }: AppProps): JSX.Element {
+  const evaWsUrl = runtimeConfig.eva.wsUrl;
+
   const [status, setStatus] = React.useState<WsConnectionStatus>('connecting');
   const [logs, setLogs] = React.useState<LogEntry[]>([]);
   const [connectionAttempt, setConnectionAttempt] = React.useState(0);
@@ -169,7 +167,7 @@ function App(): JSX.Element {
   );
 
   React.useEffect(() => {
-    const client = createEvaWsClient({
+    const client = createEvaWsClient(evaWsUrl, {
       onOpen: () => {
         setStatus('connected');
         appendLog('system', 'Connected to Eva WebSocket endpoint.');
@@ -180,7 +178,6 @@ function App(): JSX.Element {
         appendLog('system', 'Disconnected from Eva WebSocket endpoint.');
       },
       onMessage: (message) => {
-        const frameId = getFrameId(message);
         const inFlight = inFlightRef.current;
         const detectionsMessage = isDetectionsMessage(message) ? message : null;
 
@@ -188,7 +185,7 @@ function App(): JSX.Element {
           renderDetections(detectionsMessage);
         }
 
-        if (frameId && inFlight && frameId === inFlight.frameId) {
+        if (detectionsMessage && inFlight && detectionsMessage.frame_id === inFlight.frameId) {
           window.clearTimeout(inFlight.timeoutId);
           inFlightRef.current = null;
           setInFlightFrameId(null);
@@ -198,7 +195,10 @@ function App(): JSX.Element {
           setFramesAcked(framesAckedRef.current);
           setLastAckLatencyMs(latencyMs);
 
-          if (shouldSampleFrameLog(framesAckedRef.current)) {
+          const shouldLogAck =
+            shouldSampleFrameLog(framesAckedRef.current) || (detectionsMessage.events?.length ?? 0) > 0;
+
+          if (shouldLogAck) {
             appendLog('incoming', summarizeMessage(message));
             appendLog('system', `Frame acknowledged in ${latencyMs}ms.`);
           }
@@ -218,14 +218,14 @@ function App(): JSX.Element {
 
     clientRef.current = client;
     setStatus('connecting');
-    appendLog('system', `Connecting to ${getEvaWsUrl()} ...`);
+    appendLog('system', `Connecting to ${evaWsUrl} ...`);
     client.connect();
 
     return () => {
       client.disconnect();
       clientRef.current = null;
     };
-  }, [appendLog, connectionAttempt, dropInFlight, renderDetections]);
+  }, [appendLog, connectionAttempt, dropInFlight, evaWsUrl, renderDetections]);
 
   const handleSendTestMessage = React.useCallback(() => {
     const payload = {
@@ -242,6 +242,22 @@ function App(): JSX.Element {
     }
 
     appendLog('system', 'Cannot send test message while disconnected.');
+  }, [appendLog]);
+
+  const handleTriggerInsightTest = React.useCallback(() => {
+    const payload = {
+      type: 'command',
+      v: 1,
+      name: 'insight_test',
+    };
+
+    const sent = clientRef.current?.sendJson(payload) ?? false;
+    if (sent) {
+      appendLog('outgoing', summarizeMessage(payload));
+      return;
+    }
+
+    appendLog('system', 'Cannot send insight_test command while disconnected.');
   }, [appendLog]);
 
   const handleReconnect = React.useCallback(() => {
@@ -456,10 +472,10 @@ function App(): JSX.Element {
 
   return (
     <main style={{ fontFamily: 'sans-serif', padding: 16, lineHeight: 1.4 }}>
-      <h1>Eva UI (Iteration 9)</h1>
+      <h1>Eva UI (Iteration 13)</h1>
 
       <p>
-        WebSocket target: <code>{getEvaWsUrl()}</code>
+        WebSocket target: <code>{evaWsUrl}</code>
       </p>
       <p>
         Connection status:{' '}
@@ -483,6 +499,9 @@ function App(): JSX.Element {
       <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
         <button type="button" onClick={handleSendTestMessage} disabled={status !== 'connected'}>
           Send test message
+        </button>
+        <button type="button" onClick={handleTriggerInsightTest} disabled={status !== 'connected'}>
+          Trigger insight test
         </button>
         <button type="button" onClick={handleReconnect}>
           Reconnect
@@ -576,4 +595,25 @@ function App(): JSX.Element {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(<App />);
+async function bootstrap() {
+  const rootElement = document.getElementById('root');
+  if (!rootElement) {
+    throw new Error('Missing root element.');
+  }
+
+  const root = ReactDOM.createRoot(rootElement);
+
+  try {
+    const runtimeConfig = await loadUiRuntimeConfig();
+    root.render(<App runtimeConfig={runtimeConfig} />);
+  } catch (error) {
+    root.render(
+      <main style={{ fontFamily: 'sans-serif', padding: 16, lineHeight: 1.4 }}>
+        <h1>Eva UI startup error</h1>
+        <p style={{ color: '#b91c1c' }}>{toErrorMessage(error)}</p>
+      </main>,
+    );
+  }
+}
+
+void bootstrap();

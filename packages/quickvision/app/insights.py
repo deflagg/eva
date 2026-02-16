@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import time
+import uuid
+from collections import deque
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlparse
+
+from .protocol import FrameBinaryMetaMessage, InsightMessage
+from .settings import settings
+from .vision_agent_client import VisionAgentClient, VisionAgentClientError, VisionAgentFrame
+
+HARD_MAX_INSIGHT_FRAMES = 6
+
+
+class InsightError(RuntimeError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(slots=True)
+class InsightSettings:
+    enabled: bool
+    vision_agent_url: str
+    timeout_ms: int
+    max_frames: int
+    pre_frames: int
+    post_frames: int
+    insight_cooldown_ms: int
+
+
+@dataclass(slots=True)
+class BufferedFrame:
+    seq: int
+    frame_id: str
+    ts_ms: int
+    mime: str
+    image_bytes: bytes
+
+
+class InsightBuffer:
+    def __init__(self, config: InsightSettings):
+        self.config = config
+        self._frames: deque[BufferedFrame] = deque(maxlen=128)
+        self._next_seq = 1
+        self._frame_event = asyncio.Event()
+        self._last_insight_ts_ms: int | None = None
+        self._vision_agent = VisionAgentClient(config.vision_agent_url, config.timeout_ms)
+
+    def add_frame(self, meta: FrameBinaryMetaMessage, image_payload: bytes) -> None:
+        self._frames.append(
+            BufferedFrame(
+                seq=self._next_seq,
+                frame_id=meta.frame_id,
+                ts_ms=meta.ts_ms,
+                mime=meta.mime,
+                image_bytes=image_payload,
+            )
+        )
+        self._next_seq += 1
+        self._frame_event.set()
+
+    async def run_insight_test(self) -> InsightMessage:
+        if not self.config.enabled:
+            raise InsightError("INSIGHTS_DISABLED", "Insights are disabled in QuickVision settings.")
+
+        now_ms = int(time.time() * 1000)
+        if self._last_insight_ts_ms is not None and self.config.insight_cooldown_ms > 0:
+            elapsed_ms = now_ms - self._last_insight_ts_ms
+            if elapsed_ms < self.config.insight_cooldown_ms:
+                retry_after = self.config.insight_cooldown_ms - elapsed_ms
+                raise InsightError(
+                    "INSIGHT_COOLDOWN",
+                    f"Insight cooldown active. Retry in ~{retry_after}ms.",
+                )
+
+        if not self._frames:
+            raise InsightError("NO_TRIGGER_FRAME", "No frames available yet; cannot run insight_test.")
+
+        trigger = self._frames[-1]
+        self._last_insight_ts_ms = now_ms
+
+        clip_frames = await self._build_clip(trigger)
+        if not clip_frames:
+            raise InsightError("NO_CLIP_FRAMES", "Failed to build insight clip frames.")
+
+        clip_id = str(uuid.uuid4())
+
+        request_frames = [
+            VisionAgentFrame(
+                frame_id=frame.frame_id,
+                ts_ms=frame.ts_ms,
+                mime=frame.mime,
+                image_b64=base64.b64encode(frame.image_bytes).decode("ascii"),
+            )
+            for frame in clip_frames
+        ]
+
+        try:
+            insight = await self._vision_agent.request_insight(
+                clip_id=clip_id,
+                trigger_frame_id=trigger.frame_id,
+                frames=request_frames,
+            )
+        except VisionAgentClientError as exc:
+            raise InsightError(exc.code, str(exc)) from exc
+
+        return InsightMessage(
+            clip_id=clip_id,
+            trigger_frame_id=trigger.frame_id,
+            ts_ms=int(time.time() * 1000),
+            summary=insight.summary.model_dump(exclude_none=True),
+            usage=insight.usage.model_dump(exclude_none=True),
+        )
+
+    async def _build_clip(self, trigger: BufferedFrame) -> list[BufferedFrame]:
+        selected_pre = self._collect_pre_frames(trigger.seq)
+        selected = [*selected_pre, trigger]
+
+        remaining_capacity = max(self.config.max_frames - len(selected), 0)
+        post_target = min(self.config.post_frames, remaining_capacity)
+
+        post_frames = self._collect_post_frames(trigger.seq, post_target)
+
+        if len(post_frames) < post_target:
+            deadline = asyncio.get_running_loop().time() + (self.config.timeout_ms / 1000.0)
+
+            while len(post_frames) < post_target:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+
+                try:
+                    await asyncio.wait_for(self._frame_event.wait(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+                finally:
+                    self._frame_event.clear()
+
+                post_frames = self._collect_post_frames(trigger.seq, post_target)
+
+        clip = [*selected, *post_frames]
+        return clip[: self.config.max_frames]
+
+    def _collect_pre_frames(self, trigger_seq: int) -> list[BufferedFrame]:
+        if self.config.pre_frames <= 0:
+            return []
+
+        candidates = [frame for frame in self._frames if frame.seq < trigger_seq]
+        return candidates[-self.config.pre_frames :]
+
+    def _collect_post_frames(self, trigger_seq: int, limit: int) -> list[BufferedFrame]:
+        if limit <= 0:
+            return []
+
+        candidates = [frame for frame in self._frames if frame.seq > trigger_seq]
+        return candidates[:limit]
+
+
+def _as_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+
+    return default
+
+
+def _as_non_negative_int(value: Any, *, key: str, default: int) -> int:
+    if value is None:
+        return default
+
+    if isinstance(value, bool):
+        raise RuntimeError(f"QuickVision config error: insights.{key} must be a non-negative integer")
+
+    if isinstance(value, int):
+        if value < 0:
+            raise RuntimeError(f"QuickVision config error: insights.{key} must be a non-negative integer")
+        return value
+
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+
+    raise RuntimeError(f"QuickVision config error: insights.{key} must be a non-negative integer")
+
+
+def _validate_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise RuntimeError("QuickVision config error: insights.vision_agent_url must be a valid http(s) URL")
+
+    return url
+
+
+def load_insight_settings() -> InsightSettings:
+    enabled = _as_bool(settings.get("insights.enabled", default=False), default=False)
+
+    raw_url = settings.get("insights.vision_agent_url", default="http://localhost:8790/insight")
+    if not isinstance(raw_url, str) or not raw_url.strip():
+        raise RuntimeError("QuickVision config error: insights.vision_agent_url must be a non-empty string")
+
+    timeout_ms = _as_non_negative_int(settings.get("insights.timeout_ms", default=2000), key="timeout_ms", default=2000)
+    max_frames = _as_non_negative_int(settings.get("insights.max_frames", default=6), key="max_frames", default=6)
+    pre_frames = _as_non_negative_int(settings.get("insights.pre_frames", default=3), key="pre_frames", default=3)
+    post_frames = _as_non_negative_int(settings.get("insights.post_frames", default=2), key="post_frames", default=2)
+    insight_cooldown_ms = _as_non_negative_int(
+        settings.get("insights.insight_cooldown_ms", default=10000),
+        key="insight_cooldown_ms",
+        default=10000,
+    )
+
+    max_frames = max(1, min(max_frames, HARD_MAX_INSIGHT_FRAMES))
+    pre_frames = min(pre_frames, max_frames - 1)
+    post_frames = min(post_frames, max_frames - 1)
+
+    return InsightSettings(
+        enabled=enabled,
+        vision_agent_url=_validate_url(raw_url.strip()),
+        timeout_ms=max(timeout_ms, 1),
+        max_frames=max_frames,
+        pre_frames=pre_frames,
+        post_frames=post_frames,
+        insight_cooldown_ms=insight_cooldown_ms,
+    )

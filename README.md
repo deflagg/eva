@@ -1,9 +1,10 @@
 # Eva + QuickVision + UI
 
-This repository hosts three components:
+This repository hosts four components:
 
 - `packages/eva` — TypeScript daemon (HTTP/WebSocket gateway)
 - `packages/quickvision` — Python FastAPI daemon (vision inference service)
+- `packages/vision-agent` — Node daemon (clip insight summaries via pi-ai tool calling)
 - `packages/ui` — Vite + React web client
 
 Protocol docs/schema are in `packages/protocol`.
@@ -14,19 +15,29 @@ Protocol docs/schema are in `packages/protocol`.
 - QuickVision: `http://localhost:8000`
 - UI dev server: `http://127.0.0.1:5173`
 
-## Environment Variables
+## Configuration files
 
-### Eva
+### Eva (cosmiconfig + zod)
 
-- `EVA_PORT` (default `8787`)
-- `QUICKVISION_WS_URL` (default `ws://localhost:8000/infer`)
+- `packages/eva/eva.config.json` (committed)
+- `packages/eva/eva.config.local.json` (optional local override, gitignored)
 
-### QuickVision
+### QuickVision (Dynaconf)
 
-- `QV_PORT` (default `8000`)
-- `YOLO_DEVICE` (`auto|cpu|cuda`, default `auto`)
+- `packages/quickvision/settings.yaml` (committed)
+- `packages/quickvision/settings.local.yaml` (optional local override, gitignored)
 
-QuickVision model source is hardcoded in `packages/quickvision/app/yolo.py` as `yolo26n.pt`.
+### VisionAgent (cosmiconfig + zod)
+
+- `packages/vision-agent/vision-agent.config.json` (committed)
+- `packages/vision-agent/vision-agent.config.local.json` (optional local override, gitignored)
+- `packages/vision-agent/vision-agent.secrets.local.json` (required local secrets file, gitignored)
+- `packages/vision-agent/vision-agent.secrets.local.example.json` (example)
+
+### UI runtime config
+
+- `packages/ui/public/config.json` (committed)
+- `packages/ui/public/config.local.json` (optional local override, gitignored)
 
 ## Development Run Instructions
 
@@ -47,12 +58,26 @@ cd packages/quickvision
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-# optional: export YOLO_DEVICE=cpu
-# optional: export YOLO_DEVICE=cuda
+python -m app.run
+```
+
+Alternative (still supported):
+
+```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 3) UI (React + Vite)
+### 3) VisionAgent (TypeScript + pi-ai)
+
+```bash
+cd packages/vision-agent
+nvm install node
+nvm use node
+npm install
+npm run dev
+```
+
+### 4) UI (React + Vite)
 
 ```bash
 cd packages/ui
@@ -62,4 +87,4 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 9** (binary frame protocol for UI -> Eva -> QuickVision).
+Implemented through **Iteration 13** (QuickVision insight plumbing: frame ring buffer, `insight_test` command trigger, VisionAgent HTTP call, and insight relay).

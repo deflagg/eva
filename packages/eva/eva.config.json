@@ -1,0 +1,9 @@
+{
+  "server": {
+    "port": 8787,
+    "eyePath": "/eye"
+  },
+  "quickvision": {
+    "wsUrl": "ws://localhost:8000/infer"
+  }
+}

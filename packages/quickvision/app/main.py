@@ -5,8 +5,10 @@ import contextlib
 import json
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from pydantic import ValidationError
 
-from .protocol import BinaryFrameParseError, decode_binary_frame_envelope, make_error, make_hello
+from .insights import InsightBuffer, InsightError, InsightSettings, load_insight_settings
+from .protocol import BinaryFrameParseError, CommandMessage, decode_binary_frame_envelope, make_error, make_hello
 from .yolo import (
     FrameDecodeError,
     InferenceFrame,
@@ -18,16 +20,33 @@ from .yolo import (
 
 app = FastAPI(title="quickvision", version="0.1.0")
 
+_insight_settings: InsightSettings | None = None
+
 
 @app.on_event("startup")
 async def on_startup() -> None:
     """Fail fast if YOLO model config is missing/invalid."""
+    global _insight_settings
+
     try:
         load_model()
     except Exception as exc:
         raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
 
+    try:
+        _insight_settings = load_insight_settings()
+    except Exception as exc:
+        raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
+
     print(f"[quickvision] model loaded: {get_model_summary()}")
+    print(
+        "[quickvision] insights config: "
+        f"enabled={_insight_settings.enabled} "
+        f"vision_agent_url={_insight_settings.vision_agent_url} "
+        f"max_frames={_insight_settings.max_frames} "
+        f"pre_frames={_insight_settings.pre_frames} "
+        f"post_frames={_insight_settings.post_frames}"
+    )
 
 
 @app.get("/health")
@@ -36,12 +55,16 @@ async def health() -> dict[str, object]:
         "service": "quickvision",
         "status": "ok",
         "model_loaded": is_model_loaded(),
+        "insights_enabled": _insight_settings.enabled if _insight_settings is not None else False,
     }
 
 
 @app.websocket("/infer")
 async def infer_socket(websocket: WebSocket) -> None:
     await websocket.accept()
+
+    insight_settings = _insight_settings if _insight_settings is not None else load_insight_settings()
+    insight_buffer = InsightBuffer(insight_settings)
 
     send_lock = asyncio.Lock()
 
@@ -56,6 +79,7 @@ async def infer_socket(websocket: WebSocket) -> None:
     await send_payload(make_hello("quickvision"))
 
     inference_task: asyncio.Task[None] | None = None
+    insight_task: asyncio.Task[None] | None = None
 
     async def process_frame(frame: InferenceFrame) -> None:
         try:
@@ -65,6 +89,15 @@ async def infer_socket(websocket: WebSocket) -> None:
             await send_payload(make_error("INVALID_IMAGE", str(exc), frame_id=frame.frame_id))
         except Exception as exc:
             await send_payload(make_error("INFERENCE_ERROR", str(exc), frame_id=frame.frame_id))
+
+    async def process_insight_test() -> None:
+        try:
+            insight_message = await insight_buffer.run_insight_test()
+            await send_payload(insight_message.model_dump(exclude_none=True))
+        except InsightError as exc:
+            await send_payload(make_error(exc.code, str(exc)))
+        except Exception as exc:
+            await send_payload(make_error("INSIGHT_ERROR", f"Insight test failed: {exc}"))
 
     try:
         while True:
@@ -94,6 +127,31 @@ async def infer_socket(websocket: WebSocket) -> None:
                         frame_id_value = parsed_payload.get("frame_id")
                         frame_id = frame_id_value if isinstance(frame_id_value, str) else None
 
+                        if parsed_payload.get("type") == "command":
+                            try:
+                                command = CommandMessage.model_validate(parsed_payload)
+                            except ValidationError:
+                                await send_payload(make_error("INVALID_COMMAND", "Invalid command payload."))
+                                continue
+
+                            if command.name != "insight_test":
+                                await send_payload(
+                                    make_error("UNSUPPORTED_COMMAND", f"Unsupported command: {command.name}")
+                                )
+                                continue
+
+                            if insight_task is not None and not insight_task.done():
+                                await send_payload(
+                                    make_error(
+                                        "INSIGHT_BUSY",
+                                        "An insight_test command is already running for this connection.",
+                                    )
+                                )
+                                continue
+
+                            insight_task = asyncio.create_task(process_insight_test())
+                            continue
+
                 await send_payload(
                     make_error(
                         "FRAME_BINARY_REQUIRED",
@@ -108,6 +166,8 @@ async def infer_socket(websocket: WebSocket) -> None:
             except BinaryFrameParseError as exc:
                 await send_payload(make_error("INVALID_FRAME_BINARY", str(exc)))
                 continue
+
+            insight_buffer.add_frame(envelope.meta, envelope.image_payload)
 
             frame = InferenceFrame(
                 frame_id=envelope.meta.frame_id,
@@ -134,3 +194,8 @@ async def infer_socket(websocket: WebSocket) -> None:
             inference_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await inference_task
+
+        if insight_task and not insight_task.done():
+            insight_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await insight_task

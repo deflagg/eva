@@ -1,5 +1,5 @@
 {
-  "name": "eva",
+  "name": "vision-agent",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,13 +9,13 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@mariozechner/pi-ai": "^0.52.12",
+    "@sinclair/typebox": "^0.34.41",
     "cosmiconfig": "^9.0.0",
-    "ws": "^8.18.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "@types/ws": "^8.5.13",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

@@ -2,18 +2,40 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.com/eva/protocol-v1.schema.json",
   "title": "Eva Protocol v1",
-  "description": "JSON message schemas for Eva protocol control/detection messages and binary-frame metadata.",
+  "description": "JSON message schemas for Eva protocol control/detection/messages and binary-frame metadata.",
   "type": "object",
   "oneOf": [
-    { "$ref": "#/$defs/frame_binary_meta" },
-    { "$ref": "#/$defs/detections" },
-    { "$ref": "#/$defs/error" },
-    { "$ref": "#/$defs/hello" }
+    {
+      "$ref": "#/$defs/frame_binary_meta"
+    },
+    {
+      "$ref": "#/$defs/detections"
+    },
+    {
+      "$ref": "#/$defs/error"
+    },
+    {
+      "$ref": "#/$defs/hello"
+    },
+    {
+      "$ref": "#/$defs/command"
+    },
+    {
+      "$ref": "#/$defs/insight"
+    }
   ],
   "$defs": {
     "version": {
       "type": "integer",
       "const": 1
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
     },
     "frame_binary_meta": {
       "type": "object",
@@ -29,29 +51,101 @@
         "image_bytes"
       ],
       "properties": {
-        "type": { "const": "frame_binary" },
-        "v": { "$ref": "#/$defs/version" },
-        "frame_id": { "type": "string", "minLength": 1 },
-        "ts_ms": { "type": "integer", "minimum": 0 },
-        "mime": { "type": "string", "const": "image/jpeg" },
-        "width": { "type": "integer", "minimum": 1 },
-        "height": { "type": "integer", "minimum": 1 },
-        "image_bytes": { "type": "integer", "minimum": 1 }
+        "type": {
+          "const": "frame_binary"
+        },
+        "v": {
+          "$ref": "#/$defs/version"
+        },
+        "frame_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mime": {
+          "type": "string",
+          "const": "image/jpeg"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "image_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "detection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cls", "name", "conf", "box"],
+      "required": [
+        "cls",
+        "name",
+        "conf",
+        "box"
+      ],
       "properties": {
-        "cls": { "type": "integer", "minimum": 0 },
-        "name": { "type": "string", "minLength": 1 },
-        "conf": { "type": "number", "minimum": 0, "maximum": 1 },
+        "cls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "conf": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
         "box": {
           "type": "array",
-          "items": { "type": "number" },
+          "items": {
+            "type": "number"
+          },
           "minItems": 4,
           "maxItems": 4
+        },
+        "track_id": {
+          "type": "integer"
+        }
+      }
+    },
+    "event_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "ts_ms",
+        "severity",
+        "data"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "track_id": {
+          "type": "integer"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
         }
       }
     },
@@ -69,43 +163,220 @@
         "detections"
       ],
       "properties": {
-        "type": { "const": "detections" },
-        "v": { "$ref": "#/$defs/version" },
-        "frame_id": { "type": "string", "minLength": 1 },
-        "ts_ms": { "type": "integer", "minimum": 0 },
-        "width": { "type": "integer", "minimum": 1 },
-        "height": { "type": "integer", "minimum": 1 },
-        "model": { "type": "string", "minLength": 1 },
+        "type": {
+          "const": "detections"
+        },
+        "v": {
+          "$ref": "#/$defs/version"
+        },
+        "frame_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
         "detections": {
           "type": "array",
-          "items": { "$ref": "#/$defs/detection" }
+          "items": {
+            "$ref": "#/$defs/detection"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/event_entry"
+          }
+        }
+      }
+    },
+    "insight_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "one_liner",
+        "what_changed",
+        "severity",
+        "tags"
+      ],
+      "properties": {
+        "one_liner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "what_changed": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "insight_usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cost_usd"
+      ],
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cost_usd": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "insight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "v",
+        "clip_id",
+        "trigger_frame_id",
+        "ts_ms",
+        "summary",
+        "usage"
+      ],
+      "properties": {
+        "type": {
+          "const": "insight"
+        },
+        "v": {
+          "$ref": "#/$defs/version"
+        },
+        "clip_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trigger_frame_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "summary": {
+          "$ref": "#/$defs/insight_summary"
+        },
+        "usage": {
+          "$ref": "#/$defs/insight_usage"
         }
       }
     },
     "error": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "v", "code", "message"],
+      "required": [
+        "type",
+        "v",
+        "code",
+        "message"
+      ],
       "properties": {
-        "type": { "const": "error" },
-        "v": { "$ref": "#/$defs/version" },
-        "frame_id": { "type": "string", "minLength": 1 },
-        "code": { "type": "string", "minLength": 1 },
-        "message": { "type": "string", "minLength": 1 }
+        "type": {
+          "const": "error"
+        },
+        "v": {
+          "$ref": "#/$defs/version"
+        },
+        "frame_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "hello": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "v", "role", "ts_ms"],
+      "required": [
+        "type",
+        "v",
+        "role",
+        "ts_ms"
+      ],
       "properties": {
-        "type": { "const": "hello" },
-        "v": { "$ref": "#/$defs/version" },
+        "type": {
+          "const": "hello"
+        },
+        "v": {
+          "$ref": "#/$defs/version"
+        },
         "role": {
           "type": "string",
-          "enum": ["ui", "eva", "quickvision"]
+          "enum": [
+            "ui",
+            "eva",
+            "quickvision"
+          ]
         },
-        "ts_ms": { "type": "integer", "minimum": 0 }
+        "ts_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "v",
+        "name"
+      ],
+      "properties": {
+        "type": {
+          "const": "command"
+        },
+        "v": {
+          "$ref": "#/$defs/version"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     }
   }
