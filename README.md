@@ -87,4 +87,4 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 14** (QuickVision tracking mode with `track(persist=true)`, per-detection `track_id`, and sequential per-connection inference with latest-frame-wins busy policy when tracking is enabled).
+Implemented through **Iteration 16** (QuickVision loitering detector via `roi_dwell` events with per-ROI dwell thresholds and once-per-track-per-ROI emission semantics).

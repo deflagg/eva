@@ -2,7 +2,7 @@
 
 Python daemon that hosts YOLO inference and (optional) insight triggering.
 
-## Current behavior (Iteration 14)
+## Current behavior (Iteration 16)
 
 - HTTP health endpoint at `/health`
 - WebSocket endpoint at `/infer`
@@ -17,6 +17,10 @@ Python daemon that hosts YOLO inference and (optional) insight triggering.
   - enforces sequential per-connection inference pipeline
     - when tracking is enabled and `tracking.busy_policy=latest`, uses a single **latest-frame-wins** pending slot
     - otherwise retains BUSY-drop behavior (`error.code = "BUSY"`)
+  - emits detector events inside `detections.events[]`:
+    - `roi_enter` / `roi_exit` for configured regions
+    - `line_cross` with direction (`A->B` / `B->A`) for configured lines
+    - `roi_dwell` once per track-per-ROI after dwell threshold is reached
   - supports temporary debug command payload:
     - `{"type":"command","v":1,"name":"insight_test"}`
 - Insight plumbing (manual trigger path):
@@ -39,10 +43,18 @@ Configured keys currently used:
 - `server.port`
 - `yolo.model_source`
 - `yolo.device` (`auto` | `cpu` | `cuda`)
-- `tracking.enabled` (default `false`)
+- `tracking.enabled` (default `true`)
 - `tracking.persist` (default `true`)
 - `tracking.tracker` (default `bytetrack.yaml`)
 - `tracking.busy_policy` (`drop` | `latest`, default `latest`)
+- `roi.enabled` (default `true`)
+- `roi.representative_point` (locked to `centroid`)
+- `roi.regions` (mapping keyed by region name, rect coords: `x1,y1,x2,y2`)
+- `roi.lines` (mapping keyed by line name, endpoints: `x1,y1,x2,y2`)
+- `roi.dwell.default_threshold_ms` (default dwell threshold)
+- optional per-region dwell override via either:
+  - `roi.regions.<name>.dwell_threshold_ms`, or
+  - `roi.dwell.region_threshold_ms.<name>`
 - `insights.enabled` (default `true`)
 - `insights.vision_agent_url`
 - `insights.timeout_ms`
@@ -59,6 +71,9 @@ QuickVision fails fast at startup if:
 - `yolo.device` is invalid
 - `tracking.busy_policy` is invalid
 - `tracking.tracker` is invalid
+- `roi.representative_point` is invalid (must be `centroid`)
+- `roi.regions` / `roi.lines` contain invalid geometry
+- ROI dwell settings are invalid (negative/non-integer threshold or unknown region override)
 - `insights.vision_agent_url` is invalid
 
 ## Run (dev)

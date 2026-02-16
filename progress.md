@@ -780,3 +780,149 @@
 ### Notes
 - No dedicated automated test suite exists yet; verification remains build checks plus manual runtime validation.
 - This iteration intentionally does not introduce detector/event logic beyond track-id continuity plumbing.
+
+## Iteration 15 — ROI + line crossing detectors: region enter/exit + directional line crossing
+
+**Status:** ✅ Completed (2026-02-16)
+
+### Completed
+- Added ROI configuration/geometry module: `packages/quickvision/app/roi.py`.
+  - loads and validates Dynaconf keys:
+    - `roi.enabled`
+    - `roi.representative_point` (locked to `"centroid"`)
+    - `roi.regions` (mapping of rectangular ROIs with `x1,y1,x2,y2`)
+    - `roi.lines` (mapping of directional lines with `x1,y1,x2,y2`)
+  - provides geometry helpers:
+    - box centroid representative point
+    - point-in-region checks
+    - line side classification (`A|B`) for directional crossing.
+- Added detector state/event engine: `packages/quickvision/app/events.py`.
+  - maintains per-track state for:
+    - ROI membership
+    - last known side per configured line
+  - emits protocol events in `detections.events[]`:
+    - `roi_enter` with `data: {"roi":"<name>"}`
+    - `roi_exit` with `data: {"roi":"<name>"}`
+    - `line_cross` with `data: {"line":"<name>","direction":"A->B|B->A"}`
+  - includes stale track-state eviction (TTL) to avoid unbounded per-track memory growth.
+- Updated QuickVision pipeline integration (`packages/quickvision/app/main.py`):
+  - startup now fail-fast loads ROI settings and logs active ROI config.
+  - per-connection detector engine instance created for `/infer` stream state.
+  - each detections message now passes through event engine before send.
+- Updated QuickVision defaults (`packages/quickvision/settings.yaml`) to include `roi` config block.
+- Updated docs:
+  - `packages/quickvision/README.md` (Iteration 15 behavior + ROI config keys)
+  - root `README.md` status line.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/vision-agent && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+
+### Manual test steps
+1. Configure a simple ROI + line in `packages/quickvision/settings.local.yaml`:
+   ```yaml
+   roi:
+     enabled: true
+     representative_point: centroid
+     regions:
+       left_half:
+         x1: 0
+         y1: 0
+         x2: 640
+         y2: 720
+     lines:
+       doorway:
+         x1: 640
+         y1: 0
+         x2: 640
+         y2: 720
+   ```
+2. Start QuickVision:
+   - `cd packages/quickvision`
+   - `source .venv/bin/activate`
+   - `python -m app.run`
+3. Start Eva and UI; stream camera frames from UI.
+4. Move a tracked object/person into/out of `left_half` and confirm `roi_enter` / `roi_exit` events appear in `detections.events[]`.
+5. Cross the `doorway` line in both directions and confirm `line_cross` with directional `A->B` / `B->A` is emitted.
+
+### Notes
+- ROI/line detectors require `track_id` continuity for robust state transitions; enabling tracking is recommended.
+- No dedicated automated detector test suite exists yet; verification remains build checks plus manual runtime validation.
+
+## Iteration 16 — Loitering detector: ROI dwell time
+
+**Status:** ✅ Completed (2026-02-16)
+
+### Completed
+- Enhanced ROI settings loader (`packages/quickvision/app/roi.py`) with loitering/dwell config support:
+  - added `roi.dwell.default_threshold_ms`
+  - added optional per-region dwell overrides via:
+    - `roi.regions.<name>.dwell_threshold_ms`, and/or
+    - `roi.dwell.region_threshold_ms.<name>`
+  - validates dwell thresholds as non-negative integers and fails fast for invalid values.
+- Extended ROI settings model with:
+  - `dwell_default_threshold_ms`
+  - `dwell_region_threshold_ms`
+  - helper `dwell_threshold_ms_for_region(...)`.
+- Enhanced detector event engine (`packages/quickvision/app/events.py`) for loitering:
+  - per-track per-ROI dwell state:
+    - `region_enter_ts_ms`
+    - `region_dwell_emitted`
+  - emits `roi_dwell` exactly once per track per ROI per continuous stay when dwell threshold is reached.
+  - keeps existing behavior for:
+    - `roi_enter`
+    - `roi_exit`
+    - `line_cross`
+  - exiting ROI clears dwell state so re-entering can emit `roi_dwell` again.
+- Updated QuickVision startup/health metadata (`packages/quickvision/app/main.py`):
+  - logs dwell default threshold and number of per-region overrides.
+  - `/health` now includes ROI dwell configuration summary fields.
+- Updated QuickVision committed defaults (`packages/quickvision/settings.yaml`) with:
+  - `roi.dwell.default_threshold_ms`
+  - `roi.dwell.region_threshold_ms`
+- Updated docs:
+  - `packages/quickvision/README.md`
+  - root `README.md` status line.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/vision-agent && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+
+### Manual test steps
+1. Configure ROI dwell thresholds in `packages/quickvision/settings.local.yaml`:
+   ```yaml
+   roi:
+     enabled: true
+     representative_point: centroid
+     regions:
+       left_half:
+         x1: 0
+         y1: 0
+         x2: 320
+         y2: 480
+         dwell_threshold_ms: 3000
+     lines:
+       center_vertical:
+         x1: 320
+         y1: 0
+         x2: 320
+         y2: 480
+     dwell:
+       default_threshold_ms: 5000
+       region_threshold_ms:
+         left_half: 3000
+   ```
+2. Start QuickVision/Eva/UI and begin camera streaming.
+3. Move into `left_half` ROI and remain there for >3 seconds.
+4. Confirm a single `roi_dwell` event appears for that track/ROI with data shape:
+   - `{"roi":"left_half","dwell_ms":<number>}`
+5. Continue staying inside ROI and confirm no duplicate `roi_dwell` for the same continuous stay.
+6. Exit ROI, then re-enter and wait past threshold again; confirm `roi_dwell` can emit again.
+
+### Notes
+- Loitering depends on stable `track_id` continuity; keep tracking enabled for reliable behavior.
+- No dedicated automated detector test suite exists yet; verification remains build checks plus manual runtime validation.

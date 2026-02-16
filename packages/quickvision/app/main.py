@@ -7,8 +7,10 @@ import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from .events import DetectionEventEngine
 from .insights import InsightBuffer, InsightError, InsightSettings, load_insight_settings
 from .protocol import BinaryFrameParseError, CommandMessage, decode_binary_frame_envelope, make_error, make_hello
+from .roi import RoiSettings, load_roi_settings
 from .tracking import TrackingSettings, load_tracking_settings, should_use_latest_pending_slot
 from .yolo import (
     FrameDecodeError,
@@ -23,12 +25,13 @@ app = FastAPI(title="quickvision", version="0.1.0")
 
 _insight_settings: InsightSettings | None = None
 _tracking_settings: TrackingSettings | None = None
+_roi_settings: RoiSettings | None = None
 
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    """Fail fast if YOLO/tracking/insight config is missing/invalid."""
-    global _insight_settings, _tracking_settings
+    """Fail fast if YOLO/tracking/ROI/insight config is missing/invalid."""
+    global _insight_settings, _tracking_settings, _roi_settings
 
     try:
         load_model()
@@ -42,6 +45,11 @@ async def on_startup() -> None:
 
     try:
         _tracking_settings = load_tracking_settings()
+    except Exception as exc:
+        raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
+
+    try:
+        _roi_settings = load_roi_settings()
     except Exception as exc:
         raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
 
@@ -61,6 +69,15 @@ async def on_startup() -> None:
         f"tracker={_tracking_settings.tracker} "
         f"busy_policy={_tracking_settings.busy_policy}"
     )
+    print(
+        "[quickvision] roi config: "
+        f"enabled={_roi_settings.enabled} "
+        f"representative_point={_roi_settings.representative_point} "
+        f"regions={len(_roi_settings.regions)} "
+        f"lines={len(_roi_settings.lines)} "
+        f"dwell_default_threshold_ms={_roi_settings.dwell_default_threshold_ms} "
+        f"dwell_region_overrides={len(_roi_settings.dwell_region_threshold_ms)}"
+    )
 
 
 @app.get("/health")
@@ -72,6 +89,11 @@ async def health() -> dict[str, object]:
         "insights_enabled": _insight_settings.enabled if _insight_settings is not None else False,
         "tracking_enabled": _tracking_settings.enabled if _tracking_settings is not None else False,
         "tracking_busy_policy": _tracking_settings.busy_policy if _tracking_settings is not None else None,
+        "roi_enabled": _roi_settings.enabled if _roi_settings is not None else False,
+        "roi_regions": len(_roi_settings.regions) if _roi_settings is not None else 0,
+        "roi_lines": len(_roi_settings.lines) if _roi_settings is not None else 0,
+        "roi_dwell_default_threshold_ms": _roi_settings.dwell_default_threshold_ms if _roi_settings is not None else 0,
+        "roi_dwell_region_overrides": len(_roi_settings.dwell_region_threshold_ms) if _roi_settings is not None else 0,
     }
 
 
@@ -81,9 +103,11 @@ async def infer_socket(websocket: WebSocket) -> None:
 
     insight_settings = _insight_settings if _insight_settings is not None else load_insight_settings()
     tracking_settings = _tracking_settings if _tracking_settings is not None else load_tracking_settings()
+    roi_settings = _roi_settings if _roi_settings is not None else load_roi_settings()
     use_latest_pending_slot = should_use_latest_pending_slot(tracking_settings)
 
     insight_buffer = InsightBuffer(insight_settings)
+    detection_event_engine = DetectionEventEngine(roi_settings)
 
     send_lock = asyncio.Lock()
 
@@ -105,6 +129,9 @@ async def infer_socket(websocket: WebSocket) -> None:
     async def process_frame(frame: InferenceFrame) -> None:
         try:
             detections = await run_inference(frame)
+            events = detection_event_engine.process(detections)
+            if events:
+                detections.events = events
             await send_payload(detections.model_dump(exclude_none=True))
         except FrameDecodeError as exc:
             await send_payload(make_error("INVALID_IMAGE", str(exc), frame_id=frame.frame_id))

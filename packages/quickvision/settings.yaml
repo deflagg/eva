@@ -12,6 +12,15 @@ tracking:
   tracker: bytetrack.yaml
   busy_policy: latest
 
+roi:
+  enabled: true
+  representative_point: centroid
+  regions: {}
+  lines: {}
+  dwell:
+    default_threshold_ms: 5000
+    region_threshold_ms: {}
+
 insights:
   enabled: true
   vision_agent_url: http://localhost:8790/insight
