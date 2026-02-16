@@ -1,7 +1,13 @@
 import { createServer, type Server } from 'node:http';
 import WebSocket, { WebSocketServer, type RawData } from 'ws';
 
-import { makeError, makeHello, FrameMessageSchema, QuickVisionInboundMessageSchema } from './protocol.js';
+import {
+  BinaryFrameDecodeError,
+  decodeBinaryFrameEnvelope,
+  makeError,
+  makeHello,
+  QuickVisionInboundMessageSchema,
+} from './protocol.js';
 import { createQuickVisionClient } from './quickvisionClient.js';
 import { FrameRouter } from './router.js';
 
@@ -27,6 +33,22 @@ function decodeRawData(data: RawData): string {
   }
 
   return Buffer.from(data).toString('utf8');
+}
+
+function rawDataToBuffer(data: RawData): Buffer {
+  if (Buffer.isBuffer(data)) {
+    return data;
+  }
+
+  if (typeof data === 'string') {
+    return Buffer.from(data, 'utf8');
+  }
+
+  if (Array.isArray(data)) {
+    return Buffer.concat(data);
+  }
+
+  return Buffer.from(data);
 }
 
 function sendJson(ws: WebSocket, payload: unknown): void {
@@ -162,7 +184,38 @@ export function startServer(options: StartServerOptions): Server {
     activeUiClient = ws;
     sendJson(ws, makeHello('eva'));
 
-    ws.on('message', (data) => {
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) {
+        const binaryPayload = rawDataToBuffer(data);
+
+        let decodedFrame;
+        try {
+          decodedFrame = decodeBinaryFrameEnvelope(binaryPayload);
+        } catch (error) {
+          const frameId = error instanceof BinaryFrameDecodeError ? error.frameId : undefined;
+          const message = error instanceof Error ? error.message : 'Invalid binary frame payload.';
+          sendJson(ws, makeError('INVALID_FRAME_BINARY', message, frameId));
+          return;
+        }
+
+        const frameId = decodedFrame.meta.frame_id;
+
+        if (!quickvisionClient.isConnected()) {
+          sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.', frameId));
+          return;
+        }
+
+        frameRouter.set(frameId, ws);
+
+        const forwarded = quickvisionClient.sendBinary(binaryPayload);
+        if (!forwarded) {
+          frameRouter.delete(frameId);
+          sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.', frameId));
+        }
+
+        return;
+      }
+
       let parsedPayload: unknown;
 
       try {
@@ -177,31 +230,17 @@ export function startServer(options: StartServerOptions): Server {
         return;
       }
 
-      if (parsedPayload.type !== 'frame') {
-        sendJson(ws, makeError('UNSUPPORTED_TYPE', 'Eva currently expects frame messages on /eye.'));
+      const frameId = getOptionalFrameId(parsedPayload);
+
+      if (parsedPayload.type === 'frame') {
+        sendJson(
+          ws,
+          makeError('FRAME_BINARY_REQUIRED', 'Frame messages must use binary WebSocket payloads.', frameId),
+        );
         return;
       }
 
-      const parsedFrame = FrameMessageSchema.safeParse(parsedPayload);
-      if (!parsedFrame.success) {
-        sendJson(ws, makeError('INVALID_FRAME', 'Invalid frame payload.', getOptionalFrameId(parsedPayload)));
-        return;
-      }
-
-      const frame = parsedFrame.data;
-
-      if (!quickvisionClient.isConnected()) {
-        sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.', frame.frame_id));
-        return;
-      }
-
-      frameRouter.set(frame.frame_id, ws);
-
-      const forwarded = quickvisionClient.sendJson(frame);
-      if (!forwarded) {
-        frameRouter.delete(frame.frame_id);
-        sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.', frame.frame_id));
-      }
+      sendJson(ws, makeError('UNSUPPORTED_TYPE', 'Eva currently expects binary frame payloads on /eye.', frameId));
     });
 
     ws.on('close', () => {

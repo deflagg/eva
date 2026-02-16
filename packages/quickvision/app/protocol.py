@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import json
 import time
+from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 PROTOCOL_VERSION: Literal[1] = 1
 RoleType = Literal["ui", "eva", "quickvision"]
+
+BINARY_META_LENGTH_BYTES = 4
+
+
+class BinaryFrameParseError(ValueError):
+    """Raised when a binary frame envelope cannot be decoded."""
 
 
 class ProtocolMessage(BaseModel):
@@ -29,15 +37,21 @@ class ErrorMessage(ProtocolMessage):
     message: str = Field(min_length=1)
 
 
-class FrameMessage(ProtocolMessage):
-    type: Literal["frame"] = "frame"
+class FrameBinaryMetaMessage(ProtocolMessage):
+    type: Literal["frame_binary"] = "frame_binary"
     v: Literal[1] = PROTOCOL_VERSION
     frame_id: str = Field(min_length=1)
     ts_ms: int = Field(ge=0)
     mime: Literal["image/jpeg"] = "image/jpeg"
     width: int = Field(ge=1)
     height: int = Field(ge=1)
-    image_b64: str = Field(min_length=1)
+    image_bytes: int = Field(ge=1)
+
+
+@dataclass(slots=True)
+class BinaryFrameEnvelope:
+    meta: FrameBinaryMetaMessage
+    image_payload: bytes
 
 
 class DetectionEntry(BaseModel):
@@ -56,6 +70,53 @@ class DetectionsMessage(ProtocolMessage):
     height: int = Field(ge=1)
     model: str = Field(min_length=1)
     detections: list[DetectionEntry]
+
+
+def _extract_optional_frame_id(payload: object) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+
+    frame_id = payload.get("frame_id")
+    return frame_id if isinstance(frame_id, str) else None
+
+
+def decode_binary_frame_envelope(payload: bytes) -> BinaryFrameEnvelope:
+    if len(payload) < BINARY_META_LENGTH_BYTES:
+        raise BinaryFrameParseError("Binary frame payload is too short.")
+
+    metadata_length = int.from_bytes(payload[:BINARY_META_LENGTH_BYTES], byteorder="big", signed=False)
+    if metadata_length <= 0:
+        raise BinaryFrameParseError("Binary frame metadata length must be greater than zero.")
+
+    metadata_start = BINARY_META_LENGTH_BYTES
+    metadata_end = metadata_start + metadata_length
+
+    if len(payload) < metadata_end:
+        raise BinaryFrameParseError("Binary frame metadata length exceeds payload size.")
+
+    metadata_raw = payload[metadata_start:metadata_end]
+
+    try:
+        metadata_obj = json.loads(metadata_raw.decode("utf-8"))
+    except Exception as exc:
+        raise BinaryFrameParseError("Binary frame metadata is not valid JSON.") from exc
+
+    frame_id = _extract_optional_frame_id(metadata_obj)
+
+    try:
+        metadata = FrameBinaryMetaMessage.model_validate(metadata_obj)
+    except ValidationError as exc:
+        raise BinaryFrameParseError(
+            f"Binary frame metadata is invalid{f' for frame_id={frame_id}' if frame_id else ''}."
+        ) from exc
+
+    image_payload = payload[metadata_end:]
+    if len(image_payload) != metadata.image_bytes:
+        raise BinaryFrameParseError(
+            f"Binary frame image length mismatch (expected {metadata.image_bytes}, got {len(image_payload)})."
+        )
+
+    return BinaryFrameEnvelope(meta=metadata, image_payload=image_payload)
 
 
 def make_hello(role: RoleType) -> dict[str, object]:

@@ -2,9 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.com/eva/protocol-v1.schema.json",
   "title": "Eva Protocol v1",
+  "description": "JSON message schemas for Eva protocol control/detection messages and binary-frame metadata.",
   "type": "object",
   "oneOf": [
-    { "$ref": "#/$defs/frame" },
+    { "$ref": "#/$defs/frame_binary_meta" },
     { "$ref": "#/$defs/detections" },
     { "$ref": "#/$defs/error" },
     { "$ref": "#/$defs/hello" }
@@ -14,7 +15,7 @@
       "type": "integer",
       "const": 1
     },
-    "frame": {
+    "frame_binary_meta": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -25,17 +26,17 @@
         "mime",
         "width",
         "height",
-        "image_b64"
+        "image_bytes"
       ],
       "properties": {
-        "type": { "const": "frame" },
+        "type": { "const": "frame_binary" },
         "v": { "$ref": "#/$defs/version" },
         "frame_id": { "type": "string", "minLength": 1 },
         "ts_ms": { "type": "integer", "minimum": 0 },
         "mime": { "type": "string", "const": "image/jpeg" },
         "width": { "type": "integer", "minimum": 1 },
         "height": { "type": "integer", "minimum": 1 },
-        "image_b64": { "type": "string", "minLength": 1 }
+        "image_bytes": { "type": "integer", "minimum": 1 }
       }
     },
     "detection": {
@@ -88,7 +89,7 @@
       "properties": {
         "type": { "const": "error" },
         "v": { "$ref": "#/$defs/version" },
-        "frame_id": { "type": "string" },
+        "frame_id": { "type": "string", "minLength": 1 },
         "code": { "type": "string", "minLength": 1 },
         "message": { "type": "string", "minLength": 1 }
       }

@@ -5,15 +5,15 @@ export interface HelloMessage {
   ts_ms: number;
 }
 
-export interface FrameMessage {
-  type: 'frame';
+export interface FrameBinaryMeta {
+  type: 'frame_binary';
   v: 1;
   frame_id: string;
   ts_ms: number;
   mime: 'image/jpeg';
   width: number;
   height: number;
-  image_b64: string;
+  image_bytes: number;
 }
 
 export interface ErrorMessage {
@@ -42,4 +42,4 @@ export interface DetectionsMessage {
   detections: DetectionEntry[];
 }
 
-export type ProtocolMessage = HelloMessage | FrameMessage | DetectionsMessage | ErrorMessage;
+export type ProtocolMessage = HelloMessage | DetectionsMessage | ErrorMessage;

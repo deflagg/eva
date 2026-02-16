@@ -1,25 +1,37 @@
 # Eva Protocol (v1)
 
-JSON messages are exchanged over WebSockets.
+Detections/control messages are JSON over WebSocket. Frame transport (UI -> Eva -> QuickVision) uses a binary envelope.
 
 ## Message Types
 
-### 1) `frame` (UI -> Eva -> QuickVision)
+### 1) `frame_binary` envelope (UI -> Eva -> QuickVision)
+
+Each frame is sent as one **binary WebSocket message** with this layout:
+
+1. **4 bytes**: unsigned big-endian metadata length `N`
+2. **N bytes**: UTF-8 JSON metadata object
+3. **remaining bytes**: raw JPEG payload
+
+Metadata JSON shape:
 
 ```json
 {
-  "type": "frame",
+  "type": "frame_binary",
   "v": 1,
   "frame_id": "550e8400-e29b-41d4-a716-446655440000",
   "ts_ms": 1700000000000,
   "mime": "image/jpeg",
   "width": 1280,
   "height": 720,
-  "image_b64": "<base64 jpeg bytes, no data: prefix>"
+  "image_bytes": 54321
 }
 ```
 
-### 2) `detections` (QuickVision -> Eva -> UI)
+Rules:
+- `image_bytes` must exactly match the binary JPEG payload size.
+- `mime` is currently fixed to `image/jpeg`.
+
+### 2) `detections` (QuickVision -> Eva -> UI) JSON
 
 ```json
 {
@@ -41,7 +53,7 @@ JSON messages are exchanged over WebSockets.
 }
 ```
 
-### 3) `error` (any direction)
+### 3) `error` (any direction) JSON
 
 ```json
 {
@@ -53,7 +65,7 @@ JSON messages are exchanged over WebSockets.
 }
 ```
 
-### 4) Optional `hello` (debug)
+### 4) Optional `hello` (debug) JSON
 
 ```json
 {
@@ -67,5 +79,4 @@ JSON messages are exchanged over WebSockets.
 ## Notes
 
 - `v` is protocol version and is currently fixed at `1`.
-- `image_b64` must be raw base64 bytes (no `data:` URL prefix).
 - Detection `box` coordinates are in source-frame pixel space: `[x1, y1, x2, y2]`.

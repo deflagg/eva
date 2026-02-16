@@ -5,11 +5,11 @@ import contextlib
 import json
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from pydantic import ValidationError
 
-from .protocol import FrameMessage, make_error, make_hello
+from .protocol import BinaryFrameParseError, decode_binary_frame_envelope, make_error, make_hello
 from .yolo import (
     FrameDecodeError,
+    InferenceFrame,
     get_model_summary,
     is_model_loaded,
     load_model,
@@ -57,59 +57,76 @@ async def infer_socket(websocket: WebSocket) -> None:
 
     inference_task: asyncio.Task[None] | None = None
 
-    async def process_frame(frame_message: FrameMessage) -> None:
+    async def process_frame(frame: InferenceFrame) -> None:
         try:
-            detections = await run_inference(frame_message)
+            detections = await run_inference(frame)
             await send_payload(detections.model_dump(exclude_none=True))
         except FrameDecodeError as exc:
-            await send_payload(make_error("INVALID_IMAGE", str(exc), frame_id=frame_message.frame_id))
+            await send_payload(make_error("INVALID_IMAGE", str(exc), frame_id=frame.frame_id))
         except Exception as exc:
-            await send_payload(make_error("INFERENCE_ERROR", str(exc), frame_id=frame_message.frame_id))
+            await send_payload(make_error("INFERENCE_ERROR", str(exc), frame_id=frame.frame_id))
 
     try:
         while True:
-            raw_payload = await websocket.receive_text()
+            ws_event = await websocket.receive()
+            event_type = ws_event.get("type")
 
-            try:
-                parsed_payload = json.loads(raw_payload)
-            except json.JSONDecodeError:
-                await send_payload(make_error("INVALID_JSON", "Expected valid JSON payload."))
+            if event_type == "websocket.disconnect":
+                break
+
+            if event_type != "websocket.receive":
                 continue
 
-            if not isinstance(parsed_payload, dict):
-                await send_payload(make_error("INVALID_PAYLOAD", "Expected JSON object payload."))
-                continue
+            binary_payload = ws_event.get("bytes")
+            text_payload = ws_event.get("text")
 
-            frame_id_value = parsed_payload.get("frame_id")
-            frame_id = frame_id_value if isinstance(frame_id_value, str) else None
+            if binary_payload is None:
+                frame_id: str | None = None
 
-            if parsed_payload.get("type") != "frame":
+                if isinstance(text_payload, str):
+                    try:
+                        parsed_payload = json.loads(text_payload)
+                    except json.JSONDecodeError:
+                        await send_payload(make_error("INVALID_JSON", "Expected valid JSON payload."))
+                        continue
+
+                    if isinstance(parsed_payload, dict):
+                        frame_id_value = parsed_payload.get("frame_id")
+                        frame_id = frame_id_value if isinstance(frame_id_value, str) else None
+
                 await send_payload(
                     make_error(
-                        "UNSUPPORTED_TYPE",
-                        "QuickVision currently expects frame messages on /infer.",
+                        "FRAME_BINARY_REQUIRED",
+                        "QuickVision expects binary frame payloads on /infer.",
                         frame_id=frame_id,
                     )
                 )
                 continue
 
             try:
-                frame_message = FrameMessage.model_validate(parsed_payload)
-            except ValidationError:
-                await send_payload(make_error("INVALID_FRAME", "Invalid frame payload.", frame_id=frame_id))
+                envelope = decode_binary_frame_envelope(binary_payload)
+            except BinaryFrameParseError as exc:
+                await send_payload(make_error("INVALID_FRAME_BINARY", str(exc)))
                 continue
+
+            frame = InferenceFrame(
+                frame_id=envelope.meta.frame_id,
+                width=envelope.meta.width,
+                height=envelope.meta.height,
+                image_bytes=envelope.image_payload,
+            )
 
             if inference_task is not None and not inference_task.done():
                 await send_payload(
                     make_error(
                         "BUSY",
                         "Inference is already running for this connection; frame dropped.",
-                        frame_id=frame_message.frame_id,
+                        frame_id=frame.frame_id,
                     )
                 )
                 continue
 
-            inference_task = asyncio.create_task(process_frame(frame_message))
+            inference_task = asyncio.create_task(process_frame(frame))
     except WebSocketDisconnect:
         pass
     finally:

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import io
 import os
 import time
@@ -12,7 +10,7 @@ import numpy as np
 from PIL import Image
 from ultralytics import YOLO
 
-from .protocol import DetectionEntry, DetectionsMessage, FrameMessage
+from .protocol import DetectionEntry, DetectionsMessage
 
 MODEL_LABEL = "yoloe-26"
 HARD_CODED_MODEL_SOURCE = "yolo26n.pt"
@@ -32,6 +30,14 @@ class LoadedYoloModel:
     model: YOLO
     model_source: str
     device: str
+
+
+@dataclass(slots=True)
+class InferenceFrame:
+    frame_id: str
+    width: int
+    height: int
+    image_bytes: bytes
 
 
 _loaded_model: LoadedYoloModel | None = None
@@ -90,14 +96,9 @@ def is_model_loaded() -> bool:
     return _loaded_model is not None
 
 
-def _decode_frame_to_numpy(frame: FrameMessage) -> np.ndarray:
+def _decode_frame_to_numpy(frame: InferenceFrame) -> np.ndarray:
     try:
-        image_bytes = base64.b64decode(frame.image_b64, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise FrameDecodeError("Frame image_b64 is not valid base64.") from exc
-
-    try:
-        with Image.open(io.BytesIO(image_bytes)) as image:
+        with Image.open(io.BytesIO(frame.image_bytes)) as image:
             rgb = image.convert("RGB")
             return np.asarray(rgb)
     except Exception as exc:  # pragma: no cover - Pillow exception hierarchy varies
@@ -119,7 +120,7 @@ def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
-def _run_inference_sync(frame: FrameMessage) -> DetectionsMessage:
+def _run_inference_sync(frame: InferenceFrame) -> DetectionsMessage:
     model_state = get_loaded_model()
     image_np = _decode_frame_to_numpy(frame)
 
@@ -172,6 +173,6 @@ def _run_inference_sync(frame: FrameMessage) -> DetectionsMessage:
     )
 
 
-async def run_inference(frame: FrameMessage) -> DetectionsMessage:
+async def run_inference(frame: InferenceFrame) -> DetectionsMessage:
     """Run YOLO inference in a worker thread."""
     return await asyncio.to_thread(_run_inference_sync, frame)

@@ -14,6 +14,7 @@ export interface EvaWsClient {
   connect: () => void;
   disconnect: () => void;
   sendJson: (payload: unknown) => boolean;
+  sendBinary: (payload: ArrayBuffer | Blob | ArrayBufferView) => boolean;
   getStatus: () => WsConnectionStatus;
 }
 
@@ -100,6 +101,15 @@ export function createEvaWsClient(handlers: EvaWsHandlers = {}): EvaWsClient {
       }
 
       ws.send(JSON.stringify(payload));
+      return true;
+    },
+
+    sendBinary(payload: ArrayBuffer | Blob | ArrayBufferView): boolean {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return false;
+      }
+
+      ws.send(payload);
       return true;
     },
 

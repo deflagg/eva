@@ -2,7 +2,7 @@ export interface CapturedJpegFrame {
   mime: 'image/jpeg';
   width: number;
   height: number;
-  image_b64: string;
+  image_bytes: Uint8Array;
 }
 
 export function isCameraSupported(): boolean {
@@ -35,19 +35,6 @@ export function stopCamera(stream: MediaStream | null): void {
   for (const track of stream.getTracks()) {
     track.stop();
   }
-}
-
-async function blobToBase64(blob: Blob): Promise<string> {
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  const chunkSize = 0x8000;
-  let binary = '';
-
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-
-  return btoa(binary);
 }
 
 export async function captureJpegFrame(
@@ -85,12 +72,12 @@ export async function captureJpegFrame(
     return null;
   }
 
-  const image_b64 = await blobToBase64(blob);
+  const image_bytes = new Uint8Array(await blob.arrayBuffer());
 
   return {
     mime: 'image/jpeg',
     width,
     height,
-    image_b64,
+    image_bytes,
   };
 }

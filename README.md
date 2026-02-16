@@ -62,4 +62,4 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 7** (real YOLO inference in QuickVision).
+Implemented through **Iteration 9** (binary frame protocol for UI -> Eva -> QuickVision).

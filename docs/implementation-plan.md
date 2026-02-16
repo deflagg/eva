@@ -258,36 +258,13 @@ Goal:
 Acceptance:
 - No unbounded growth; logs show evictions; no “wrong client got boxes”.
 
-Iteration 9 — Multi-client support
-Goal:
-- Eva supports multiple UI clients simultaneously
-- Each frame_id routes to correct client
-Acceptance:
-- Two browser tabs both work concurrently.
-
-Iteration 10 — Packaging + health checks + docs
-Goal:
-- Add:
-  - Eva GET /health: qv_connected true/false
-  - QuickVision GET /health: model_loaded true/false
-  - docker-compose.yml for eva + quickvision (+ ui optional)
-- Update READMEs + troubleshooting section
-Acceptance:
-- `docker compose up` runs eva+quickvision end-to-end (UI can still be dev).
-
-Optional Iteration 11 (only if needed) — Binary frame protocol
+Iteration 9 — Binary frame protocol
 Goal:
 - Switch from base64 JSON to binary frames for performance
 - Keep metadata + payload deterministic (document it)
 Acceptance:
 - Same behavior, lower overhead.
 
-Optional Later Iteration (only if desired) — JS workspaces
-Goal:
-- Add root package.json workspaces for packages/eva, packages/ui, packages/protocol
-- Keep quickvision independent (python)
-Acceptance:
-- Root install + per-package dev works; no behavioral changes.
 
 ────────────────────────────────────────────────────────────
 CODING RULES

@@ -422,4 +422,52 @@
 
 ### Notes
 - No dedicated automated test suite exists yet; verification remains build checks + manual end-to-end validation.
-- Iteration 9 will remove single-client restriction and use the same route map for concurrent clients.
+- Implementation plan was revised after Iteration 8; Iteration 9 now targets binary frame transport.
+
+## Iteration 9 — Binary frame protocol
+
+**Status:** ✅ Completed (2026-02-16)
+
+### Completed
+- Switched UI -> Eva -> QuickVision frame transport from JSON `image_b64` payloads to binary WebSocket envelopes.
+- Added deterministic binary envelope format:
+  - 4-byte big-endian metadata length
+  - UTF-8 JSON metadata (`type: "frame_binary"`)
+  - raw JPEG payload bytes
+- Updated UI frame capture/send path:
+  - `captureJpegFrame()` now returns raw JPEG bytes
+  - added envelope encoder in `ui/src/frameBinary.ts`
+  - frame send now uses `ws.send(binary)` via new `sendBinary(...)` client API
+- Updated Eva frame ingress/forwarding path:
+  - validates binary envelope metadata and payload length with zod
+  - preserves frame routing (`frame_id -> client`) and TTL behavior from Iteration 8
+  - forwards binary frame payload directly to QuickVision
+  - returns `INVALID_FRAME_BINARY` / `FRAME_BINARY_REQUIRED` where applicable
+- Updated Eva QuickVision client to support `sendBinary(...)`.
+- Updated QuickVision `/infer` to read binary WS payloads and validate envelope metadata with Pydantic.
+- Updated YOLO inference input pipeline to decode JPEG from raw bytes (removed base64 decode step).
+- Updated protocol docs/schema and component READMEs for the binary frame format.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+
+### Manual test steps
+1. Start QuickVision:
+   - `cd packages/quickvision`
+   - `source .venv/bin/activate`
+   - `uvicorn app.main:app --reload --port 8000`
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+4. Open UI, start camera + streaming, and confirm detections continue to arrive.
+5. Stop QuickVision and confirm UI receives `QV_UNAVAILABLE` errors for new frames.
+6. Restart QuickVision and confirm Eva reconnects and frame streaming resumes.
+
+### Notes
+- No dedicated automated test suite exists yet; verification remains build checks + manual end-to-end validation.
+- Single-client UI limitation remains in Eva (unchanged in this iteration).

@@ -21,6 +21,7 @@ export interface QuickVisionClient {
   connect: () => void;
   disconnect: () => void;
   sendJson: (payload: unknown) => boolean;
+  sendBinary: (payload: Buffer) => boolean;
   isConnected: () => boolean;
   getUrl: () => string;
 }
@@ -100,7 +101,12 @@ export function createQuickVisionClient(options: QuickVisionClientOptions): Quic
       handlers.onError?.(error);
     });
 
-    ws.on('message', (data) => {
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) {
+        handlers.onInvalidMessage?.('<unexpected binary message from QuickVision>');
+        return;
+      }
+
       const raw = decodeRawData(data);
 
       try {
@@ -139,6 +145,15 @@ export function createQuickVisionClient(options: QuickVisionClientOptions): Quic
       }
 
       ws.send(JSON.stringify(payload));
+      return true;
+    },
+
+    sendBinary(payload: Buffer): boolean {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return false;
+      }
+
+      ws.send(payload, { binary: true });
       return true;
     },
 

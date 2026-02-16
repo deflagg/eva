@@ -2,8 +2,9 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 
 import { captureJpegFrame, isCameraSupported, startCamera, stopCamera } from './camera';
+import { encodeBinaryFrameEnvelope } from './frameBinary';
 import { clearOverlay, drawDetectionsOverlay } from './overlay';
-import type { DetectionsMessage, FrameMessage } from './types';
+import type { DetectionsMessage, FrameBinaryMeta } from './types';
 import { createEvaWsClient, getEvaWsUrl, type EvaWsClient, type WsConnectionStatus } from './ws';
 
 type LogDirection = 'system' | 'outgoing' | 'incoming';
@@ -52,13 +53,7 @@ function shouldSampleFrameLog(count: number): boolean {
 
 function summarizeMessage(message: unknown): string {
   try {
-    return JSON.stringify(message, (key, value) => {
-      if (key === 'image_b64' && typeof value === 'string') {
-        return `<base64:${value.length} chars>`;
-      }
-
-      return value;
-    });
+    return JSON.stringify(message);
   } catch {
     return String(message);
   }
@@ -363,18 +358,23 @@ function App(): JSX.Element {
       }
 
       const frameId = crypto.randomUUID();
-      const payload: FrameMessage = {
-        type: 'frame',
+      const frameMeta: FrameBinaryMeta = {
+        type: 'frame_binary',
         v: 1,
         frame_id: frameId,
         ts_ms: Date.now(),
         mime: capturedFrame.mime,
         width: capturedFrame.width,
         height: capturedFrame.height,
-        image_b64: capturedFrame.image_b64,
+        image_bytes: capturedFrame.image_bytes.byteLength,
       };
 
-      const sent = client.sendJson(payload);
+      const binaryEnvelope = encodeBinaryFrameEnvelope({
+        meta: frameMeta,
+        imageBytes: capturedFrame.image_bytes,
+      });
+
+      const sent = client.sendBinary(binaryEnvelope);
       if (!sent) {
         return;
       }
@@ -404,7 +404,10 @@ function App(): JSX.Element {
       setFramesSent(framesSentRef.current);
 
       if (shouldSampleFrameLog(framesSentRef.current)) {
-        appendLog('outgoing', summarizeMessage(payload));
+        appendLog(
+          'outgoing',
+          `frame_binary frame_id=${frameMeta.frame_id} ${frameMeta.width}x${frameMeta.height} bytes=${frameMeta.image_bytes}`,
+        );
       }
     } catch (error) {
       appendLog('system', `Frame capture/send failed: ${toErrorMessage(error)}`);
@@ -453,7 +456,7 @@ function App(): JSX.Element {
 
   return (
     <main style={{ fontFamily: 'sans-serif', padding: 16, lineHeight: 1.4 }}>
-      <h1>Eva UI (Iteration 6)</h1>
+      <h1>Eva UI (Iteration 9)</h1>
 
       <p>
         WebSocket target: <code>{getEvaWsUrl()}</code>

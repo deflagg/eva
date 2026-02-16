@@ -2,13 +2,14 @@
 
 Python daemon that hosts YOLO inference.
 
-## Current behavior (Iteration 7)
+## Current behavior (Iteration 9)
 
 - HTTP health endpoint at `/health`
 - WebSocket endpoint at `/infer`
   - sends `hello` on connect (`role: "quickvision"`)
-  - validates protocol `frame` payloads with Pydantic v2
-  - decodes `image_b64` JPEG payloads with Pillow + numpy
+  - expects **binary frame envelopes** for frame payloads
+  - validates binary metadata (`frame_binary`) and byte-length consistency
+  - decodes raw JPEG bytes with Pillow + numpy
   - runs YOLO inference in a worker thread (`asyncio.to_thread(...)`)
   - returns protocol `detections` with `model: "yoloe-26"`
   - if inference already running for that connection, drops new frame with `error.code = "BUSY"`
