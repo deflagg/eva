@@ -2,6 +2,8 @@ Implement the system below in SMALL ITERATIONS so diffs stay small and reviewabl
 - build/lint/test passing (or explicit “no tests yet; manual test steps included”)
 - a short change summary + files changed
 - clear run instructions
+- stop after each iteration to allow for review and feedback before proceeding to the next one.
+- Keep progress in progress.md
 
 ────────────────────────────────────────────────────────────
 STACK CHOICES (LOCKED — don’t bikeshed)
