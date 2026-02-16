@@ -18,6 +18,11 @@ export interface StartServerOptions {
   port: number;
   eyePath: string;
   quickvisionWsUrl: string;
+  insightRelay: {
+    enabled: boolean;
+    cooldownMs: number;
+    dedupeWindowMs: number;
+  };
 }
 
 function decodeRawData(data: RawData): string {
@@ -74,7 +79,7 @@ function getOptionalFrameId(payload: unknown): string | undefined {
 }
 
 export function startServer(options: StartServerOptions): Server {
-  const { port, eyePath, quickvisionWsUrl } = options;
+  const { port, eyePath, quickvisionWsUrl, insightRelay } = options;
 
   const server = createServer((_req, res) => {
     res.statusCode = 200;
@@ -83,6 +88,47 @@ export function startServer(options: StartServerOptions): Server {
   });
 
   let activeUiClient: WebSocket | null = null;
+  let lastRelayedInsightTsMs: number | null = null;
+  const seenInsightClipIds = new Map<string, number>();
+
+  const evictExpiredInsightClipIds = (nowMs: number): void => {
+    if (insightRelay.dedupeWindowMs <= 0) {
+      seenInsightClipIds.clear();
+      return;
+    }
+
+    for (const [clipId, seenAtMs] of seenInsightClipIds.entries()) {
+      if (nowMs - seenAtMs >= insightRelay.dedupeWindowMs) {
+        seenInsightClipIds.delete(clipId);
+      }
+    }
+  };
+
+  const shouldRelayInsight = (clipId: string): boolean => {
+    if (!insightRelay.enabled) {
+      return false;
+    }
+
+    const nowMs = Date.now();
+    evictExpiredInsightClipIds(nowMs);
+
+    const alreadySeenAt = seenInsightClipIds.get(clipId);
+    if (alreadySeenAt !== undefined && nowMs - alreadySeenAt < insightRelay.dedupeWindowMs) {
+      return false;
+    }
+
+    seenInsightClipIds.set(clipId, nowMs);
+
+    if (lastRelayedInsightTsMs !== null && insightRelay.cooldownMs > 0) {
+      const elapsedMs = nowMs - lastRelayedInsightTsMs;
+      if (elapsedMs < insightRelay.cooldownMs) {
+        return false;
+      }
+    }
+
+    lastRelayedInsightTsMs = nowMs;
+    return true;
+  };
 
   const frameRouter = new FrameRouter({
     ttlMs: FRAME_ROUTE_TTL_MS,
@@ -137,6 +183,14 @@ export function startServer(options: StartServerOptions): Server {
 
           sendJson(targetClient, message);
           return;
+        }
+
+        if (message.type === 'insight') {
+          const shouldRelay = shouldRelayInsight(message.clip_id);
+          if (!shouldRelay) {
+            console.warn(`[eva] insight relay suppressed for clip_id ${message.clip_id}`);
+            return;
+          }
         }
 
         if (!activeUiClient || activeUiClient.readyState !== WebSocket.OPEN) {
@@ -288,10 +342,14 @@ export function startServer(options: StartServerOptions): Server {
     console.log(`[eva] listening on http://localhost:${port}`);
     console.log(`[eva] websocket endpoint ws://localhost:${port}${eyePath}`);
     console.log(`[eva] QuickVision target ${quickvisionClient.getUrl()}`);
+    console.log(
+      `[eva] insight relay enabled=${insightRelay.enabled} cooldownMs=${insightRelay.cooldownMs} dedupeWindowMs=${insightRelay.dedupeWindowMs}`,
+    );
   });
 
   server.on('close', () => {
     frameRouter.clear();
+    seenInsightClipIds.clear();
     quickvisionClient.disconnect();
     wss.close();
   });

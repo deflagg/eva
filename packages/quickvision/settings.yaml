@@ -37,6 +37,19 @@ collision:
   closing_speed_px_s: 120
   pair_cooldown_ms: 1500
 
+abandoned:
+  enabled: true
+  object_classes:
+    - backpack
+    - suitcase
+    - handbag
+  associate_max_distance_px: 120
+  associate_min_ms: 1000
+  abandon_delay_ms: 5000
+  stationary_max_move_px: 20
+  roi: null
+  event_cooldown_ms: 10000
+
 insights:
   enabled: true
   vision_agent_url: http://localhost:8790/insight
@@ -45,3 +58,15 @@ insights:
   pre_frames: 3
   post_frames: 2
   insight_cooldown_ms: 10000
+
+surprise:
+  enabled: true
+  threshold: 5
+  cooldown_ms: 10000
+  weights:
+    abandoned_object: 5
+    near_collision: 5
+    roi_dwell: 3
+    line_cross: 3
+    sudden_motion: 1.5
+    track_stop: 1.5

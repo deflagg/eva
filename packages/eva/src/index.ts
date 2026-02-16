@@ -7,4 +7,5 @@ startServer({
   port: config.server.port,
   eyePath: config.server.eyePath,
   quickvisionWsUrl: config.quickvision.wsUrl,
+  insightRelay: config.insightRelay,
 });

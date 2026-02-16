@@ -5,5 +5,10 @@
   },
   "quickvision": {
     "wsUrl": "ws://localhost:8000/infer"
+  },
+  "insightRelay": {
+    "enabled": true,
+    "cooldownMs": 10000,
+    "dedupeWindowMs": 60000
   }
 }

@@ -2,7 +2,7 @@
 
 TypeScript daemon for UI/WebSocket orchestration.
 
-## Current behavior (Iteration 13)
+## Current behavior (Iteration 20)
 
 - HTTP server on configured `server.port` (default `8787`)
 - Eva opens a WebSocket client to configured `quickvision.wsUrl` (default `ws://localhost:8000/infer`)
@@ -14,6 +14,10 @@ TypeScript daemon for UI/WebSocket orchestration.
   - tracks `frame_id -> ui client` routes with 5s TTL eviction
   - routes QuickVision `detections` (and frame-scoped `error`) back to the originating client
   - forwards non-frame messages (for example `insight`) to the active UI client
+  - applies insight relay guardrails for `insight` messages:
+    - optional relay enable/disable (`insightRelay.enabled`)
+    - relay cooldown (`insightRelay.cooldownMs`)
+    - clip-id dedupe window (`insightRelay.dedupeWindowMs`)
   - forwards JSON `command` messages from UI to QuickVision (used for temporary `insight_test` trigger)
   - returns `QV_UNAVAILABLE` immediately when QuickVision is not connected
   - cleans up all in-flight `frame_id` routes when a UI client disconnects
@@ -40,6 +44,11 @@ Config schema:
   },
   "quickvision": {
     "wsUrl": "ws://localhost:8000/infer"
+  },
+  "insightRelay": {
+    "enabled": true,
+    "cooldownMs": 10000,
+    "dedupeWindowMs": 60000
   }
 }
 ```

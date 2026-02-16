@@ -5,21 +5,39 @@ import base64
 import time
 import uuid
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
-from .protocol import FrameBinaryMetaMessage, InsightMessage
+from .protocol import EventEntry, FrameBinaryMetaMessage, InsightMessage
 from .settings import settings
 from .vision_agent_client import VisionAgentClient, VisionAgentClientError, VisionAgentFrame
 
 HARD_MAX_INSIGHT_FRAMES = 6
+DEFAULT_SURPRISE_THRESHOLD = 5.0
+DEFAULT_SURPRISE_WEIGHTS = {
+    "abandoned_object": 5.0,
+    "near_collision": 5.0,
+    "roi_dwell": 3.0,
+    "line_cross": 3.0,
+    "sudden_motion": 1.5,
+    "track_stop": 1.5,
+}
 
 
 class InsightError(RuntimeError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+@dataclass(slots=True)
+class SurpriseSettings:
+    enabled: bool
+    threshold: float
+    cooldown_ms: int
+    weights: dict[str, float]
 
 
 @dataclass(slots=True)
@@ -31,6 +49,7 @@ class InsightSettings:
     pre_frames: int
     post_frames: int
     insight_cooldown_ms: int
+    surprise: SurpriseSettings
 
 
 @dataclass(slots=True)
@@ -49,6 +68,7 @@ class InsightBuffer:
         self._next_seq = 1
         self._frame_event = asyncio.Event()
         self._last_insight_ts_ms: int | None = None
+        self._last_surprise_trigger_ts_ms: int | None = None
         self._vision_agent = VisionAgentClient(config.vision_agent_url, config.timeout_ms)
 
     def add_frame(self, meta: FrameBinaryMetaMessage, image_payload: bytes) -> None:
@@ -65,25 +85,43 @@ class InsightBuffer:
         self._frame_event.set()
 
     async def run_insight_test(self) -> InsightMessage:
-        if not self.config.enabled:
-            raise InsightError("INSIGHTS_DISABLED", "Insights are disabled in QuickVision settings.")
+        self._ensure_enabled()
 
+        trigger = self._latest_trigger_frame()
         now_ms = int(time.time() * 1000)
-        if self._last_insight_ts_ms is not None and self.config.insight_cooldown_ms > 0:
-            elapsed_ms = now_ms - self._last_insight_ts_ms
-            if elapsed_ms < self.config.insight_cooldown_ms:
-                retry_after = self.config.insight_cooldown_ms - elapsed_ms
-                raise InsightError(
-                    "INSIGHT_COOLDOWN",
-                    f"Insight cooldown active. Retry in ~{retry_after}ms.",
-                )
-
-        if not self._frames:
-            raise InsightError("NO_TRIGGER_FRAME", "No frames available yet; cannot run insight_test.")
-
-        trigger = self._frames[-1]
+        self._enforce_insight_cooldown(now_ms)
         self._last_insight_ts_ms = now_ms
 
+        return await self._request_insight(trigger)
+
+    async def run_auto_insight(self, *, trigger_frame_id: str, events: list[EventEntry]) -> InsightMessage | None:
+        self._ensure_enabled()
+
+        if not self.config.surprise.enabled:
+            return None
+
+        surprise_score = self._compute_surprise_score(events)
+        if surprise_score < self.config.surprise.threshold:
+            return None
+
+        now_ms = int(time.time() * 1000)
+
+        if self._is_surprise_cooldown_active(now_ms):
+            return None
+
+        if self._is_insight_cooldown_active(now_ms):
+            return None
+
+        trigger = self._find_trigger_frame(trigger_frame_id)
+        if trigger is None:
+            return None
+
+        self._last_surprise_trigger_ts_ms = now_ms
+        self._last_insight_ts_ms = now_ms
+
+        return await self._request_insight(trigger)
+
+    async def _request_insight(self, trigger: BufferedFrame) -> InsightMessage:
         clip_frames = await self._build_clip(trigger)
         if not clip_frames:
             raise InsightError("NO_CLIP_FRAMES", "Failed to build insight clip frames.")
@@ -160,6 +198,59 @@ class InsightBuffer:
         candidates = [frame for frame in self._frames if frame.seq > trigger_seq]
         return candidates[:limit]
 
+    def _ensure_enabled(self) -> None:
+        if not self.config.enabled:
+            raise InsightError("INSIGHTS_DISABLED", "Insights are disabled in QuickVision settings.")
+
+    def _latest_trigger_frame(self) -> BufferedFrame:
+        if not self._frames:
+            raise InsightError("NO_TRIGGER_FRAME", "No frames available yet; cannot run insight_test.")
+
+        return self._frames[-1]
+
+    def _find_trigger_frame(self, trigger_frame_id: str) -> BufferedFrame | None:
+        for frame in reversed(self._frames):
+            if frame.frame_id == trigger_frame_id:
+                return frame
+
+        if not self._frames:
+            return None
+
+        return self._frames[-1]
+
+    def _is_insight_cooldown_active(self, now_ms: int) -> bool:
+        if self._last_insight_ts_ms is None or self.config.insight_cooldown_ms <= 0:
+            return False
+
+        elapsed_ms = now_ms - self._last_insight_ts_ms
+        return elapsed_ms < self.config.insight_cooldown_ms
+
+    def _is_surprise_cooldown_active(self, now_ms: int) -> bool:
+        if self._last_surprise_trigger_ts_ms is None or self.config.surprise.cooldown_ms <= 0:
+            return False
+
+        elapsed_ms = now_ms - self._last_surprise_trigger_ts_ms
+        return elapsed_ms < self.config.surprise.cooldown_ms
+
+    def _enforce_insight_cooldown(self, now_ms: int) -> None:
+        if not self._is_insight_cooldown_active(now_ms):
+            return
+
+        elapsed_ms = now_ms - (self._last_insight_ts_ms or 0)
+        retry_after = self.config.insight_cooldown_ms - elapsed_ms
+        raise InsightError(
+            "INSIGHT_COOLDOWN",
+            f"Insight cooldown active. Retry in ~{retry_after}ms.",
+        )
+
+    def _compute_surprise_score(self, events: list[EventEntry]) -> float:
+        score = 0.0
+        for event in events:
+            weight = self.config.surprise.weights.get(event.name.lower(), 0.0)
+            score += weight
+
+        return score
+
 
 def _as_bool(value: Any, *, default: bool) -> bool:
     if isinstance(value, bool):
@@ -180,17 +271,64 @@ def _as_non_negative_int(value: Any, *, key: str, default: int) -> int:
         return default
 
     if isinstance(value, bool):
-        raise RuntimeError(f"QuickVision config error: insights.{key} must be a non-negative integer")
+        raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
 
     if isinstance(value, int):
         if value < 0:
-            raise RuntimeError(f"QuickVision config error: insights.{key} must be a non-negative integer")
+            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
         return value
 
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
 
-    raise RuntimeError(f"QuickVision config error: insights.{key} must be a non-negative integer")
+    raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+
+
+def _as_non_negative_float(value: Any, *, key: str, default: float) -> float:
+    if value is None:
+        return default
+
+    if isinstance(value, bool):
+        raise RuntimeError(f"QuickVision config error: surprise.{key} must be a non-negative number")
+
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        if parsed < 0:
+            raise RuntimeError(f"QuickVision config error: surprise.{key} must be a non-negative number")
+        return parsed
+
+    if isinstance(value, str):
+        try:
+            parsed = float(value.strip())
+        except ValueError as exc:
+            raise RuntimeError(f"QuickVision config error: surprise.{key} must be a non-negative number") from exc
+
+        if parsed < 0:
+            raise RuntimeError(f"QuickVision config error: surprise.{key} must be a non-negative number")
+
+        return parsed
+
+    raise RuntimeError(f"QuickVision config error: surprise.{key} must be a non-negative number")
+
+
+def _as_surprise_weights(value: Any) -> dict[str, float]:
+    if value is None:
+        return dict(DEFAULT_SURPRISE_WEIGHTS)
+
+    if not isinstance(value, Mapping):
+        raise RuntimeError("QuickVision config error: surprise.weights must be a mapping/object")
+
+    weights = dict(DEFAULT_SURPRISE_WEIGHTS)
+
+    for raw_name, raw_weight in value.items():
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise RuntimeError("QuickVision config error: surprise.weights keys must be non-empty strings")
+
+        event_name = raw_name.strip().lower()
+        weight = _as_non_negative_float(raw_weight, key=f"weights.{event_name}", default=0.0)
+        weights[event_name] = weight
+
+    return weights
 
 
 def _validate_url(url: str) -> str:
@@ -208,15 +346,44 @@ def load_insight_settings() -> InsightSettings:
     if not isinstance(raw_url, str) or not raw_url.strip():
         raise RuntimeError("QuickVision config error: insights.vision_agent_url must be a non-empty string")
 
-    timeout_ms = _as_non_negative_int(settings.get("insights.timeout_ms", default=2000), key="timeout_ms", default=2000)
-    max_frames = _as_non_negative_int(settings.get("insights.max_frames", default=6), key="max_frames", default=6)
-    pre_frames = _as_non_negative_int(settings.get("insights.pre_frames", default=3), key="pre_frames", default=3)
-    post_frames = _as_non_negative_int(settings.get("insights.post_frames", default=2), key="post_frames", default=2)
+    timeout_ms = _as_non_negative_int(
+        settings.get("insights.timeout_ms", default=2000),
+        key="insights.timeout_ms",
+        default=2000,
+    )
+    max_frames = _as_non_negative_int(
+        settings.get("insights.max_frames", default=6),
+        key="insights.max_frames",
+        default=6,
+    )
+    pre_frames = _as_non_negative_int(
+        settings.get("insights.pre_frames", default=3),
+        key="insights.pre_frames",
+        default=3,
+    )
+    post_frames = _as_non_negative_int(
+        settings.get("insights.post_frames", default=2),
+        key="insights.post_frames",
+        default=2,
+    )
     insight_cooldown_ms = _as_non_negative_int(
         settings.get("insights.insight_cooldown_ms", default=10000),
-        key="insight_cooldown_ms",
+        key="insights.insight_cooldown_ms",
         default=10000,
     )
+
+    surprise_enabled = _as_bool(settings.get("surprise.enabled", default=True), default=True)
+    surprise_threshold = _as_non_negative_float(
+        settings.get("surprise.threshold", default=DEFAULT_SURPRISE_THRESHOLD),
+        key="threshold",
+        default=DEFAULT_SURPRISE_THRESHOLD,
+    )
+    surprise_cooldown_ms = _as_non_negative_int(
+        settings.get("surprise.cooldown_ms", default=10000),
+        key="surprise.cooldown_ms",
+        default=10000,
+    )
+    surprise_weights = _as_surprise_weights(settings.get("surprise.weights", default=DEFAULT_SURPRISE_WEIGHTS))
 
     max_frames = max(1, min(max_frames, HARD_MAX_INSIGHT_FRAMES))
     pre_frames = min(pre_frames, max_frames - 1)
@@ -230,4 +397,10 @@ def load_insight_settings() -> InsightSettings:
         pre_frames=pre_frames,
         post_frames=post_frames,
         insight_cooldown_ms=insight_cooldown_ms,
+        surprise=SurpriseSettings(
+            enabled=surprise_enabled,
+            threshold=surprise_threshold,
+            cooldown_ms=surprise_cooldown_ms,
+            weights=surprise_weights,
+        ),
     )

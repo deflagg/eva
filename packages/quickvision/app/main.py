@@ -7,11 +7,12 @@ import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from .abandoned import AbandonedSettings, load_abandoned_settings
 from .collision import CollisionSettings, load_collision_settings
 from .events import DetectionEventEngine
 from .insights import InsightBuffer, InsightError, InsightSettings, load_insight_settings
 from .motion import MotionSettings, load_motion_settings
-from .protocol import BinaryFrameParseError, CommandMessage, decode_binary_frame_envelope, make_error, make_hello
+from .protocol import BinaryFrameParseError, CommandMessage, EventEntry, decode_binary_frame_envelope, make_error, make_hello
 from .roi import RoiSettings, load_roi_settings
 from .tracking import TrackingSettings, load_tracking_settings, should_use_latest_pending_slot
 from .yolo import (
@@ -30,12 +31,13 @@ _tracking_settings: TrackingSettings | None = None
 _roi_settings: RoiSettings | None = None
 _motion_settings: MotionSettings | None = None
 _collision_settings: CollisionSettings | None = None
+_abandoned_settings: AbandonedSettings | None = None
 
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    """Fail fast if YOLO/tracking/ROI/motion/collision/insight config is missing/invalid."""
-    global _insight_settings, _tracking_settings, _roi_settings, _motion_settings, _collision_settings
+    """Fail fast if YOLO/tracking/ROI/motion/collision/abandoned/insight config is missing/invalid."""
+    global _insight_settings, _tracking_settings, _roi_settings, _motion_settings, _collision_settings, _abandoned_settings
 
     try:
         load_model()
@@ -67,6 +69,11 @@ async def on_startup() -> None:
     except Exception as exc:
         raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
 
+    try:
+        _abandoned_settings = load_abandoned_settings()
+    except Exception as exc:
+        raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
+
     print(f"[quickvision] model loaded: {get_model_summary()}")
     print(
         "[quickvision] insights config: "
@@ -74,7 +81,15 @@ async def on_startup() -> None:
         f"vision_agent_url={_insight_settings.vision_agent_url} "
         f"max_frames={_insight_settings.max_frames} "
         f"pre_frames={_insight_settings.pre_frames} "
-        f"post_frames={_insight_settings.post_frames}"
+        f"post_frames={_insight_settings.post_frames} "
+        f"insight_cooldown_ms={_insight_settings.insight_cooldown_ms}"
+    )
+    print(
+        "[quickvision] surprise config: "
+        f"enabled={_insight_settings.surprise.enabled} "
+        f"threshold={_insight_settings.surprise.threshold} "
+        f"cooldown_ms={_insight_settings.surprise.cooldown_ms} "
+        f"weights={len(_insight_settings.surprise.weights)}"
     )
     print(
         "[quickvision] tracking config: "
@@ -109,6 +124,17 @@ async def on_startup() -> None:
         f"closing_speed_px_s={_collision_settings.closing_speed_px_s} "
         f"pair_cooldown_ms={_collision_settings.pair_cooldown_ms}"
     )
+    print(
+        "[quickvision] abandoned config: "
+        f"enabled={_abandoned_settings.enabled} "
+        f"object_classes={len(_abandoned_settings.object_classes)} "
+        f"associate_max_distance_px={_abandoned_settings.associate_max_distance_px} "
+        f"associate_min_ms={_abandoned_settings.associate_min_ms} "
+        f"abandon_delay_ms={_abandoned_settings.abandon_delay_ms} "
+        f"stationary_max_move_px={_abandoned_settings.stationary_max_move_px} "
+        f"roi={_abandoned_settings.roi} "
+        f"event_cooldown_ms={_abandoned_settings.event_cooldown_ms}"
+    )
 
 
 @app.get("/health")
@@ -118,6 +144,11 @@ async def health() -> dict[str, object]:
         "status": "ok",
         "model_loaded": is_model_loaded(),
         "insights_enabled": _insight_settings.enabled if _insight_settings is not None else False,
+        "insight_cooldown_ms": _insight_settings.insight_cooldown_ms if _insight_settings is not None else 0,
+        "surprise_enabled": _insight_settings.surprise.enabled if _insight_settings is not None else False,
+        "surprise_threshold": _insight_settings.surprise.threshold if _insight_settings is not None else 0,
+        "surprise_cooldown_ms": _insight_settings.surprise.cooldown_ms if _insight_settings is not None else 0,
+        "surprise_weights": len(_insight_settings.surprise.weights) if _insight_settings is not None else 0,
         "tracking_enabled": _tracking_settings.enabled if _tracking_settings is not None else False,
         "tracking_busy_policy": _tracking_settings.busy_policy if _tracking_settings is not None else None,
         "roi_enabled": _roi_settings.enabled if _roi_settings is not None else False,
@@ -136,6 +167,14 @@ async def health() -> dict[str, object]:
         "collision_distance_px": _collision_settings.distance_px if _collision_settings is not None else 0,
         "collision_closing_speed_px_s": _collision_settings.closing_speed_px_s if _collision_settings is not None else 0,
         "collision_pair_cooldown_ms": _collision_settings.pair_cooldown_ms if _collision_settings is not None else 0,
+        "abandoned_enabled": _abandoned_settings.enabled if _abandoned_settings is not None else False,
+        "abandoned_object_classes": len(_abandoned_settings.object_classes) if _abandoned_settings is not None else 0,
+        "abandoned_associate_max_distance_px": _abandoned_settings.associate_max_distance_px if _abandoned_settings is not None else 0,
+        "abandoned_associate_min_ms": _abandoned_settings.associate_min_ms if _abandoned_settings is not None else 0,
+        "abandoned_abandon_delay_ms": _abandoned_settings.abandon_delay_ms if _abandoned_settings is not None else 0,
+        "abandoned_stationary_max_move_px": _abandoned_settings.stationary_max_move_px if _abandoned_settings is not None else None,
+        "abandoned_roi": _abandoned_settings.roi if _abandoned_settings is not None else None,
+        "abandoned_event_cooldown_ms": _abandoned_settings.event_cooldown_ms if _abandoned_settings is not None else 0,
     }
 
 
@@ -148,10 +187,11 @@ async def infer_socket(websocket: WebSocket) -> None:
     roi_settings = _roi_settings if _roi_settings is not None else load_roi_settings()
     motion_settings = _motion_settings if _motion_settings is not None else load_motion_settings()
     collision_settings = _collision_settings if _collision_settings is not None else load_collision_settings()
+    abandoned_settings = _abandoned_settings if _abandoned_settings is not None else load_abandoned_settings()
     use_latest_pending_slot = should_use_latest_pending_slot(tracking_settings)
 
     insight_buffer = InsightBuffer(insight_settings)
-    detection_event_engine = DetectionEventEngine(roi_settings, motion_settings, collision_settings)
+    detection_event_engine = DetectionEventEngine(roi_settings, motion_settings, collision_settings, abandoned_settings)
 
     send_lock = asyncio.Lock()
 
@@ -168,15 +208,29 @@ async def infer_socket(websocket: WebSocket) -> None:
     pending_frame: InferenceFrame | None = None
     pending_frame_event = asyncio.Event()
     inference_running = False
-    insight_task: asyncio.Task[None] | None = None
+    manual_insight_task: asyncio.Task[None] | None = None
+    auto_insight_task: asyncio.Task[None] | None = None
 
     async def process_frame(frame: InferenceFrame) -> None:
+        nonlocal auto_insight_task
+
         try:
             detections = await run_inference(frame)
             events = detection_event_engine.process(detections)
             if events:
                 detections.events = events
+
             await send_payload(detections.model_dump(exclude_none=True))
+
+            if (
+                events
+                and insight_settings.enabled
+                and insight_settings.surprise.enabled
+                and (auto_insight_task is None or auto_insight_task.done())
+            ):
+                auto_insight_task = asyncio.create_task(
+                    process_auto_insight(trigger_frame_id=detections.frame_id, events=events)
+                )
         except FrameDecodeError as exc:
             await send_payload(make_error("INVALID_IMAGE", str(exc), frame_id=frame.frame_id))
         except Exception as exc:
@@ -190,6 +244,21 @@ async def infer_socket(websocket: WebSocket) -> None:
             await send_payload(make_error(exc.code, str(exc)))
         except Exception as exc:
             await send_payload(make_error("INSIGHT_ERROR", f"Insight test failed: {exc}"))
+
+    async def process_auto_insight(*, trigger_frame_id: str, events: list[EventEntry]) -> None:
+        try:
+            insight_message = await insight_buffer.run_auto_insight(
+                trigger_frame_id=trigger_frame_id,
+                events=events,
+            )
+            if insight_message is None:
+                return
+
+            await send_payload(insight_message.model_dump(exclude_none=True))
+        except InsightError as exc:
+            print(f"[quickvision] auto insight skipped: {exc.code} {exc}")
+        except Exception as exc:
+            print(f"[quickvision] auto insight failed: {exc}")
 
     async def inference_worker() -> None:
         nonlocal inference_running, pending_frame
@@ -250,7 +319,7 @@ async def infer_socket(websocket: WebSocket) -> None:
                                 )
                                 continue
 
-                            if insight_task is not None and not insight_task.done():
+                            if manual_insight_task is not None and not manual_insight_task.done():
                                 await send_payload(
                                     make_error(
                                         "INSIGHT_BUSY",
@@ -259,7 +328,7 @@ async def infer_socket(websocket: WebSocket) -> None:
                                 )
                                 continue
 
-                            insight_task = asyncio.create_task(process_insight_test())
+                            manual_insight_task = asyncio.create_task(process_insight_test())
                             continue
 
                 await send_payload(
@@ -311,7 +380,12 @@ async def infer_socket(websocket: WebSocket) -> None:
             with contextlib.suppress(asyncio.CancelledError):
                 await inference_worker_task
 
-        if insight_task and not insight_task.done():
-            insight_task.cancel()
+        if manual_insight_task and not manual_insight_task.done():
+            manual_insight_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await insight_task
+                await manual_insight_task
+
+        if auto_insight_task and not auto_insight_task.done():
+            auto_insight_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await auto_insight_task

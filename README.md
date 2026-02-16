@@ -87,4 +87,4 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 18** (QuickVision near-collision detector emitting `near_collision` events using eligible class pairs, centroid distance, closing speed, and per-pair cooldown).
+Implemented through **Iteration 20** (includes abandoned-object detection plus automatic surprise-triggered insight calls with QuickVision cooldown guardrails and Eva insight relay dedupe/cooldown protections).

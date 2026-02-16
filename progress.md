@@ -1058,3 +1058,165 @@
 - Near-collision detector depends on stable `track_id` continuity; tracking should remain enabled for reliable behavior.
 - Class matching is order-insensitive and name-based (e.g. `[person, bicycle]` matches either direction).
 - No dedicated automated detector test suite exists yet; verification remains build checks plus manual/runtime validation.
+
+## Iteration 20 — “Surprise trigger” + automatic insight calls (cooldowns everywhere) + Eva relay dedupe
+
+**Status:** ✅ Completed (2026-02-16)
+
+### Completed
+- Added automatic surprise-triggered insight plumbing in QuickVision (`packages/quickvision/app/insights.py`):
+  - added `surprise` settings model and parsing from Dynaconf keys:
+    - `surprise.enabled`
+    - `surprise.threshold`
+    - `surprise.cooldown_ms`
+    - `surprise.weights`
+  - implemented surprise scoring over `detections.events[]`:
+    - score = sum of configured per-event weights in the current detections message
+    - trigger only when `score >= surprise.threshold`
+  - implemented dual cooldown guardrails:
+    - `surprise.cooldown_ms` (trigger cooldown)
+    - `insights.insight_cooldown_ms` (insight call cooldown)
+  - added `run_auto_insight(...)` for automatic clip capture + VisionAgent call when triggered.
+- Updated QuickVision runtime wiring (`packages/quickvision/app/main.py`):
+  - after detector events are produced, QuickVision now schedules automatic insight generation for significant event bursts.
+  - automatic insights are emitted as protocol `insight` messages (no `frame_id`) on success.
+  - retained manual debug command path (`insight_test`) unchanged.
+  - startup logs + `/health` now include surprise and insight cooldown config summaries.
+- Added committed surprise defaults in `packages/quickvision/settings.yaml`:
+  - includes default weights (high for `abandoned_object`/`near_collision`, medium for `roi_dwell`/`line_cross`, lower for `sudden_motion`/`track_stop`).
+- Added Eva insight relay guardrails with config (`packages/eva/src/config.ts`, `packages/eva/eva.config.json`, `packages/eva/src/index.ts`, `packages/eva/src/server.ts`):
+  - new config keys:
+    - `insightRelay.enabled`
+    - `insightRelay.cooldownMs`
+    - `insightRelay.dedupeWindowMs`
+  - applied relay protections for incoming QuickVision `insight` messages:
+    - drop duplicate `clip_id` inside dedupe window
+    - suppress relays inside cooldown window
+  - logs suppression events for observability.
+- Updated docs:
+  - `packages/quickvision/README.md`
+  - `packages/eva/README.md`
+  - root `README.md` status line.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/vision-agent && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+- QuickVision automatic insight gating smoke-check via local `.venv` script confirms:
+  - first high-score event trigger emits an auto insight
+  - immediate repeat is suppressed by cooldown.
+- Eva insight relay integration smoke-check (mock QuickVision WS + UI WS) confirms:
+  - first insight relayed
+  - duplicate clip_id suppressed by dedupe
+  - different clip inside cooldown suppressed
+  - new clip after cooldown relayed.
+
+### Manual test steps
+1. Configure/verify `packages/quickvision/settings.local.yaml`:
+   ```yaml
+   insights:
+     enabled: true
+     insight_cooldown_ms: 10000
+   surprise:
+     enabled: true
+     threshold: 5
+     cooldown_ms: 10000
+     weights:
+       near_collision: 5
+   ```
+2. Configure/verify Eva relay guardrails in `packages/eva/eva.config.local.json`:
+   ```json
+   {
+     "insightRelay": {
+       "enabled": true,
+       "cooldownMs": 10000,
+       "dedupeWindowMs": 60000
+     }
+   }
+   ```
+3. Start VisionAgent, QuickVision, Eva, and UI.
+4. Trigger a high-weight event burst (for example `near_collision`) while streaming.
+5. Confirm QuickVision emits one `insight` message automatically.
+6. Re-trigger the same condition rapidly; confirm QuickVision suppresses repeats during cooldown.
+7. If synthetic duplicate insights are injected from QuickVision, confirm Eva suppresses duplicate `clip_id` and cooldown-window floods.
+
+### Notes
+- Surprise scoring includes a default `abandoned_object` weight; abandoned-object event production was later backfilled in Iteration 19 (implemented after Iteration 20 by request).
+- No dedicated end-to-end automated test suite exists yet; verification remains build checks plus targeted smoke checks/manual validation.
+
+## Iteration 19 — Abandoned object detector
+
+**Status:** ✅ Completed (2026-02-16)
+
+> Implemented after Iteration 20 by request.
+
+### Completed
+- Added new abandoned-object detector module: `packages/quickvision/app/abandoned.py`.
+  - loads and validates Dynaconf abandoned-detector keys:
+    - `abandoned.enabled`
+    - `abandoned.object_classes`
+    - `abandoned.associate_max_distance_px`
+    - `abandoned.associate_min_ms`
+    - `abandoned.abandon_delay_ms`
+    - `abandoned.stationary_max_move_px` (optional)
+    - `abandoned.roi` (optional)
+    - `abandoned.event_cooldown_ms`
+  - enforces fail-fast config validation for invalid class lists, invalid thresholds, invalid optional ROI references, and cooldown values.
+  - implements object-person association heuristic:
+    - object candidate classes are configured via `abandoned.object_classes`
+    - nearest `person` track within `associate_max_distance_px` must persist for `associate_min_ms` to become associated
+    - when association is lost and object remains, starts abandon timer
+  - emits `abandoned_object` when object remains beyond `abandon_delay_ms` (with optional stationary check) and cooldown allows.
+  - event data shape:
+    - `object_track_id`
+    - `object_class`
+    - `person_track_id`
+    - `roi`
+    - `abandon_ms`
+  - includes stale state eviction to avoid unbounded per-track growth.
+- Updated detector orchestration in `packages/quickvision/app/events.py`:
+  - integrated `AbandonedEventEngine` alongside ROI, motion, and collision engines.
+  - `DetectionEventEngine` now supports combined ROI + motion + collision + abandoned event generation.
+- Updated QuickVision startup/runtime wiring in `packages/quickvision/app/main.py`:
+  - startup now loads abandoned settings with fail-fast behavior.
+  - startup logs include abandoned detector config summary.
+  - `/health` now includes abandoned detector configuration fields.
+  - WebSocket inference path now wires abandoned settings into the detector engine.
+- Updated QuickVision defaults in `packages/quickvision/settings.yaml` with an `abandoned` config block.
+- Updated docs:
+  - `packages/quickvision/README.md` (event + config + validation docs)
+  - root `README.md` status line.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/vision-agent && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+- Abandoned-detector smoke-check via local `.venv` script confirms:
+  - event emits after association loss + abandon delay
+  - re-association before delay cancels
+  - movement beyond `stationary_max_move_px` resets pending abandon.
+
+### Manual test steps
+1. Configure abandoned detector in `packages/quickvision/settings.local.yaml`:
+   ```yaml
+   abandoned:
+     enabled: true
+     object_classes: [backpack, suitcase, handbag]
+     associate_max_distance_px: 120
+     associate_min_ms: 1000
+     abandon_delay_ms: 5000
+     stationary_max_move_px: 20
+     roi: null
+     event_cooldown_ms: 10000
+   ```
+2. Start QuickVision/Eva/UI and stream frames with tracking enabled.
+3. Place an eligible object near a person long enough to establish association.
+4. Have the person leave while the object remains; confirm `abandoned_object` event appears after `abandon_delay_ms`.
+5. Move the object or re-associate a person before delay and confirm pending abandon is canceled.
+
+### Notes
+- The detector uses class-name matching for object classes and assumes person tracks are named `person`.
+- This fills the `abandoned_object` event path referenced by Iteration 20 surprise weights.
+- No dedicated automated detector test suite exists yet; verification remains build checks plus targeted smoke checks/manual validation.

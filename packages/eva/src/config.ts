@@ -6,6 +6,12 @@ import { z } from 'zod';
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+const InsightRelayConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  cooldownMs: z.number().int().nonnegative().default(10_000),
+  dedupeWindowMs: z.number().int().nonnegative().default(60_000),
+});
+
 const EvaConfigSchema = z.object({
   server: z.object({
     port: z.number().int().min(1).max(65_535),
@@ -27,6 +33,11 @@ const EvaConfigSchema = z.object({
           return false;
         }
       }, 'quickvision.wsUrl must be a valid ws:// or wss:// URL'),
+  }),
+  insightRelay: InsightRelayConfigSchema.default({
+    enabled: true,
+    cooldownMs: 10_000,
+    dedupeWindowMs: 60_000,
   }),
 });
 

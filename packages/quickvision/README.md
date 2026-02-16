@@ -2,7 +2,7 @@
 
 Python daemon that hosts YOLO inference and (optional) insight triggering.
 
-## Current behavior (Iteration 18)
+## Current behavior (Iteration 20)
 
 - HTTP health endpoint at `/health`
 - WebSocket endpoint at `/infer`
@@ -24,12 +24,18 @@ Python daemon that hosts YOLO inference and (optional) insight triggering.
     - `sudden_motion` from per-track kinematics thresholding
     - `track_stop` when per-track speed remains below threshold for configured duration
     - `near_collision` when an eligible tracked pair is both close and rapidly closing
+    - `abandoned_object` when an eligible object remains after person association is lost beyond delay/cooldown guardrails
   - supports temporary debug command payload:
     - `{"type":"command","v":1,"name":"insight_test"}`
-- Insight plumbing (manual trigger path):
+- Insight plumbing (manual + automatic trigger paths):
   - keeps an in-memory frame ring buffer per WS connection
-  - on `insight_test`, builds a short clip around the latest trigger frame
-  - enforces insight cooldown
+  - manual trigger (`insight_test`) still supported for debugging
+  - automatic trigger path:
+    - computes surprise score from `detections.events[]`
+    - if score >= `surprise.threshold`, and outside cooldown windows, captures a clip and calls VisionAgent
+  - enforces both cooldown layers:
+    - `surprise.cooldown_ms` (trigger cooldown)
+    - `insights.insight_cooldown_ms` (insight call cooldown)
   - calls VisionAgent via HTTP
   - emits protocol `insight` message on success (no `frame_id` field)
 
@@ -69,6 +75,14 @@ Configured keys currently used:
 - `collision.distance_px`
 - `collision.closing_speed_px_s`
 - `collision.pair_cooldown_ms`
+- `abandoned.enabled` (default `true`)
+- `abandoned.object_classes`
+- `abandoned.associate_max_distance_px`
+- `abandoned.associate_min_ms`
+- `abandoned.abandon_delay_ms`
+- `abandoned.stationary_max_move_px` (optional)
+- `abandoned.roi` (optional region name)
+- `abandoned.event_cooldown_ms`
 - `insights.enabled` (default `true`)
 - `insights.vision_agent_url`
 - `insights.timeout_ms`
@@ -76,6 +90,10 @@ Configured keys currently used:
 - `insights.pre_frames`
 - `insights.post_frames`
 - `insights.insight_cooldown_ms`
+- `surprise.enabled` (default `true`)
+- `surprise.threshold`
+- `surprise.cooldown_ms`
+- `surprise.weights` (event-name -> numeric weight)
 
 ### Startup behavior
 
@@ -90,6 +108,8 @@ QuickVision fails fast at startup if:
 - ROI dwell settings are invalid (negative/non-integer threshold or unknown region override)
 - motion settings are invalid (history/threshold/cooldown must be valid numeric values)
 - collision settings are invalid (pairs/thresholds/cooldown must be valid values)
+- abandoned-object settings are invalid (class list/thresholds/roi/cooldown must be valid values)
+- surprise settings are invalid (threshold/cooldown/weights must be valid values)
 - `insights.vision_agent_url` is invalid
 
 ## Run (dev)
