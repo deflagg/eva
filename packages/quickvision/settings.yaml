@@ -15,11 +15,22 @@ tracking:
 roi:
   enabled: true
   representative_point: centroid
-  regions: {}
-  lines: {}
+  regions:
+    left_half:
+      x1: 0
+      y1: 0
+      x2: 320
+      y2: 480
+  lines:
+    center_vertical:
+      x1: 320
+      y1: 0
+      x2: 320
+      y2: 480
   dwell:
     default_threshold_ms: 5000
     region_threshold_ms: {}
+
 
 motion:
   enabled: true
