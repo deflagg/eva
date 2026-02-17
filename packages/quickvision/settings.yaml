@@ -84,3 +84,4 @@ surprise:
     line_cross: 3
     sudden_motion: 1.5
     track_stop: 1.5
+    roi_enter: 5
