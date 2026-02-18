@@ -1,4 +1,5 @@
-import { createServer, type Server } from 'node:http';
+import { createHash } from 'node:crypto';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import WebSocket, { WebSocketServer, type RawData } from 'ws';
 
 import {
@@ -11,8 +12,23 @@ import {
 } from './protocol.js';
 import { createQuickVisionClient } from './quickvisionClient.js';
 import { FrameRouter } from './router.js';
+import { synthesize } from './speech/edgeTts.js';
 
 const FRAME_ROUTE_TTL_MS = 5_000;
+
+class RequestBodyTooLargeError extends Error {
+  constructor(maxBodyBytes: number) {
+    super(`Request body exceeded maxBodyBytes (${maxBodyBytes})`);
+    this.name = 'RequestBodyTooLargeError';
+  }
+}
+
+class SpeechRequestValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SpeechRequestValidationError';
+  }
+}
 
 export interface StartServerOptions {
   port: number;
@@ -22,6 +38,19 @@ export interface StartServerOptions {
     enabled: boolean;
     cooldownMs: number;
     dedupeWindowMs: number;
+  };
+  speech: {
+    enabled: boolean;
+    path: string;
+    defaultVoice: string;
+    maxTextChars: number;
+    maxBodyBytes: number;
+    cooldownMs: number;
+    cache: {
+      enabled: boolean;
+      ttlMs: number;
+      maxEntries: number;
+    };
   };
 }
 
@@ -78,13 +107,346 @@ function getOptionalFrameId(payload: unknown): string | undefined {
   return typeof frameId === 'string' ? frameId : undefined;
 }
 
-export function startServer(options: StartServerOptions): Server {
-  const { port, eyePath, quickvisionWsUrl, insightRelay } = options;
+function setSpeechCorsHeaders(res: ServerResponse): void {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'content-type');
+}
 
-  const server = createServer((_req, res) => {
-    res.statusCode = 200;
-    res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ service: 'eva', status: 'ok' }));
+function sendServiceOk(res: ServerResponse): void {
+  res.statusCode = 200;
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify({ service: 'eva', status: 'ok' }));
+}
+
+function sendSpeechJsonError(
+  res: ServerResponse,
+  statusCode: number,
+  code: string,
+  message: string,
+): void {
+  if (res.writableEnded) {
+    return;
+  }
+
+  setSpeechCorsHeaders(res);
+  res.statusCode = statusCode;
+  res.setHeader('content-type', 'application/json');
+  res.end(
+    JSON.stringify({
+      error: {
+        code,
+        message,
+      },
+    }),
+  );
+}
+
+async function readRequestBody(req: IncomingMessage, maxBodyBytes: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    let totalBytes = 0;
+    const chunks: Buffer[] = [];
+
+    const cleanup = (): void => {
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('error', onError);
+      req.off('aborted', onAborted);
+    };
+
+    const onData = (chunk: Buffer | string): void => {
+      const chunkBuffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += chunkBuffer.length;
+
+      if (totalBytes > maxBodyBytes) {
+        cleanup();
+        req.resume();
+        reject(new RequestBodyTooLargeError(maxBodyBytes));
+        return;
+      }
+
+      chunks.push(chunkBuffer);
+    };
+
+    const onEnd = (): void => {
+      cleanup();
+      resolve(Buffer.concat(chunks));
+    };
+
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+
+    const onAborted = (): void => {
+      cleanup();
+      reject(new Error('Request aborted by client.'));
+    };
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+    req.on('aborted', onAborted);
+  });
+}
+
+function parseSpeechPayload(payload: unknown, speechConfig: StartServerOptions['speech']) {
+  if (!isRecord(payload)) {
+    throw new SpeechRequestValidationError('Expected JSON object payload.');
+  }
+
+  const textValue = payload.text;
+  if (typeof textValue !== 'string') {
+    throw new SpeechRequestValidationError('text must be a string.');
+  }
+
+  const text = textValue.trim();
+  if (text.length === 0) {
+    throw new SpeechRequestValidationError('text must be non-empty.');
+  }
+
+  if (text.length > speechConfig.maxTextChars) {
+    throw new SpeechRequestValidationError(`text exceeds maxTextChars (${speechConfig.maxTextChars}).`);
+  }
+
+  let voice = speechConfig.defaultVoice;
+  if (payload.voice !== undefined) {
+    if (typeof payload.voice !== 'string' || payload.voice.trim().length === 0) {
+      throw new SpeechRequestValidationError('voice must be a non-empty string when provided.');
+    }
+
+    voice = payload.voice.trim();
+  }
+
+  let rate: number | undefined;
+  if (payload.rate !== undefined) {
+    if (typeof payload.rate !== 'number' || !Number.isFinite(payload.rate) || payload.rate <= 0) {
+      throw new SpeechRequestValidationError('rate must be a positive finite number when provided.');
+    }
+
+    rate = payload.rate;
+  }
+
+  return {
+    text,
+    voice,
+    rate,
+  };
+}
+
+type SpeechInput = ReturnType<typeof parseSpeechPayload>;
+
+interface SpeechCacheEntry {
+  audio: Buffer;
+  createdAtMs: number;
+}
+
+function createSpeechCacheKey(input: SpeechInput): string {
+  const hash = createHash('sha256');
+  hash.update(input.voice);
+  hash.update('\u001f');
+  hash.update(input.rate === undefined ? 'default' : String(input.rate));
+  hash.update('\u001f');
+  hash.update(input.text);
+  return hash.digest('hex');
+}
+
+function sendSpeechAudio(res: ServerResponse, audioBytes: Buffer, cacheStatus: 'HIT' | 'MISS'): void {
+  setSpeechCorsHeaders(res);
+  res.statusCode = 200;
+  res.setHeader('content-type', 'audio/mpeg');
+  res.setHeader('content-length', String(audioBytes.length));
+  res.setHeader('X-Eva-TTS-Cache', cacheStatus);
+  res.end(audioBytes);
+}
+
+export function startServer(options: StartServerOptions): Server {
+  const { port, eyePath, quickvisionWsUrl, insightRelay, speech } = options;
+
+  let lastSpeechRequestStartedAtMs: number | null = null;
+
+  const speechCache = new Map<string, SpeechCacheEntry>();
+  const inFlightSpeechSynthesis = new Map<string, Promise<Buffer>>();
+
+  const evictExpiredSpeechCacheEntries = (nowMs: number): void => {
+    if (!speech.cache.enabled || speech.cache.ttlMs <= 0) {
+      speechCache.clear();
+      return;
+    }
+
+    for (const [key, entry] of speechCache.entries()) {
+      if (nowMs - entry.createdAtMs >= speech.cache.ttlMs) {
+        speechCache.delete(key);
+      }
+    }
+  };
+
+  const writeSpeechCacheEntry = (cacheKey: string, audioBytes: Buffer): void => {
+    if (!speech.cache.enabled || speech.cache.ttlMs <= 0 || speech.cache.maxEntries <= 0) {
+      return;
+    }
+
+    speechCache.set(cacheKey, {
+      audio: audioBytes,
+      createdAtMs: Date.now(),
+    });
+
+    while (speechCache.size > speech.cache.maxEntries) {
+      const oldestKey = speechCache.keys().next().value;
+      if (!oldestKey) {
+        break;
+      }
+
+      speechCache.delete(oldestKey);
+    }
+  };
+
+  const parseSpeechInputFromRequest = async (
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<SpeechInput | null> => {
+    let requestBodyBuffer: Buffer;
+    try {
+      requestBodyBuffer = await readRequestBody(req, speech.maxBodyBytes);
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        sendSpeechJsonError(res, 413, 'PAYLOAD_TOO_LARGE', error.message);
+        return null;
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      sendSpeechJsonError(res, 400, 'INVALID_REQUEST', message);
+      return null;
+    }
+
+    let parsedBody: unknown;
+    try {
+      parsedBody = JSON.parse(requestBodyBuffer.toString('utf8'));
+    } catch {
+      sendSpeechJsonError(res, 400, 'INVALID_JSON', 'Expected valid JSON payload.');
+      return null;
+    }
+
+    try {
+      return parseSpeechPayload(parsedBody, speech);
+    } catch (error) {
+      if (error instanceof SpeechRequestValidationError) {
+        sendSpeechJsonError(res, 400, 'INVALID_REQUEST', error.message);
+        return null;
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      sendSpeechJsonError(res, 400, 'INVALID_REQUEST', message);
+      return null;
+    }
+  };
+
+  const tryEnterSpeechCooldown = (res: ServerResponse): boolean => {
+    const nowMs = Date.now();
+    if (speech.cooldownMs > 0 && lastSpeechRequestStartedAtMs !== null) {
+      const elapsedMs = nowMs - lastSpeechRequestStartedAtMs;
+      if (elapsedMs < speech.cooldownMs) {
+        sendSpeechJsonError(
+          res,
+          429,
+          'COOLDOWN_ACTIVE',
+          `Speech cooldown active. Retry in ${speech.cooldownMs - elapsedMs}ms.`,
+        );
+        return false;
+      }
+    }
+
+    lastSpeechRequestStartedAtMs = nowMs;
+    return true;
+  };
+
+  const resolveSpeechAudio = async (
+    speechInput: SpeechInput,
+  ): Promise<{ audioBytes: Buffer; cacheStatus: 'HIT' | 'MISS' }> => {
+    const speechCacheKey = createSpeechCacheKey(speechInput);
+    const cacheNowMs = Date.now();
+    evictExpiredSpeechCacheEntries(cacheNowMs);
+
+    const cachedEntry = speechCache.get(speechCacheKey);
+    if (cachedEntry) {
+      return {
+        audioBytes: cachedEntry.audio,
+        cacheStatus: 'HIT',
+      };
+    }
+
+    let synthesisPromise = inFlightSpeechSynthesis.get(speechCacheKey);
+    if (!synthesisPromise) {
+      synthesisPromise = synthesize(speechInput)
+        .then((audioBytes) => {
+          writeSpeechCacheEntry(speechCacheKey, audioBytes);
+          return audioBytes;
+        })
+        .finally(() => {
+          inFlightSpeechSynthesis.delete(speechCacheKey);
+        });
+
+      inFlightSpeechSynthesis.set(speechCacheKey, synthesisPromise);
+    }
+
+    const audioBytes = await synthesisPromise;
+
+    return {
+      audioBytes,
+      cacheStatus: 'MISS',
+    };
+  };
+
+  const handleSpeechRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const method = (req.method ?? 'GET').toUpperCase();
+
+    if (method === 'OPTIONS') {
+      setSpeechCorsHeaders(res);
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+
+    if (method !== 'POST') {
+      sendServiceOk(res);
+      return;
+    }
+
+    const speechInput = await parseSpeechInputFromRequest(req, res);
+    if (!speechInput) {
+      return;
+    }
+
+    if (!tryEnterSpeechCooldown(res)) {
+      return;
+    }
+
+    let resolved;
+    try {
+      resolved = await resolveSpeechAudio(speechInput);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[eva] speech synthesis failed: ${message}`);
+      sendSpeechJsonError(res, 500, 'SYNTHESIS_FAILED', 'Speech synthesis failed.');
+      return;
+    }
+
+    sendSpeechAudio(res, resolved.audioBytes, resolved.cacheStatus);
+  };
+
+  const server = createServer((req, res) => {
+    const requestUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+
+    if (speech.enabled && requestUrl.pathname === speech.path) {
+      void handleSpeechRequest(req, res).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[eva] speech request failed: ${message}`);
+        sendSpeechJsonError(res, 500, 'INTERNAL_ERROR', 'Internal server error.');
+      });
+      return;
+    }
+
+    sendServiceOk(res);
   });
 
   let activeUiClient: WebSocket | null = null;
@@ -345,11 +707,19 @@ export function startServer(options: StartServerOptions): Server {
     console.log(
       `[eva] insight relay enabled=${insightRelay.enabled} cooldownMs=${insightRelay.cooldownMs} dedupeWindowMs=${insightRelay.dedupeWindowMs}`,
     );
+    console.log(
+      `[eva] speech endpoint enabled=${speech.enabled} path=${speech.path} maxTextChars=${speech.maxTextChars} maxBodyBytes=${speech.maxBodyBytes} cooldownMs=${speech.cooldownMs}`,
+    );
+    console.log(
+      `[eva] speech cache enabled=${speech.cache.enabled} ttlMs=${speech.cache.ttlMs} maxEntries=${speech.cache.maxEntries}`,
+    );
   });
 
   server.on('close', () => {
     frameRouter.clear();
     seenInsightClipIds.clear();
+    speechCache.clear();
+    inFlightSpeechSynthesis.clear();
     quickvisionClient.disconnect();
     wss.close();
   });

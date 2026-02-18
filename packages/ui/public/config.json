@@ -1,5 +1,16 @@
 {
   "eva": {
     "wsUrl": "ws://localhost:8787/eye"
+  },
+  "speech": {
+    "enabled": false,
+    "path": "/speech",
+    "defaultVoice": "en-US-JennyNeural",
+    "autoSpeak": {
+      "enabled": false,
+      "minSeverity": "medium",
+      "cooldownMs": 2000,
+      "textTemplate": "Insight: {{one_liner}}"
+    }
   }
 }

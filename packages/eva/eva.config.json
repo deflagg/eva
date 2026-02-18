@@ -10,5 +10,18 @@
     "enabled": true,
     "cooldownMs": 10000,
     "dedupeWindowMs": 60000
+  },
+  "speech": {
+    "enabled": false,
+    "path": "/speech",
+    "defaultVoice": "en-US-JennyNeural",
+    "maxTextChars": 1000,
+    "maxBodyBytes": 65536,
+    "cooldownMs": 0,
+    "cache": {
+      "enabled": true,
+      "ttlMs": 600000,
+      "maxEntries": 64
+    }
   }
 }

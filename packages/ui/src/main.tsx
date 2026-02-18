@@ -5,6 +5,12 @@ import { captureJpegFrame, isCameraSupported, startCamera, stopCamera } from './
 import { loadUiRuntimeConfig, type UiDebugOverlayConfig, type UiRuntimeConfig } from './config';
 import { encodeBinaryFrameEnvelope } from './frameBinary';
 import { clearOverlay, drawDetectionsOverlay } from './overlay';
+import {
+  createSpeechClient,
+  deriveEvaHttpBaseUrl,
+  isAudioLockedError,
+  type SpeechClient,
+} from './speech';
 import type { DetectionsMessage, EventEntry, FrameBinaryMeta, InsightMessage, InsightSeverity } from './types';
 import { createEvaWsClient, type EvaWsClient, type WsConnectionStatus } from './ws';
 
@@ -59,6 +65,13 @@ const SEVERITY_COLOR: Record<InsightSeverity, string> = {
 const FRAME_TIMEOUT_MS = 500;
 const FRAME_LOOP_INTERVAL_MS = 100;
 const EVENT_FEED_LIMIT = 60;
+const INSIGHT_SPEECH_FALLBACK_MAX_CHARS = 180;
+
+const SEVERITY_RANK: Record<InsightSeverity, number> = {
+  low: 0,
+  medium: 1,
+  high: 2,
+};
 
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -159,9 +172,99 @@ function hasDebugOverlayGeometry(config: UiDebugOverlayConfig | undefined): bool
   return Object.keys(config.regions).length > 0 || Object.keys(config.lines).length > 0;
 }
 
+function isAbortError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return error.name === 'AbortError';
+}
+
+function shouldSpeakSeverity(
+  severity: InsightSeverity,
+  minSeverity: InsightSeverity,
+): boolean {
+  return SEVERITY_RANK[severity] >= SEVERITY_RANK[minSeverity];
+}
+
+function truncateText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+function normalizeSpeechText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function buildInsightFallbackSpeechText(insight: InsightMessage): string {
+  const oneLiner = normalizeSpeechText(insight.summary.one_liner);
+  if (oneLiner) {
+    return oneLiner;
+  }
+
+  for (const item of insight.summary.what_changed) {
+    const normalized = normalizeSpeechText(item);
+    if (normalized) {
+      return truncateText(normalized, INSIGHT_SPEECH_FALLBACK_MAX_CHARS);
+    }
+  }
+
+  if (insight.summary.tags.length > 0) {
+    const tagsSummary = normalizeSpeechText(insight.summary.tags.join(', '));
+    if (tagsSummary) {
+      return `Insight tags: ${tagsSummary}`;
+    }
+  }
+
+  return '';
+}
+
+function replaceToken(template: string, token: string, value: string): string {
+  return template.split(token).join(value);
+}
+
+function renderInsightSpeechText(insight: InsightMessage, template: string): string {
+  const fallback = buildInsightFallbackSpeechText(insight);
+  const normalizedTemplate = normalizeSpeechText(template);
+
+  if (!normalizedTemplate) {
+    return fallback;
+  }
+
+  let renderedTemplate = normalizedTemplate;
+  renderedTemplate = replaceToken(renderedTemplate, '{{one_liner}}', insight.summary.one_liner);
+  renderedTemplate = replaceToken(renderedTemplate, '{{severity}}', insight.summary.severity);
+  renderedTemplate = replaceToken(renderedTemplate, '{{tags}}', insight.summary.tags.join(', '));
+  renderedTemplate = replaceToken(renderedTemplate, '{{what_changed}}', insight.summary.what_changed.join('; '));
+  renderedTemplate = replaceToken(renderedTemplate, '{{clip_id}}', insight.clip_id);
+  renderedTemplate = replaceToken(renderedTemplate, '{{trigger_frame_id}}', insight.trigger_frame_id);
+
+  const rendered = normalizeSpeechText(renderedTemplate);
+
+  if (!rendered || rendered === 'Insight:' || rendered === 'Insight') {
+    return fallback;
+  }
+
+  return rendered;
+}
+
+function getInsightSpeechId(insight: InsightMessage): string {
+  return `${insight.clip_id}:${insight.trigger_frame_id}`;
+}
+
 function App({ runtimeConfig }: AppProps): JSX.Element {
   const evaWsUrl = runtimeConfig.eva.wsUrl;
   const debugOverlayConfig = runtimeConfig.debugOverlay;
+  const speechConfig = runtimeConfig.speech;
+
+  const evaHttpBaseUrl = React.useMemo(() => deriveEvaHttpBaseUrl(evaWsUrl), [evaWsUrl]);
+  const speechEndpointUrl = React.useMemo(
+    () => new URL(speechConfig.path, `${evaHttpBaseUrl}/`).toString(),
+    [evaHttpBaseUrl, speechConfig.path],
+  );
 
   const [status, setStatus] = React.useState<WsConnectionStatus>('connecting');
   const [logs, setLogs] = React.useState<LogEntry[]>([]);
@@ -182,10 +285,16 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const [latestInsight, setLatestInsight] = React.useState<InsightMessage | null>(null);
   const [debugOverlayEnabled, setDebugOverlayEnabled] = React.useState(false);
 
+  const [autoSpeakEnabled, setAutoSpeakEnabled] = React.useState(() => speechConfig.autoSpeak.enabled);
+  const [audioLocked, setAudioLocked] = React.useState(() => speechConfig.enabled);
+  const [speechVoice, setSpeechVoice] = React.useState(() => speechConfig.defaultVoice);
+  const [speechBusy, setSpeechBusy] = React.useState(false);
+
   const cameraSupported = React.useMemo(() => isCameraSupported(), []);
   const debugOverlayConfigured = React.useMemo(() => hasDebugOverlayGeometry(debugOverlayConfig), [debugOverlayConfig]);
 
   const clientRef = React.useRef<EvaWsClient | null>(null);
+  const speechClientRef = React.useRef<SpeechClient | null>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
   const captureCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
@@ -200,6 +309,9 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const framesSentRef = React.useRef(0);
   const framesAckedRef = React.useRef(0);
   const framesTimedOutRef = React.useRef(0);
+  const activeSpeechAbortControllerRef = React.useRef<AbortController | null>(null);
+  const autoSpeakLastStartedAtMsRef = React.useRef<number | null>(null);
+  const lastSpokenInsightIdRef = React.useRef<string | null>(null);
 
   const appendLog = React.useCallback((direction: LogDirection, text: string) => {
     const entry: LogEntry = {
@@ -289,6 +401,134 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   }, [debugOverlayEnabled, renderDetections]);
 
   React.useEffect(() => {
+    const speechClient = createSpeechClient({
+      speechEndpointUrl,
+      defaultVoice: speechConfig.defaultVoice,
+      onAudioLockedChange: setAudioLocked,
+    });
+
+    speechClientRef.current = speechClient;
+    setSpeechVoice(speechConfig.defaultVoice);
+    setAudioLocked(speechConfig.enabled);
+
+    return () => {
+      const controller = activeSpeechAbortControllerRef.current;
+      if (controller) {
+        controller.abort();
+        activeSpeechAbortControllerRef.current = null;
+      }
+
+      speechClient.dispose();
+      speechClientRef.current = null;
+    };
+  }, [speechConfig.defaultVoice, speechConfig.enabled, speechEndpointUrl]);
+
+  React.useEffect(() => {
+    setAutoSpeakEnabled(speechConfig.autoSpeak.enabled);
+  }, [speechConfig.autoSpeak.enabled]);
+
+  const runSpeechRequest = React.useCallback(
+    async ({ text, voice, source }: { text: string; voice: string; source: 'auto' | 'manual' }): Promise<boolean> => {
+      const speechClient = speechClientRef.current;
+      if (!speechClient) {
+        appendLog('system', 'Speech client is not ready yet.');
+        return false;
+      }
+
+      const normalizedText = normalizeSpeechText(text);
+      if (!normalizedText) {
+        return false;
+      }
+
+      const previousController = activeSpeechAbortControllerRef.current;
+      if (previousController) {
+        previousController.abort();
+      }
+
+      speechClient.stop();
+
+      const controller = new AbortController();
+      activeSpeechAbortControllerRef.current = controller;
+      setSpeechBusy(true);
+
+      try {
+        await speechClient.speakText({
+          text: normalizedText,
+          voice,
+          signal: controller.signal,
+        });
+
+        if (source === 'manual') {
+          appendLog('system', `Test speech played using voice ${voice}.`);
+        } else {
+          appendLog('system', 'Auto-speak played latest insight.');
+        }
+
+        return true;
+      } catch (error) {
+        if (isAbortError(error)) {
+          return false;
+        }
+
+        const message = toErrorMessage(error);
+        if (isAudioLockedError(error)) {
+          setAudioLocked(true);
+        }
+
+        appendLog('system', `${source === 'auto' ? 'Auto-speak' : 'Test speech'} failed: ${message}`);
+        return false;
+      } finally {
+        if (activeSpeechAbortControllerRef.current === controller) {
+          activeSpeechAbortControllerRef.current = null;
+          setSpeechBusy(false);
+        }
+      }
+    },
+    [appendLog],
+  );
+
+  const maybeAutoSpeakInsight = React.useCallback(
+    (insight: InsightMessage): void => {
+      if (!speechConfig.enabled || !autoSpeakEnabled) {
+        return;
+      }
+
+      if (!shouldSpeakSeverity(insight.summary.severity, speechConfig.autoSpeak.minSeverity)) {
+        return;
+      }
+
+      const insightId = getInsightSpeechId(insight);
+      if (lastSpokenInsightIdRef.current === insightId) {
+        return;
+      }
+
+      const speechText = renderInsightSpeechText(insight, speechConfig.autoSpeak.textTemplate);
+      if (!speechText) {
+        return;
+      }
+
+      const nowMs = Date.now();
+      if (speechConfig.autoSpeak.cooldownMs > 0 && autoSpeakLastStartedAtMsRef.current !== null) {
+        const elapsedMs = nowMs - autoSpeakLastStartedAtMsRef.current;
+        if (elapsedMs < speechConfig.autoSpeak.cooldownMs) {
+          return;
+        }
+      }
+
+      autoSpeakLastStartedAtMsRef.current = nowMs;
+      lastSpokenInsightIdRef.current = insightId;
+
+      const voice = speechVoice.trim() || speechConfig.defaultVoice;
+      void runSpeechRequest({
+        text: speechText,
+        voice,
+        source: 'auto',
+      });
+    },
+    [autoSpeakEnabled, runSpeechRequest, speechConfig, speechVoice],
+  );
+
+  React.useEffect(() => {
     const client = createEvaWsClient(evaWsUrl, {
       onOpen: () => {
         setStatus('connected');
@@ -314,6 +554,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
         if (insightMessage) {
           setLatestInsight(insightMessage);
+          maybeAutoSpeakInsight(insightMessage);
         }
 
         if (detectionsMessage && inFlight && detectionsMessage.frame_id === inFlight.frameId) {
@@ -356,7 +597,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       client.disconnect();
       clientRef.current = null;
     };
-  }, [appendEvents, appendLog, connectionAttempt, dropInFlight, evaWsUrl, renderDetections]);
+  }, [appendEvents, appendLog, connectionAttempt, dropInFlight, evaWsUrl, maybeAutoSpeakInsight, renderDetections]);
 
   const handleSendTestMessage = React.useCallback(() => {
     const payload = {
@@ -412,6 +653,55 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       return next;
     });
   }, [appendLog, debugOverlayConfigured]);
+
+  const handleToggleAutoSpeak = React.useCallback(() => {
+    setAutoSpeakEnabled((prev) => {
+      const next = !prev;
+      appendLog('system', `Auto Speak ${next ? 'enabled' : 'disabled'}.`);
+      return next;
+    });
+  }, [appendLog]);
+
+  const handleEnableAudio = React.useCallback(async () => {
+    if (!speechConfig.enabled) {
+      appendLog('system', 'Speech is disabled in UI runtime config.');
+      return;
+    }
+
+    const speechClient = speechClientRef.current;
+    if (!speechClient) {
+      appendLog('system', 'Speech client is not ready yet.');
+      return;
+    }
+
+    try {
+      await speechClient.enableAudio();
+      setAudioLocked(false);
+      appendLog('system', 'Audio unlocked. Auto-play is now permitted in this tab.');
+    } catch (error) {
+      const message = toErrorMessage(error);
+      if (isAudioLockedError(error)) {
+        setAudioLocked(true);
+      }
+
+      appendLog('system', `Enable Audio failed: ${message}`);
+    }
+  }, [appendLog, speechConfig.enabled]);
+
+  const handleTestSpeak = React.useCallback(async () => {
+    if (!speechConfig.enabled) {
+      appendLog('system', 'Speech is disabled in UI runtime config.');
+      return;
+    }
+
+    const voice = speechVoice.trim() || speechConfig.defaultVoice;
+
+    await runSpeechRequest({
+      text: 'Eva test speech. Insight auto-speak is ready.',
+      voice,
+      source: 'manual',
+    });
+  }, [appendLog, runSpeechRequest, speechConfig.defaultVoice, speechConfig.enabled, speechVoice]);
 
   const handleStartCamera = React.useCallback(async () => {
     if (!cameraSupported) {
@@ -618,7 +908,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
   return (
     <main style={{ fontFamily: 'sans-serif', padding: 16, lineHeight: 1.4 }}>
-      <h1>Eva UI (Iteration 22)</h1>
+      <h1>Eva UI (Iteration 33)</h1>
 
       <p>
         WebSocket target: <code>{evaWsUrl}</code>
@@ -639,9 +929,23 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         </strong>
       </p>
 
+      <p>
+        Eva HTTP base: <code>{evaHttpBaseUrl}</code> · Speech endpoint: <code>{speechEndpointUrl}</code> · Speech:{' '}
+        <strong>{speechConfig.enabled ? 'enabled' : 'disabled'}</strong> · Auto Speak:{' '}
+        <strong>{autoSpeakEnabled ? 'on' : 'off'}</strong> · Audio unlock:{' '}
+        <strong style={{ color: audioLocked ? '#b91c1c' : '#166534' }}>{audioLocked ? 'required' : 'ready'}</strong>
+      </p>
+
       {cameraError ? (
         <p style={{ color: '#b91c1c' }}>
           <strong>Camera error:</strong> {cameraError}
+        </p>
+      ) : null}
+
+      {speechConfig.enabled && audioLocked ? (
+        <p style={{ color: '#92400e', marginTop: 0 }}>
+          <strong>Audio is locked by browser autoplay policy.</strong> Click <strong>Enable Audio</strong> once, then use
+          <strong> Test Speak</strong> or wait for auto-speak triggers.
         </p>
       ) : null}
 
@@ -651,6 +955,25 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         </button>
         <button type="button" onClick={handleTriggerInsightTest} disabled={status !== 'connected'}>
           Trigger insight test
+        </button>
+        <button type="button" onClick={handleToggleAutoSpeak} disabled={!speechConfig.enabled}>
+          Auto Speak: {autoSpeakEnabled ? 'on' : 'off'}
+        </button>
+        <button type="button" onClick={() => void handleEnableAudio()} disabled={!speechConfig.enabled || speechBusy}>
+          Enable Audio
+        </button>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          Voice
+          <input
+            type="text"
+            value={speechVoice}
+            onChange={(event) => setSpeechVoice(event.target.value)}
+            disabled={!speechConfig.enabled || speechBusy}
+            style={{ minWidth: 220 }}
+          />
+        </label>
+        <button type="button" onClick={() => void handleTestSpeak()} disabled={!speechConfig.enabled || speechBusy}>
+          {speechBusy ? 'Speaking…' : 'Test Speak'}
         </button>
         <button type="button" onClick={handleToggleDebugOverlay} disabled={!debugOverlayConfigured}>
           {debugOverlayEnabled ? 'Hide ROI/line overlay' : 'Show ROI/line overlay'}

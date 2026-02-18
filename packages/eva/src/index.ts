@@ -9,19 +9,49 @@ import { ManagedProcess } from './subprocess/ManagedProcess.js';
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = path.resolve(packageRoot, '..', '..');
 
+const SERVER_CLOSE_TIMEOUT_MS = 5_000;
+const SHUTDOWN_GRACE_TIMEOUT_MS = 20_000;
+
 function resolveRepoPath(pathValue: string): string {
   return path.isAbsolute(pathValue) ? pathValue : path.resolve(repoRoot, pathValue);
 }
 
-function closeServer(server: Server): Promise<void> {
+function closeServer(server: Server, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
-    server.close((error) => {
+    let settled = false;
+
+    const finish = (error?: Error): void => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
       if (error) {
         reject(error);
         return;
       }
 
       resolve();
+    };
+
+    const timeoutId = setTimeout(() => {
+      try {
+        server.closeAllConnections();
+      } catch {
+        // Best effort.
+      }
+
+      finish(new Error(`server close timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    server.close((error) => {
+      clearTimeout(timeoutId);
+      if (error) {
+        finish(error);
+        return;
+      }
+
+      finish();
     });
   });
 }
@@ -45,7 +75,7 @@ async function main(): Promise<void> {
 
       if (server) {
         try {
-          await closeServer(server);
+          await closeServer(server, SERVER_CLOSE_TIMEOUT_MS);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           console.error(`[eva] failed to close server: ${message}`);
@@ -77,22 +107,71 @@ async function main(): Promise<void> {
   };
 
   let isShuttingDown = false;
+  let forceExitTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const forceTerminate = (reason: string, exitCode: number): never => {
+    if (forceExitTimer) {
+      clearTimeout(forceExitTimer);
+      forceExitTimer = null;
+    }
+
+    console.error(`[eva] ${reason}`);
+
+    if (server) {
+      try {
+        server.closeAllConnections();
+      } catch {
+        // Best effort.
+      }
+
+      try {
+        server.close();
+      } catch {
+        // Best effort.
+      }
+
+      server = null;
+    }
+
+    if (quickvision) {
+      console.warn('[eva] force-killing quickvision...');
+      quickvision.forceKill();
+      quickvision = null;
+    }
+
+    if (visionAgent) {
+      console.warn('[eva] force-killing vision-agent...');
+      visionAgent.forceKill();
+      visionAgent = null;
+    }
+
+    process.exit(exitCode);
+  };
 
   const handleSignal = (signal: NodeJS.Signals): void => {
     if (isShuttingDown) {
+      forceTerminate(`received ${signal} during shutdown; forcing exit`, 130);
       return;
     }
 
     isShuttingDown = true;
 
+    forceExitTimer = setTimeout(() => {
+      forceTerminate(`graceful shutdown timed out after ${SHUTDOWN_GRACE_TIMEOUT_MS}ms; forcing exit`, 1);
+    }, SHUTDOWN_GRACE_TIMEOUT_MS);
+
     void shutdown()
       .then(() => {
+        if (forceExitTimer) {
+          clearTimeout(forceExitTimer);
+          forceExitTimer = null;
+        }
+
         process.exit(0);
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
-        console.error(`[eva] shutdown failed after ${signal}: ${message}`);
-        process.exit(1);
+        forceTerminate(`shutdown failed after ${signal}: ${message}`, 1);
       });
   };
 
@@ -102,6 +181,10 @@ async function main(): Promise<void> {
 
   process.on('SIGTERM', () => {
     handleSignal('SIGTERM');
+  });
+
+  process.on('SIGHUP', () => {
+    handleSignal('SIGHUP');
   });
 
   try {
@@ -158,6 +241,7 @@ async function main(): Promise<void> {
       eyePath: config.server.eyePath,
       quickvisionWsUrl: config.quickvision.wsUrl,
       insightRelay: config.insightRelay,
+      speech: config.speech,
     });
   } catch (error) {
     await shutdown();

@@ -2,9 +2,13 @@
 
 TypeScript daemon for UI/WebSocket orchestration.
 
-## Current behavior (Iteration 27)
+## Current behavior (Iteration 35)
 
 - HTTP server on configured `server.port` (default `8787`)
+- Optional speech endpoint (when `speech.enabled=true`):
+  - `POST <speech.path>` (default `/speech`) -> `audio/mpeg` bytes
+    - supports request guardrails (`maxBodyBytes`, `maxTextChars`, cooldown)
+    - includes `X-Eva-TTS-Cache: HIT|MISS` header
 - Eva opens a WebSocket client to configured `quickvision.wsUrl` (default `ws://localhost:8000/infer`)
   - reconnects automatically with exponential backoff (`250ms` -> `5000ms` cap)
 - WebSocket endpoint at configured `server.eyePath` (default `/eye`)
@@ -44,7 +48,10 @@ Eva supports two run modes.
   1. start VisionAgent and wait for `GET /health` = 200
   2. start QuickVision and wait for `GET /health` = 200
   3. start Eva server
-- On shutdown (`Ctrl+C` / `SIGTERM`), Eva stops QuickVision + VisionAgent (no orphan daemons).
+- On shutdown (`Ctrl+C` / `SIGTERM` / `SIGHUP`), Eva stops QuickVision + VisionAgent (no orphan daemons).
+- Shutdown hardening:
+  - a second interrupt signal during shutdown forces immediate process-tree kill/exit
+  - if graceful shutdown exceeds the internal timeout window, Eva force-kills subprocesses and exits.
 
 ## Configuration (cosmiconfig + zod)
 
@@ -68,6 +75,19 @@ Current schema:
     "enabled": true,
     "cooldownMs": 10000,
     "dedupeWindowMs": 60000
+  },
+  "speech": {
+    "enabled": false,
+    "path": "/speech",
+    "defaultVoice": "en-US-JennyNeural",
+    "maxTextChars": 1000,
+    "maxBodyBytes": 65536,
+    "cooldownMs": 0,
+    "cache": {
+      "enabled": true,
+      "ttlMs": 600000,
+      "maxEntries": 64
+    }
   },
   "subprocesses": {
     "enabled": false,
@@ -180,6 +200,17 @@ npm run dev
 curl http://127.0.0.1:8790/health
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8787/
+```
+
+## Speech API quick checks
+
+When `speech.enabled=true`:
+
+```bash
+curl -sS -D - -X POST http://127.0.0.1:8787/speech \
+  -H 'content-type: application/json' \
+  -d '{"text":"hello from eva","voice":"en-US-JennyNeural"}' \
+  -o out.mp3
 ```
 
 ## Build

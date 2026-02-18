@@ -10,10 +10,27 @@ export interface UiDebugOverlayConfig {
   lines: Record<string, OverlayRect>;
 }
 
+export type AutoSpeakMinSeverity = 'low' | 'medium' | 'high';
+
+export interface UiSpeechAutoSpeakConfig {
+  enabled: boolean;
+  minSeverity: AutoSpeakMinSeverity;
+  cooldownMs: number;
+  textTemplate: string;
+}
+
+export interface UiSpeechConfig {
+  enabled: boolean;
+  path: string;
+  defaultVoice: string;
+  autoSpeak: UiSpeechAutoSpeakConfig;
+}
+
 export interface UiRuntimeConfig {
   eva: {
     wsUrl: string;
   };
+  speech: UiSpeechConfig;
   debugOverlay?: UiDebugOverlayConfig;
 }
 
@@ -45,6 +62,30 @@ function assertWsUrl(value: unknown, sourcePath: string): string {
 function assertFiniteNumber(value: unknown, key: string, sourcePath: string): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     throw new Error(`Invalid UI runtime config in ${sourcePath}: ${key} must be a finite number`);
+  }
+
+  return value;
+}
+
+function assertBoolean(value: unknown, key: string, sourcePath: string): boolean {
+  if (typeof value !== 'boolean') {
+    throw new Error(`Invalid UI runtime config in ${sourcePath}: ${key} must be a boolean`);
+  }
+
+  return value;
+}
+
+function assertNonEmptyString(value: unknown, key: string, sourcePath: string): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`Invalid UI runtime config in ${sourcePath}: ${key} must be a non-empty string`);
+  }
+
+  return value.trim();
+}
+
+function assertNonNegativeInt(value: unknown, key: string, sourcePath: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new Error(`Invalid UI runtime config in ${sourcePath}: ${key} must be a non-negative integer`);
   }
 
   return value;
@@ -99,6 +140,76 @@ function parseDebugOverlay(value: unknown, sourcePath: string): UiDebugOverlayCo
   };
 }
 
+function parseAutoSpeakMinSeverity(value: unknown, sourcePath: string): AutoSpeakMinSeverity {
+  if (value === undefined) {
+    return 'medium';
+  }
+
+  if (value === 'low' || value === 'medium' || value === 'high') {
+    return value;
+  }
+
+  throw new Error(
+    `Invalid UI runtime config in ${sourcePath}: speech.autoSpeak.minSeverity must be "low", "medium", or "high"`,
+  );
+}
+
+function parseSpeechConfig(value: unknown, sourcePath: string): UiSpeechConfig {
+  if (value !== undefined && value !== null && !isRecord(value)) {
+    throw new Error(`Invalid UI runtime config in ${sourcePath}: speech must be an object`);
+  }
+
+  const speech = isRecord(value) ? value : {};
+
+  const enabled =
+    speech.enabled === undefined ? false : assertBoolean(speech.enabled, 'speech.enabled', sourcePath);
+
+  const path =
+    speech.path === undefined ? '/speech' : assertNonEmptyString(speech.path, 'speech.path', sourcePath);
+  if (!path.startsWith('/')) {
+    throw new Error(`Invalid UI runtime config in ${sourcePath}: speech.path must start with "/"`);
+  }
+
+  const defaultVoice =
+    speech.defaultVoice === undefined
+      ? 'en-US-JennyNeural'
+      : assertNonEmptyString(speech.defaultVoice, 'speech.defaultVoice', sourcePath);
+
+  const autoSpeakRaw = speech.autoSpeak;
+  if (autoSpeakRaw !== undefined && autoSpeakRaw !== null && !isRecord(autoSpeakRaw)) {
+    throw new Error(`Invalid UI runtime config in ${sourcePath}: speech.autoSpeak must be an object`);
+  }
+
+  const autoSpeak = isRecord(autoSpeakRaw) ? autoSpeakRaw : {};
+
+  const autoSpeakEnabled =
+    autoSpeak.enabled === undefined
+      ? enabled
+      : assertBoolean(autoSpeak.enabled, 'speech.autoSpeak.enabled', sourcePath);
+
+  const autoSpeakCooldownMs =
+    autoSpeak.cooldownMs === undefined
+      ? 2_000
+      : assertNonNegativeInt(autoSpeak.cooldownMs, 'speech.autoSpeak.cooldownMs', sourcePath);
+
+  const autoSpeakTextTemplate =
+    autoSpeak.textTemplate === undefined
+      ? 'Insight: {{one_liner}}'
+      : assertNonEmptyString(autoSpeak.textTemplate, 'speech.autoSpeak.textTemplate', sourcePath);
+
+  return {
+    enabled,
+    path,
+    defaultVoice,
+    autoSpeak: {
+      enabled: autoSpeakEnabled,
+      minSeverity: parseAutoSpeakMinSeverity(autoSpeak.minSeverity, sourcePath),
+      cooldownMs: autoSpeakCooldownMs,
+      textTemplate: autoSpeakTextTemplate,
+    },
+  };
+}
+
 function parseRuntimeConfig(raw: unknown, sourcePath: string): UiRuntimeConfig {
   if (!isRecord(raw)) {
     throw new Error(`Invalid UI runtime config in ${sourcePath}: expected a JSON object`);
@@ -113,6 +224,7 @@ function parseRuntimeConfig(raw: unknown, sourcePath: string): UiRuntimeConfig {
     eva: {
       wsUrl: assertWsUrl(eva.wsUrl, sourcePath),
     },
+    speech: parseSpeechConfig(raw.speech, sourcePath),
     debugOverlay: parseDebugOverlay(raw.debugOverlay, sourcePath),
   };
 }

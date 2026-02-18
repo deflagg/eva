@@ -1346,7 +1346,6 @@
 
 ### Notes
 - Runtime behavior is intentionally unchanged in this iteration; subprocess management wiring begins in Iteration 24+.
-
 ## Iteration 24 — Add subprocess utility (ManagedProcess + health polling)
 
 **Status:** ✅ Completed (2026-02-17)
@@ -1582,3 +1581,333 @@
 
 ### Notes
 - Iterations 23–28 are now fully documented in repo progress and Eva README workflow sections.
+
+## Iteration 29 — Eva config plumbing only (no runtime behavior)
+
+**Status:** ✅ Completed (2026-02-17)
+
+### Completed
+- Extended Eva config schema in `packages/eva/src/config.ts` with a new `speech` block (Zod + defaults):
+  - `enabled`
+  - `path`
+  - `defaultVoice`
+  - `maxTextChars`
+  - `maxBodyBytes`
+  - `cooldownMs`
+  - `cache.enabled`
+  - `cache.ttlMs`
+  - `cache.maxEntries`
+- Updated committed Eva defaults in `packages/eva/eva.config.json` to include `speech` with `enabled: false`.
+- Updated copy-only local example config in `packages/eva/eva.config.local.example.json` to include `speech` with `enabled: true` for local testing.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- No Eva server/runtime behavior was changed in this iteration (config plumbing only).
+
+### Manual test steps
+1. Build Eva:
+   - `cd packages/eva`
+   - `npm run build`
+2. (Optional) Start Eva with committed defaults and confirm existing behavior remains unchanged.
+
+### Notes
+- This iteration intentionally does not add any speech runtime wiring; endpoint behavior starts in Iteration 31.
+
+## Iteration 30 — Add Edge TTS dependency + wrapper module (no server route yet)
+
+**Status:** ✅ Completed (2026-02-17)
+
+### Completed
+- Added pinned Eva dependency in `packages/eva/package.json`:
+  - `node-edge-tts` at `1.2.10`.
+- Added speech wrapper types in `packages/eva/src/speech/types.ts`:
+  - `SynthesizeInput` (`text`, `voice`, optional `rate`).
+- Added Edge TTS wrapper module in `packages/eva/src/speech/edgeTts.ts`:
+  - exports `synthesize({ text, voice, rate }): Promise<Buffer>`
+  - dynamic-loads `node-edge-tts` with ESM/CJS interop handling
+  - normalizes numeric `rate` into Edge prosody rate strings
+  - synthesizes into a temp MP3 file, returns bytes as `Buffer`, then cleans up temp files
+  - validates non-empty `text` and `voice`.
+
+### Verification
+- `cd packages/eva && npm install` passes.
+- `cd packages/eva && npm run build` passes.
+
+### Manual test steps
+1. Install/update Eva dependencies:
+   - `cd packages/eva`
+   - `npm install`
+2. Build Eva:
+   - `npm run build`
+
+### Notes
+- This iteration intentionally adds only dependency + internal wrapper module.
+- No Eva HTTP route changes were made yet (`/speech` begins in Iteration 31).
+
+## Iteration 31 — Eva HTTP router + `POST /speech` returns MP3 bytes (MVP)
+
+**Status:** ✅ Completed (2026-02-17)
+
+### Completed
+- Extended Eva server options in `packages/eva/src/server.ts`:
+  - `StartServerOptions` now includes `speech` config.
+- Wired config into Eva bootstrap in `packages/eva/src/index.ts`:
+  - `startServer(...)` now receives `speech: config.speech`.
+- Added speech HTTP routing in `packages/eva/src/server.ts`:
+  - `OPTIONS <speech.path>` responds `204` with required CORS headers.
+  - `POST <speech.path>` parses and validates JSON payload and returns `audio/mpeg` bytes.
+  - fallback behavior remains the existing service-ok JSON response for non-speech routes.
+- Implemented required guardrails for `POST /speech`:
+  - body-size enforcement while streaming request body (`413 PAYLOAD_TOO_LARGE`)
+  - JSON parse validation (`400 INVALID_JSON`)
+  - field validation (`400 INVALID_REQUEST`) for empty/missing text, too-long text, invalid voice/rate
+  - cooldown enforcement (`429 COOLDOWN_ACTIVE`) when `speech.cooldownMs > 0`
+  - synthesis failure handling (`500 SYNTHESIS_FAILED`)
+- Added speech CORS headers for speech route responses:
+  - `Access-Control-Allow-Origin: *`
+  - `Access-Control-Allow-Methods: POST, OPTIONS`
+  - `Access-Control-Allow-Headers: content-type`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+
+### Manual test steps
+1. Enable speech in local config (`packages/eva/eva.config.local.json`) by adding/merging:
+   ```json
+   "speech": {
+     "enabled": true,
+     "path": "/speech",
+     "defaultVoice": "en-US-JennyNeural",
+     "maxTextChars": 1000,
+     "maxBodyBytes": 65536,
+     "cooldownMs": 0,
+     "cache": {
+       "enabled": true,
+       "ttlMs": 600000,
+       "maxEntries": 64
+     }
+   }
+   ```
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Generate MP3 via speech endpoint:
+   ```bash
+   curl -sS -X POST http://127.0.0.1:8787/speech \
+     -H 'content-type: application/json' \
+     -d '{"text":"hello from eva","voice":"en-US-JennyNeural"}' \
+     --output out.mp3
+   ```
+4. Confirm response headers include `content-type: audio/mpeg` and verify `out.mp3` plays.
+
+### Notes
+- Speech route is active only when `speech.enabled=true`.
+- Cache settings are config-only in this iteration; cache/in-flight dedupe behavior is planned for Iteration 34.
+
+## Iteration 32 — UI: Speech client + one-click “Enable Audio” (required for autoplay)
+
+**Status:** ✅ Completed (2026-02-17)
+
+### Completed
+- Added UI speech client module in `packages/ui/src/speech.ts`:
+  - derives Eva HTTP base from `eva.wsUrl` (`ws://` -> `http://`, `wss://` -> `https://`)
+  - `createSpeechClient(...)` with:
+    - `speakText({ text, voice, rate, signal })`
+      - POSTs JSON to Eva speech endpoint
+      - loads returned audio blob into an `<audio>` element and plays it
+      - marks audio as locked and throws `AudioLockedError` if browser autoplay policy blocks playback
+    - `enableAudio()` one-click unlock probe for autoplay policy
+    - lifecycle helpers: `stop()` and `dispose()`
+- Extended UI runtime config parsing in `packages/ui/src/config.ts` with `speech` block:
+  - `speech.enabled` (default `false`)
+  - `speech.path` (default `"/speech"`)
+  - `speech.defaultVoice` (default `"en-US-JennyNeural"`)
+  - `speech.autoSpeak.enabled` (default follows `speech.enabled`)
+  - `speech.autoSpeak.minSeverity` (`"medium"|"high"`, default `"medium"`)
+  - `speech.autoSpeak.cooldownMs` (default `2000`)
+  - `speech.autoSpeak.textTemplate` (default `"Insight: {{one_liner}}"`)
+- Updated committed UI runtime defaults in `packages/ui/public/config.json` with a `speech` section.
+- Updated UI app wiring in `packages/ui/src/main.tsx`:
+  - derives and displays Eva HTTP base + speech endpoint URL
+  - creates/disposes `SpeechClient`
+  - added controls:
+    - **Auto Speak** toggle
+    - **Enable Audio** button
+    - **Voice** text field
+    - **Test Speak** button
+  - added autoplay lock notice when audio is currently blocked.
+- Updated UI docs in `packages/ui/README.md` for Iteration 32 behavior and speech config.
+
+### Verification
+- `cd packages/ui && npm run build` passes.
+- `cd packages/eva && npm run build` passes.
+
+### Manual test steps
+1. Enable Eva speech endpoint in `packages/eva/eva.config.local.json` (`speech.enabled: true`) and start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+2. Configure UI speech in `packages/ui/public/config.local.json` (or `config.json`) with `speech.enabled: true`.
+3. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+4. Open the UI page.
+5. Click **Enable Audio** once.
+6. Click **Test Speak** and confirm audio plays.
+
+### Notes
+- Auto-speak trigger from incoming `insight` messages is intentionally deferred to Iteration 33.
+
+## Iteration 33 — Auto-speak: speak new insights automatically (core requirement)
+
+**Status:** ✅ Completed (2026-02-17)
+
+### Completed
+- Hooked auto-speak into UI insight handling in `packages/ui/src/main.tsx`:
+  - on each incoming `insight` message, UI now evaluates and conditionally triggers speech.
+- Added `shouldAutoSpeak` policy checks in UI:
+  - `speech.enabled === true`
+  - UI Auto Speak toggle enabled
+  - insight severity >= `speech.autoSpeak.minSeverity`
+  - UI cooldown window elapsed (`speech.autoSpeak.cooldownMs`)
+  - resolved speech text is non-empty
+- Implemented insight speech text selection in UI:
+  - template rendering from `speech.autoSpeak.textTemplate`
+  - supports placeholders (`{{one_liner}}`, `{{severity}}`, `{{tags}}`, `{{what_changed}}`, `{{clip_id}}`, `{{trigger_frame_id}}`)
+  - fallback to `one_liner`, then shortened summary/tags when template output is empty
+- Implemented speech interruption and dedupe behavior in UI:
+  - new speech request aborts previous in-flight fetch via `AbortController`
+  - new speech request stops current audio playback before starting
+  - blob URL cleanup on stop/new speech (`SpeechClient.stop()` now revokes prior object URL)
+  - added `lastSpokenInsightId` guard (`clip_id:trigger_frame_id`) to avoid duplicate speaking of same insight
+- Refactored test speech path to use the same cancellation-safe speech request flow.
+- Updated UI docs in `packages/ui/README.md` to describe Iteration 33 auto-speak behavior.
+
+### Verification
+- `cd packages/ui && npm run build` passes.
+- `cd packages/eva && npm run build` passes.
+
+### Manual test steps
+1. Ensure Eva speech endpoint is enabled and running:
+   - `cd packages/eva`
+   - set `speech.enabled: true` in `eva.config.local.json`
+   - `npm run dev`
+2. Ensure UI speech config is enabled (`packages/ui/public/config.local.json` or `config.json`):
+   - `speech.enabled: true`
+   - `speech.autoSpeak.enabled: true`
+   - `speech.autoSpeak.minSeverity: "medium"` (default)
+3. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+4. Click **Enable Audio** once.
+5. Trigger insight messages (for example via **Trigger insight test**) and confirm:
+   - new MED/HIGH insights are spoken automatically
+   - LOW insights are not spoken by default
+   - repeated same insight id is not spoken again
+6. Trigger multiple insights rapidly and confirm latest request interrupts prior one (no overlapping playback/fetch).
+
+### Notes
+- Iteration 33 implements UI-side auto-speak only; Eva speech caching/dedupe remains planned for Iteration 34.
+
+## Iteration 34 — Caching + in-flight dedupe (cost + latency win)
+
+**Status:** ✅ Completed (2026-02-17)
+
+### Completed
+- Updated Eva speech route implementation in `packages/eva/src/server.ts`:
+  - added deterministic cache-key generation for synthesis inputs:
+    - `sha256(voice|rate|text)`
+  - added in-memory speech cache:
+    - key -> `{ audio: Buffer, createdAtMs }`
+  - implemented TTL eviction for expired cache entries (`speech.cache.ttlMs`)
+  - implemented max-entry cap enforcement (`speech.cache.maxEntries`) with oldest-entry eviction
+- Added in-flight synthesis dedupe in Eva speech route:
+  - tracks active synthesis promises by cache key
+  - concurrent requests for the same key now await the same synthesis promise
+  - in-flight entries are removed on settle (`finally`)
+- Added response header on successful speech responses:
+  - `X-Eva-TTS-Cache: HIT|MISS`
+    - `HIT` when served from cache
+    - `MISS` when synthesis path is used (including in-flight dedupe await)
+- Added speech cache observability on startup logs:
+  - `speech.cache.enabled`, `ttlMs`, `maxEntries`
+- Added cleanup on server close:
+  - clears speech cache map and in-flight synthesis map.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+
+### Manual test steps
+1. Enable speech + cache in `packages/eva/eva.config.local.json`:
+   ```json
+   {
+     "speech": {
+       "enabled": true,
+       "cache": {
+         "enabled": true,
+         "ttlMs": 600000,
+         "maxEntries": 64
+       }
+     }
+   }
+   ```
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Call the same speech request twice:
+   ```bash
+   curl -sS -D - -X POST http://127.0.0.1:8787/speech \
+     -H 'content-type: application/json' \
+     -d '{"text":"cache check","voice":"en-US-JennyNeural"}' \
+     -o /tmp/speech1.mp3
+
+   curl -sS -D - -X POST http://127.0.0.1:8787/speech \
+     -H 'content-type: application/json' \
+     -d '{"text":"cache check","voice":"en-US-JennyNeural"}' \
+     -o /tmp/speech2.mp3
+   ```
+4. Confirm headers:
+   - first response includes `X-Eva-TTS-Cache: MISS`
+   - second response includes `X-Eva-TTS-Cache: HIT`
+
+### Notes
+- This iteration keeps existing `/speech` validation, cooldown, and CORS behavior unchanged.
+- Iteration 35 is repurposed for shutdown hardening by request; speech job mode remains unimplemented.
+
+## Iteration 35 — Eva shutdown hardening (Ctrl+C reliability + forced fallback)
+
+**Status:** ✅ Completed (2026-02-18)
+
+> By request, Iteration 35 is used for shutdown reliability hardening instead of speech job-mode endpoints.
+
+### Completed
+- Updated Eva signal handling in `packages/eva/src/index.ts`:
+  - added `SIGHUP` handling alongside existing `SIGINT`/`SIGTERM`
+  - if a second signal arrives during shutdown, Eva now force-terminates immediately
+  - added graceful-shutdown deadline (`SHUTDOWN_GRACE_TIMEOUT_MS`) with forced fallback kill/exit
+- Hardened Eva server close behavior in `packages/eva/src/index.ts`:
+  - `closeServer(...)` now includes timeout handling (`SERVER_CLOSE_TIMEOUT_MS`)
+  - if close times out, attempts `server.closeAllConnections()` before fallback
+- Extended subprocess manager in `packages/eva/src/subprocess/ManagedProcess.ts`:
+  - added `forceKill()` for immediate SIGKILL process-group termination
+  - used by forced-shutdown path to prevent orphan daemons
+- Updated docs in `packages/eva/README.md`:
+  - documented `Ctrl+C` / `SIGTERM` / `SIGHUP` shutdown behavior
+  - documented second-signal and timeout force-kill fallback behavior
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- Manual signal stress check in subprocess mode:
+  - repeated interrupt signals during startup/shutdown
+  - verified no listeners remain on `:8787`, `:8790`, `:8000` after forced fallback path.
+
+### Manual test steps
+1. Run Eva in subprocess mode:
+   - `cd packages/eva`
+   - `npm run dev`
+2. During startup/shutdown, send Ctrl+C twice quickly.
+3. Confirm Eva exits and ports are freed:
+   - `ss -ltnp | grep -E ':8787|:8790|:8000'` (no listeners expected)
+
+### Notes
+- Speech job-mode endpoints (`/speech/jobs`, `/speech/audio/...`) are intentionally not implemented.
+- Existing `POST /speech` + cache/dedupe behavior from Iterations 31–34 remains unchanged.

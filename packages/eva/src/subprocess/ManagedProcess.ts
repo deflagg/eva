@@ -128,6 +128,21 @@ export class ManagedProcess {
     this.child = null;
   }
 
+  forceKill(): void {
+    const child = this.child;
+    if (!child) {
+      return;
+    }
+
+    if (!isRunning(child)) {
+      this.child = null;
+      return;
+    }
+
+    this.sendSignal(child, 'SIGKILL');
+    this.child = null;
+  }
+
   private sendSignal(child: ChildProcess, signal: NodeJS.Signals): void {
     const pid = child.pid;
 

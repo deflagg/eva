@@ -2,20 +2,39 @@
 
 React + Vite client for webcam capture and overlays.
 
-## Current behavior (Iteration 22)
+## Current behavior (Iteration 33)
 
 - Loads runtime config from:
   - `/config.local.json` first (if present)
   - fallback to `/config.json`
 - Connects to Eva using configured `eva.wsUrl`
+- Derives Eva HTTP base from `eva.wsUrl` (`ws://` -> `http://`, `wss://` -> `https://`) for speech requests
 - Displays connection status (connecting/connected/disconnected)
 - Shows a live log panel of inbound/outbound/system messages
 - Provides controls:
   - **Send test message**
   - **Trigger insight test** (sends `{"type":"command","v":1,"name":"insight_test"}`)
+  - **Auto Speak** toggle (UI-local state)
+  - **Enable Audio** (one-time unlock for browser autoplay policy)
+  - **Voice** input + **Test Speak** button (calls Eva `POST /speech`)
   - **Show/Hide ROI/line overlay** (when debug overlay geometry is configured)
   - **Start camera** / **Stop camera**
   - **Start/Pause streaming**
+- If browser blocks `audio.play()`, UI marks audio as locked and prompts user to click **Enable Audio**
+- Auto-speaks new `insight` messages when policy allows:
+  - `speech.enabled=true`
+  - Auto Speak toggle is on
+  - insight severity >= `speech.autoSpeak.minSeverity` (`low`, `medium`, or `high`)
+  - cooldown window (`speech.autoSpeak.cooldownMs`) has elapsed
+  - resolved speech text is non-empty
+- Auto-speak text selection:
+  - template from `speech.autoSpeak.textTemplate` (for example `Insight: {{one_liner}}`)
+  - falls back to one-liner or shortened summary when template output is empty
+- Speech interruption behavior:
+  - starting a new speech aborts any in-flight fetch (`AbortController`)
+  - pauses current audio playback
+  - revokes prior blob URL
+  - guards duplicate speaking of same insight with `lastSpokenInsightId`
 - Captures JPEG frames from the video stream via a hidden `<canvas>`
 - Sends frames as **binary WebSocket envelopes**:
   - 4-byte big-endian metadata length
@@ -49,6 +68,17 @@ Example:
 {
   "eva": {
     "wsUrl": "ws://localhost:8787/eye"
+  },
+  "speech": {
+    "enabled": true,
+    "path": "/speech",
+    "defaultVoice": "en-US-JennyNeural",
+    "autoSpeak": {
+      "enabled": true,
+      "minSeverity": "medium",
+      "cooldownMs": 2000,
+      "textTemplate": "Insight: {{one_liner}}"
+    }
   },
   "debugOverlay": {
     "regions": {

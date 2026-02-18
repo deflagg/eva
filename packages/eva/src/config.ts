@@ -36,6 +36,30 @@ const InsightRelayConfigSchema = z.object({
   dedupeWindowMs: z.number().int().nonnegative().default(60_000),
 });
 
+const SpeechCacheConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  ttlMs: z.number().int().nonnegative().default(600_000),
+  maxEntries: z.number().int().positive().default(64),
+});
+
+const SpeechConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  path: z
+    .string()
+    .min(1)
+    .default('/speech')
+    .refine((value) => value.startsWith('/'), 'speech.path must start with "/"'),
+  defaultVoice: z.string().trim().min(1).default('en-US-JennyNeural'),
+  maxTextChars: z.number().int().positive().default(1_000),
+  maxBodyBytes: z.number().int().positive().default(65_536),
+  cooldownMs: z.number().int().nonnegative().default(0),
+  cache: SpeechCacheConfigSchema.default({
+    enabled: true,
+    ttlMs: 600_000,
+    maxEntries: 64,
+  }),
+});
+
 const VisionAgentSubprocessConfigSchema = z.object({
   enabled: z.boolean().default(true),
   cwd: z.string().trim().min(1).default('packages/vision-agent'),
@@ -90,6 +114,19 @@ const EvaConfigSchema = z.object({
     enabled: true,
     cooldownMs: 10_000,
     dedupeWindowMs: 60_000,
+  }),
+  speech: SpeechConfigSchema.default({
+    enabled: false,
+    path: '/speech',
+    defaultVoice: 'en-US-JennyNeural',
+    maxTextChars: 1_000,
+    maxBodyBytes: 65_536,
+    cooldownMs: 0,
+    cache: {
+      enabled: true,
+      ttlMs: 600_000,
+      maxEntries: 64,
+    },
   }),
   subprocesses: SubprocessesConfigSchema.default({
     enabled: false,
