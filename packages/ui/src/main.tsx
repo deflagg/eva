@@ -65,7 +65,6 @@ const SEVERITY_COLOR: Record<InsightSeverity, string> = {
 const FRAME_TIMEOUT_MS = 500;
 const FRAME_LOOP_INTERVAL_MS = 100;
 const EVENT_FEED_LIMIT = 60;
-const INSIGHT_SPEECH_FALLBACK_MAX_CHARS = 180;
 
 const SEVERITY_RANK: Record<InsightSeverity, number> = {
   low: 0,
@@ -115,15 +114,22 @@ function isInsightMessage(message: unknown): message is InsightMessage {
   }
 
   const candidate = message as Record<string, unknown>;
+  const summary = candidate.summary;
+  const usage = candidate.usage;
+
+  if (!summary || typeof summary !== 'object' || !usage || typeof usage !== 'object') {
+    return false;
+  }
+
+  const summaryRecord = summary as Record<string, unknown>;
+
   return (
     candidate.type === 'insight' &&
     candidate.v === 1 &&
     typeof candidate.clip_id === 'string' &&
     typeof candidate.trigger_frame_id === 'string' &&
-    typeof candidate.summary === 'object' &&
-    candidate.summary !== null &&
-    typeof candidate.usage === 'object' &&
-    candidate.usage !== null
+    typeof summaryRecord.one_liner === 'string' &&
+    typeof summaryRecord.tts_response === 'string'
   );
 }
 
@@ -187,72 +193,12 @@ function shouldSpeakSeverity(
   return SEVERITY_RANK[severity] >= SEVERITY_RANK[minSeverity];
 }
 
-function truncateText(text: string, maxChars: number): string {
-  if (text.length <= maxChars) {
-    return text;
-  }
-
-  return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
-}
-
 function normalizeSpeechText(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
-function buildInsightFallbackSpeechText(insight: InsightMessage): string {
-  const oneLiner = normalizeSpeechText(insight.summary.one_liner);
-  if (oneLiner) {
-    return oneLiner;
-  }
-
-  for (const item of insight.summary.what_changed) {
-    const normalized = normalizeSpeechText(item);
-    if (normalized) {
-      return truncateText(normalized, INSIGHT_SPEECH_FALLBACK_MAX_CHARS);
-    }
-  }
-
-  if (insight.summary.tags.length > 0) {
-    const tagsSummary = normalizeSpeechText(insight.summary.tags.join(', '));
-    if (tagsSummary) {
-      return `Insight tags: ${tagsSummary}`;
-    }
-  }
-
-  return '';
-}
-
-function replaceToken(template: string, token: string, value: string): string {
-  return template.split(token).join(value);
-}
-
-function renderInsightSpeechText(insight: InsightMessage, template: string): string {
-  const fallback = buildInsightFallbackSpeechText(insight);
-  const normalizedTemplate = normalizeSpeechText(template);
-
-  if (!normalizedTemplate) {
-    return fallback;
-  }
-
-  let renderedTemplate = normalizedTemplate;
-  renderedTemplate = replaceToken(renderedTemplate, '{{one_liner}}', insight.summary.one_liner);
-  renderedTemplate = replaceToken(renderedTemplate, '{{severity}}', insight.summary.severity);
-  renderedTemplate = replaceToken(renderedTemplate, '{{tags}}', insight.summary.tags.join(', '));
-  renderedTemplate = replaceToken(renderedTemplate, '{{what_changed}}', insight.summary.what_changed.join('; '));
-  renderedTemplate = replaceToken(renderedTemplate, '{{clip_id}}', insight.clip_id);
-  renderedTemplate = replaceToken(renderedTemplate, '{{trigger_frame_id}}', insight.trigger_frame_id);
-
-  const rendered = normalizeSpeechText(renderedTemplate);
-
-  if (!rendered || rendered === 'Insight:' || rendered === 'Insight') {
-    return fallback;
-  }
-
-  return rendered;
-}
-
 function getInsightSpeechId(insight: InsightMessage): string {
-  return `${insight.clip_id}:${insight.trigger_frame_id}`;
+  return insight.clip_id;
 }
 
 function App({ runtimeConfig }: AppProps): JSX.Element {
@@ -502,7 +448,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         return;
       }
 
-      const speechText = renderInsightSpeechText(insight, speechConfig.autoSpeak.textTemplate);
+      const speechText = normalizeSpeechText(insight.summary.tts_response);
       if (!speechText) {
         return;
       }
@@ -908,7 +854,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
   return (
     <main style={{ fontFamily: 'sans-serif', padding: 16, lineHeight: 1.4 }}>
-      <h1>Eva UI (Iteration 33)</h1>
+      <h1>Eva UI (Iteration 43)</h1>
 
       <p>
         WebSocket target: <code>{evaWsUrl}</code>
@@ -1059,6 +1005,9 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
                   {latestInsight.summary.severity.toUpperCase()}
                 </strong>{' '}
                 · {latestInsight.summary.one_liner}
+              </p>
+              <p style={{ marginTop: 0, marginBottom: 8 }}>
+                <strong>Spoken line:</strong> {latestInsight.summary.tts_response}
               </p>
               <p style={{ marginTop: 0, marginBottom: 8 }}>
                 Tags:{' '}

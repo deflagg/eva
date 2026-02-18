@@ -7,10 +7,9 @@
     "path": "/speech",
     "defaultVoice": "en-US-JennyNeural",
     "autoSpeak": {
-      "enabled": false,
+      "enabled": true,
       "minSeverity": "medium",
-      "cooldownMs": 2000,
-      "textTemplate": "Insight: {{one_liner}}"
+      "cooldownMs": 2000
     }
   }
 }

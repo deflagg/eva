@@ -29,6 +29,7 @@ class VisionAgentInsightRequest(BaseModel):
 
 class VisionAgentInsightSummary(BaseModel):
     one_liner: str = Field(min_length=1)
+    tts_response: str = Field(min_length=1)
     what_changed: list[str] = Field(min_length=1)
     severity: InsightSeverity
     tags: list[str] = Field(min_length=1)

@@ -11,12 +11,20 @@ Node daemon for clip-level insight summaries via pi-ai tool calling.
   - sends frames to configured model via `@mariozechner/pi-ai`
   - forces structured tool call output (`submit_insight`) with:
     - `one_liner`
+    - `tts_response`
     - `what_changed[]`
     - `severity`
     - `tags[]`
   - returns:
     - `summary`
     - `usage` (`input_tokens`, `output_tokens`, `cost_usd`)
+
+### `summary.tts_response` contract
+
+- required non-empty string
+- 1-2 spoken-friendly sentences
+- no tags/IDs/telemetry/cost text
+- severity-aware tone (calm for low, urgent for high)
 
 ## Guardrails
 

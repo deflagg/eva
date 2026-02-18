@@ -1911,3 +1911,242 @@
 ### Notes
 - Speech job-mode endpoints (`/speech/jobs`, `/speech/audio/...`) are intentionally not implemented.
 - Existing `POST /speech` + cache/dedupe behavior from Iterations 31–34 remains unchanged.
+
+## Iteration 36 — Eva config plumbing only (speech config; no runtime behavior)
+
+**Status:** ✅ Completed (2026-02-18)
+
+### Completed
+- Revalidated Eva speech config plumbing against `docs/implementation-plan-36-43.md` Iteration 36 requirements.
+- Confirmed `packages/eva/src/config.ts` already contains the required `speech` schema/defaults:
+  - `enabled: false`
+  - `path: "/speech"`
+  - `defaultVoice: "en-US-JennyNeural"`
+  - `maxTextChars: 1000`
+  - `maxBodyBytes: 65536`
+  - `cooldownMs: 0`
+  - `cache.enabled/ttlMs/maxEntries`
+- Confirmed committed defaults in `packages/eva/eva.config.json` include the `speech` block with `enabled: false`.
+- Confirmed copy-only local example `packages/eva/eva.config.local.example.json` includes speech enabled for local testing.
+- No runtime code changes were required for this iteration.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- Manual smoke check with only committed config (`eva.config.local.json` temporarily moved out of the search path):
+  - `cd packages/eva && timeout 8s npm run dev`
+  - Eva booted in existing behavior (`/eye` WS endpoint, QuickVision reconnect loop, speech disabled by default).
+
+### Manual test steps
+1. Build Eva:
+   - `cd packages/eva`
+   - `npm run build`
+2. (Optional runtime parity check with committed config only)
+   - temporarily move `eva.config.local.json` aside
+   - run `timeout 8s npm run dev`
+   - verify startup logs show `speech endpoint enabled=false`
+   - restore `eva.config.local.json`.
+
+### Notes
+- Iteration 36 deliverables were already present from prior baseline work; this pass confirms alignment with the 36–43 plan before proceeding.
+
+## Iteration 37 — Add Edge TTS dependency + wrapper module (no endpoint yet)
+
+**Status:** ✅ Completed (2026-02-18)
+
+### Completed
+- Revalidated Eva speech synthesis wrapper against `docs/implementation-plan-36-43.md` Iteration 37 requirements.
+- Confirmed pinned dependency in `packages/eva/package.json`:
+  - `node-edge-tts: "1.2.10"`
+- Confirmed wrapper modules exist and match expected API:
+  - `packages/eva/src/speech/types.ts`
+    - exports `SynthesizeInput` with `text`, `voice`, optional `rate`
+  - `packages/eva/src/speech/edgeTts.ts`
+    - exports `synthesize({ text, voice, rate }): Promise<Buffer>`
+    - performs dynamic module loading for `node-edge-tts`
+    - handles ESM/CJS export interop (`module.EdgeTTS` and `module.default.EdgeTTS`)
+    - validates text/voice and normalizes numeric rate.
+- No code changes were required in this iteration; baseline already satisfied the deliverables.
+
+### Verification
+- `cd packages/eva && npm install && npm run build` passes.
+
+### Manual test steps
+1. Install Eva dependencies:
+   - `cd packages/eva`
+   - `npm install`
+2. Build Eva:
+   - `npm run build`
+
+### Notes
+- Iteration 37 is validated complete from existing baseline implementation; no runtime/server routing changes were introduced here.
+
+## Iteration 39 — VisionAgent: add `tts_response` to tool schema + prompt guidance
+
+**Status:** ✅ Completed (2026-02-18)
+
+### Completed
+- Updated VisionAgent tool schema in `packages/vision-agent/src/tools.ts`:
+  - added required `summary.tts_response: string` (`minLength: 1`) to `InsightSummarySchema`
+  - updated tool description to require `tts_response` alongside existing fields.
+- Updated VisionAgent prompt guidance in `packages/vision-agent/src/prompts.ts`:
+  - added strict `tts_response` requirements:
+    - 1-2 spoken-friendly sentences
+    - natural language only
+    - no IDs/tags/token-cost telemetry/JSON text
+    - severity-aware tone (calm low, attentive medium, urgent high)
+- Updated docs in `packages/vision-agent/README.md`:
+  - added `tts_response` to structured summary fields
+  - documented `summary.tts_response` contract.
+
+### Verification
+- `cd packages/vision-agent && npm run build` passes.
+
+### Manual test steps
+1. Start VisionAgent with valid secrets:
+   - `cd packages/vision-agent`
+   - ensure `vision-agent.secrets.local.json` contains a valid `openaiApiKey`
+   - `npm run dev`
+2. Call insight endpoint with sample frames:
+   - `curl -s http://localhost:8790/insight -H 'content-type: application/json' -d '<payload>'`
+3. Confirm response includes:
+   - `summary.tts_response` (non-empty string)
+   - existing `summary` fields + `usage`.
+
+### Notes
+- This iteration only updates VisionAgent schema/prompt/docs.
+- QuickVision/UI propagation for `tts_response` follows in later iterations.
+
+## Iteration 40 — QuickVision: propagate `tts_response` through schemas + WS message
+
+**Status:** ✅ Completed (2026-02-18)
+
+### Completed
+- Updated QuickVision VisionAgent response validation in `packages/quickvision/app/vision_agent_client.py`:
+  - `VisionAgentInsightSummary` now requires `tts_response: string` (`min_length=1`).
+- Updated QuickVision protocol model in `packages/quickvision/app/protocol.py`:
+  - `InsightSummary` now requires `tts_response: string` (`min_length=1`).
+- Ensured relay path preserves `tts_response` unchanged:
+  - `packages/quickvision/app/insights.py` already forwards `insight.summary.model_dump(...)` directly into protocol `InsightMessage.summary`.
+- Added compatibility update in Eva relay schema to avoid stripping the new field:
+  - `packages/eva/src/protocol.ts` `InsightSummarySchema` now includes `tts_response` so Eva relays it unchanged to UI.
+- Updated QuickVision docs in `packages/quickvision/README.md` to note that `summary.tts_response` is preserved in emitted insight payloads.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+
+### Manual test steps
+1. Start VisionAgent, QuickVision, Eva, and UI.
+2. Trigger an insight (`insight_test` or auto-triggered insight).
+3. Confirm QuickVision insight payload includes:
+   - `summary.tts_response`
+4. Confirm Eva relays the same insight payload without dropping `tts_response`.
+
+### Notes
+- This iteration is limited to schema propagation/relay preservation; UI display of `tts_response` is Iteration 41.
+
+## Iteration 41 — UI: add `tts_response` to types + display it in Latest Insight panel
+
+**Status:** ✅ Completed (2026-02-18)
+
+### Completed
+- Updated UI protocol types in `packages/ui/src/types.ts`:
+  - `InsightSummary` now includes required `tts_response: string`.
+- Updated UI insight message guard in `packages/ui/src/main.tsx`:
+  - `isInsightMessage(...)` now checks for both `summary.one_liner` and `summary.tts_response` string fields.
+- Updated Latest Insight rendering in `packages/ui/src/main.tsx`:
+  - added visible **Spoken line** row showing `latestInsight.summary.tts_response`
+  - retained `one_liner` and existing tags/what_changed/usage sections (both remain visible).
+
+### Verification
+- `cd packages/ui && npm run build` passes.
+
+### Manual test steps
+1. Start VisionAgent, QuickVision, Eva, and UI.
+2. Trigger an insight (`insight_test` or auto-triggered insight).
+3. Confirm **Latest insight** panel now shows:
+   - one-liner summary
+   - spoken line from `summary.tts_response`
+   - existing tags/details.
+
+### Notes
+- This iteration only adds UI type/display support.
+- Auto-speak behavior changes are handled in Iterations 42–43.
+
+## Iteration 42 — UI: speech client + “Enable Audio” (autoplay unlock)
+
+**Status:** ✅ Completed (2026-02-18)
+
+### Completed
+- Revalidated and aligned UI speech-client path with Iteration 42 requirements:
+  - `packages/ui/src/speech.ts` derives Eva HTTP base from `eva.wsUrl` (`ws/wss` -> `http/https`) and strips path via origin.
+  - `speakText(...)` performs `POST /speech` and plays returned audio blob via `<audio>` + object URL.
+  - autoplay lock path sets `audioLocked=true` when playback is blocked.
+- Kept one-time autoplay unlock control in UI (`packages/ui/src/main.tsx`):
+  - **Enable Audio** button uses `speechClient.enableAudio()`.
+- Kept manual speech verification controls in UI:
+  - **Test Speak** button
+  - optional **Voice** override input.
+- Ensured Auto Speak toggle defaults ON for this iteration:
+  - `packages/ui/src/config.ts`: default `speech.autoSpeak.enabled` -> `true` when not explicitly configured.
+  - `packages/ui/public/config.json`: set committed `speech.autoSpeak.enabled` to `true`.
+- Updated UI docs/version marker:
+  - `packages/ui/README.md` now reflects Iteration 42 and notes Auto Speak default ON.
+- Updated UI title marker:
+  - `packages/ui/src/main.tsx` heading now shows `Iteration 42`.
+
+### Verification
+- `cd packages/ui && npm run build` passes.
+
+### Manual test steps
+1. Enable Eva speech endpoint (`speech.enabled: true`) and start Eva.
+2. Start UI (`cd packages/ui && npm run dev`).
+3. In browser:
+   - click **Enable Audio** once
+   - click **Test Speak**
+4. Confirm audio plays through browser output.
+
+### Notes
+- Core auto-speak trigger behavior for new insights is finalized in Iteration 43.
+
+## Iteration 43 — Auto-speak: speak new insights using `tts_response` (core requirement)
+
+**Status:** ✅ Completed (2026-02-18)
+
+### Completed
+- Updated UI auto-speak source in `packages/ui/src/main.tsx`:
+  - auto-speak text is now **exactly** `insight.summary.tts_response` (normalized whitespace)
+  - removed template/fallback narration path so UI no longer generates spoken text from `one_liner`/tags/other fields.
+- Kept and validated required auto-speak guards in `packages/ui/src/main.tsx`:
+  - new insight dedupe via stable id (`clip_id`)
+  - Auto Speak toggle enabled
+  - severity gate (`>= speech.autoSpeak.minSeverity`, default `medium`)
+  - UI cooldown gate (`speech.autoSpeak.cooldownMs`)
+  - non-empty `tts_response`
+- Preserved cancellation and cleanup behavior for in-flight speech in `packages/ui/src/main.tsx` + `packages/ui/src/speech.ts`:
+  - abort prior fetch via `AbortController`
+  - stop current audio playback before new speech
+  - revoke prior blob URL on stop/new playback.
+- Simplified UI speech config shape in `packages/ui/src/config.ts`:
+  - removed `speech.autoSpeak.textTemplate` from parsed/runtime config type (no longer used).
+- Updated committed UI runtime defaults in `packages/ui/public/config.json`:
+  - removed `speech.autoSpeak.textTemplate` field.
+- Updated UI docs/title markers:
+  - `packages/ui/README.md` now states spoken text source is exactly `insight.summary.tts_response`
+  - updated runtime config example accordingly
+  - `packages/ui/src/main.tsx` header now shows `Iteration 43`.
+
+### Verification
+- `cd packages/ui && npm run build` passes.
+
+### Manual test steps
+1. Start Eva with speech enabled (`speech.enabled: true`).
+2. Start UI and click **Enable Audio** once.
+3. Trigger a new MED/HIGH insight (`insight_test` or auto-triggered).
+4. Confirm UI auto-speaks the text from `summary.tts_response`.
+5. Trigger multiple insights rapidly and confirm:
+   - newer speech cancels older in-flight speech/fetch
+   - cooldown and severity gates are enforced.
+
+### Notes
+- With this iteration, the 39–43 chain is complete: VisionAgent generates `tts_response`, QuickVision/Eva relay it, UI displays it, and UI auto-speaks it.

@@ -42,6 +42,7 @@ Python daemon that hosts YOLO inference and (optional) insight triggering.
     - re-encode JPEG with `insights.downsample.jpeg_quality`
   - calls VisionAgent via HTTP
   - emits protocol `insight` message on success (no `frame_id` field)
+  - preserves `summary.tts_response` from VisionAgent in the emitted insight payload
 
 ## Configuration (Dynaconf)
 

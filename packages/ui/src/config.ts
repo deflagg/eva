@@ -16,7 +16,6 @@ export interface UiSpeechAutoSpeakConfig {
   enabled: boolean;
   minSeverity: AutoSpeakMinSeverity;
   cooldownMs: number;
-  textTemplate: string;
 }
 
 export interface UiSpeechConfig {
@@ -184,18 +183,13 @@ function parseSpeechConfig(value: unknown, sourcePath: string): UiSpeechConfig {
 
   const autoSpeakEnabled =
     autoSpeak.enabled === undefined
-      ? enabled
+      ? true
       : assertBoolean(autoSpeak.enabled, 'speech.autoSpeak.enabled', sourcePath);
 
   const autoSpeakCooldownMs =
     autoSpeak.cooldownMs === undefined
       ? 2_000
       : assertNonNegativeInt(autoSpeak.cooldownMs, 'speech.autoSpeak.cooldownMs', sourcePath);
-
-  const autoSpeakTextTemplate =
-    autoSpeak.textTemplate === undefined
-      ? 'Insight: {{one_liner}}'
-      : assertNonEmptyString(autoSpeak.textTemplate, 'speech.autoSpeak.textTemplate', sourcePath);
 
   return {
     enabled,
@@ -205,7 +199,6 @@ function parseSpeechConfig(value: unknown, sourcePath: string): UiSpeechConfig {
       enabled: autoSpeakEnabled,
       minSeverity: parseAutoSpeakMinSeverity(autoSpeak.minSeverity, sourcePath),
       cooldownMs: autoSpeakCooldownMs,
-      textTemplate: autoSpeakTextTemplate,
     },
   };
 }

@@ -2,7 +2,7 @@
 
 React + Vite client for webcam capture and overlays.
 
-## Current behavior (Iteration 33)
+## Current behavior (Iteration 43)
 
 - Loads runtime config from:
   - `/config.local.json` first (if present)
@@ -14,7 +14,7 @@ React + Vite client for webcam capture and overlays.
 - Provides controls:
   - **Send test message**
   - **Trigger insight test** (sends `{"type":"command","v":1,"name":"insight_test"}`)
-  - **Auto Speak** toggle (UI-local state)
+  - **Auto Speak** toggle (defaults ON)
   - **Enable Audio** (one-time unlock for browser autoplay policy)
   - **Voice** input + **Test Speak** button (calls Eva `POST /speech`)
   - **Show/Hide ROI/line overlay** (when debug overlay geometry is configured)
@@ -27,9 +27,9 @@ React + Vite client for webcam capture and overlays.
   - insight severity >= `speech.autoSpeak.minSeverity` (`low`, `medium`, or `high`)
   - cooldown window (`speech.autoSpeak.cooldownMs`) has elapsed
   - resolved speech text is non-empty
-- Auto-speak text selection:
-  - template from `speech.autoSpeak.textTemplate` (for example `Insight: {{one_liner}}`)
-  - falls back to one-liner or shortened summary when template output is empty
+- Auto-speak spoken text source:
+  - exactly `insight.summary.tts_response`
+  - UI does not generate fallback narration from other fields
 - Speech interruption behavior:
   - starting a new speech aborts any in-flight fetch (`AbortController`)
   - pauses current audio playback
@@ -76,8 +76,7 @@ Example:
     "autoSpeak": {
       "enabled": true,
       "minSeverity": "medium",
-      "cooldownMs": 2000,
-      "textTemplate": "Insight: {{one_liner}}"
+      "cooldownMs": 2000
     }
   },
   "debugOverlay": {
