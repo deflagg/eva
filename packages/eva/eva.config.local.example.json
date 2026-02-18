@@ -1,0 +1,33 @@
+{
+  "server": {
+    "port": 8787,
+    "eyePath": "/eye"
+  },
+  "quickvision": {
+    "wsUrl": "ws://localhost:8000/infer"
+  },
+  "insightRelay": {
+    "enabled": true,
+    "cooldownMs": 10000,
+    "dedupeWindowMs": 60000
+  },
+  "subprocesses": {
+    "enabled": true,
+    "visionAgent": {
+      "enabled": true,
+      "cwd": "packages/vision-agent",
+      "command": ["npm", "run", "dev"],
+      "healthUrl": "http://127.0.0.1:8790/health",
+      "readyTimeoutMs": 30000,
+      "shutdownTimeoutMs": 5000
+    },
+    "quickvision": {
+      "enabled": true,
+      "cwd": "packages/quickvision",
+      "command": ["python", "-m", "app.run"],
+      "healthUrl": "http://127.0.0.1:8000/health",
+      "readyTimeoutMs": 60000,
+      "shutdownTimeoutMs": 10000
+    }
+  }
+}

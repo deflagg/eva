@@ -1309,3 +1309,276 @@
 
 ### Notes
 - Debug ROI/line overlay geometry is intentionally sourced from UI runtime config so this iteration remains UI-only and does not require protocol/backend changes.
+
+## Iteration 23 — Eva config: add subprocess settings (no behavior change)
+
+**Status:** ✅ Completed (2026-02-17)
+
+### Completed
+- Extended Eva config schema (`packages/eva/src/config.ts`) with new optional `subprocesses` block and defaults:
+  - `subprocesses.enabled` default `false`
+  - `subprocesses.visionAgent` defaults for `enabled/cwd/command/healthUrl/readyTimeoutMs/shutdownTimeoutMs`
+  - `subprocesses.quickvision` defaults for `enabled/cwd/command/healthUrl/readyTimeoutMs/shutdownTimeoutMs`
+- Added validation rules in Eva config schema:
+  - `command` must be a non-empty array of non-empty strings
+  - `healthUrl` must be a valid `http://` or `https://` URL
+  - timeout fields must be positive integers
+- Added committed local override example file:
+  - `packages/eva/eva.config.local.example.json`
+- Updated root ignore rules to allow committing the Eva local-example config file:
+  - `.gitignore` now includes `!packages/eva/eva.config.local.example.json`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- Manual smoke check with only `eva.config.json` present (no `eva.config.local.json`):
+  - `cd packages/eva && timeout 8s npm run dev`
+  - Eva still boots in existing external-QuickVision mode (listens on `:8787`, targets `ws://localhost:8000/infer`, reconnect behavior unchanged).
+
+### Manual test steps
+1. Ensure `packages/eva/eva.config.local.json` does not exist.
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Confirm startup logs remain unchanged from prior behavior:
+   - HTTP listen on configured port/path
+   - QuickVision WS target from `quickvision.wsUrl`
+   - reconnect attempts if QuickVision is not running.
+
+### Notes
+- Runtime behavior is intentionally unchanged in this iteration; subprocess management wiring begins in Iteration 24+.
+
+## Iteration 24 — Add subprocess utility (ManagedProcess + health polling)
+
+**Status:** ✅ Completed (2026-02-17)
+
+### Completed
+- Added reusable health polling helper module:
+  - `packages/eva/src/subprocess/health.ts`
+  - exports:
+    - `sleep(ms)`
+    - `waitForHttpHealthy({ name, healthUrl, timeoutMs, intervalMs })`
+  - behavior:
+    - polls `GET healthUrl` using Node global `fetch`
+    - succeeds only on HTTP `200`
+    - retries every `250ms` by default until timeout
+    - includes last observed error/status in timeout error message
+- Added reusable subprocess manager:
+  - `packages/eva/src/subprocess/ManagedProcess.ts`
+  - supports:
+    - `start()` using Node `child_process.spawn`
+      - `cwd` + `command` from config
+      - `env` passthrough (`process.env`)
+      - `detached: true` (Linux-first process-group signaling)
+    - prefixed stdout/stderr logs (`[name] ...`)
+    - `waitForHealthy()` using HTTP polling helper
+    - `stop()` with SIGTERM then SIGKILL fallback
+      - Linux-first process-group signaling via `process.kill(-pid, signal)` when available
+      - fallback to `child.kill(signal)`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- Manual smoke check via temporary tsx script using `ManagedProcess` to launch a tiny Node health server:
+  - `waitForHealthy()` succeeded
+  - `stop()` terminated process
+  - health endpoint became unreachable after stop.
+
+### Manual test steps
+1. From `packages/eva`, run build:
+   - `npm run build`
+2. (Smoke example) run a small script that:
+   - creates `ManagedProcess` for `node -e "http server"`
+   - calls `start()` then `waitForHealthy()`
+   - calls `stop()` and verifies health endpoint no longer responds.
+
+### Notes
+- No runtime wiring changes in Eva bootstrap yet; subprocesses are introduced as utilities only in this iteration.
+- Eva startup/shutdown integration begins in Iteration 25+.
+
+## Iteration 25 — Eva spawns VisionAgent (gated by config)
+
+**Status:** ✅ Completed (2026-02-17)
+
+### Completed
+- Updated Eva bootstrap entrypoint (`packages/eva/src/index.ts`) to async startup flow:
+  - added `main()` + top-level `main().catch(...)` fatal path (`process.exit(1)`) with clear startup error logging.
+- Added config-gated VisionAgent subprocess startup path:
+  - when `subprocesses.enabled=true` and `subprocesses.visionAgent.enabled=true`:
+    1. resolves `visionAgent.cwd` relative to repo root
+    2. starts `ManagedProcess` using config-driven command (default `npm run dev`)
+    3. waits for VisionAgent health endpoint to return `200`
+    4. only then starts Eva server.
+- Added startup failure cleanup for this path:
+  - if VisionAgent health wait fails, Eva calls `visionAgent.stop()` before surfacing fatal startup error.
+- Kept default behavior unchanged when subprocess mode is not enabled:
+  - Eva starts exactly as before and connects to external QuickVision via `quickvision.wsUrl`.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- Manual subprocess-mode run passes:
+  1. copied `packages/eva/eva.config.local.example.json` -> `packages/eva/eva.config.local.json` (with `subprocesses.enabled=true`)
+  2. started Eva (`cd packages/eva && npm run dev`)
+  3. observed logs:
+     - Eva started VisionAgent subprocess
+     - Eva waited for VisionAgent health
+     - Eva reported VisionAgent healthy
+     - Eva then started listening on `:8787`
+  4. `curl http://127.0.0.1:8790/health` returned `200` JSON while Eva was running.
+
+### Manual test steps
+1. Copy local override file:
+   - `cp packages/eva/eva.config.local.example.json packages/eva/eva.config.local.json`
+2. Ensure VisionAgent dependencies are installed once:
+   - `cd packages/vision-agent && npm i`
+3. Start Eva:
+   - `cd packages/eva && npm run dev`
+4. Confirm VisionAgent health:
+   - `curl http://127.0.0.1:8790/health`
+5. Confirm Eva starts only after VisionAgent is healthy (startup logs show this order).
+
+### Notes
+- This iteration intentionally wires only VisionAgent startup; QuickVision subprocess startup remains Iteration 26.
+- Graceful coordinated shutdown (to avoid orphan subprocesses on Ctrl+C) is intentionally deferred to Iteration 27.
+
+## Iteration 26 — Eva spawns QuickVision (gated by config)
+
+**Status:** ✅ Completed (2026-02-17)
+
+### Completed
+- Extended Eva bootstrap subprocess flow in `packages/eva/src/index.ts`:
+  - retained Iteration 25 order for VisionAgent startup + health wait.
+  - added QuickVision startup + health wait when subprocess mode is enabled:
+    1. start VisionAgent subprocess
+    2. wait for VisionAgent health (`subprocesses.visionAgent.healthUrl`)
+    3. start QuickVision subprocess (`subprocesses.quickvision.command`, default `python -m app.run`)
+    4. wait for QuickVision health (`subprocesses.quickvision.healthUrl`)
+    5. then start Eva server.
+- Added startup failure cleanup path in `main()`:
+  - if startup fails after subprocesses are started, Eva now attempts to stop QuickVision first, then VisionAgent, before surfacing fatal error.
+- Kept Eva QuickVision WebSocket target config unchanged:
+  - `quickvision.wsUrl` (default `ws://localhost:8000/infer`) remains the relay target.
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- Manual subprocess boot ordering check:
+  - with `eva.config.local.json` enabling subprocesses, startup logs now show:
+    - VisionAgent subprocess start -> VisionAgent health wait/success
+    - QuickVision subprocess start -> QuickVision health wait
+    - Eva server starts only after health waits complete.
+- In this host, QuickVision readiness success was not fully verified because `python -m app.run` depends on local Python environment setup (for example `uvicorn` availability / venv path). Manual run instructions are included below.
+
+### Manual test steps
+1. QuickVision one-time setup:
+   - `cd packages/quickvision`
+   - `python -m venv .venv`
+   - `source .venv/bin/activate`
+   - `pip install -r requirements.txt`
+2. Enable subprocess mode:
+   - `cp packages/eva/eva.config.local.example.json packages/eva/eva.config.local.json`
+3. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+4. Confirm health endpoints:
+   - `curl http://127.0.0.1:8790/health`
+   - `curl http://127.0.0.1:8000/health`
+5. Start UI and verify detections still flow through Eva relay.
+
+### Notes
+- This iteration only adds startup orchestration for QuickVision; graceful coordinated shutdown remains Iteration 27.
+
+## Iteration 27 — Graceful shutdown (no orphan daemons)
+
+**Status:** ✅ Completed (2026-02-17)
+
+### Completed
+- Updated Eva bootstrap/shutdown lifecycle in `packages/eva/src/index.ts`:
+  - keeps runtime references to:
+    - Eva HTTP server (`Server`) returned by `startServer(...)`
+    - `ManagedProcess` instances for QuickVision and VisionAgent
+- Added idempotent shutdown coordinator:
+  - single `shutdown()` path guarded by `shutdownInFlight`
+  - repeated signal delivery does not run shutdown twice
+- Registered signal handlers:
+  - `process.on('SIGINT', ...)`
+  - `process.on('SIGTERM', ...)`
+- Implemented required shutdown order in signal path:
+  1. log `[eva] shutting down...`
+  2. close Eva server (`server.close(...)`)
+  3. log + stop QuickVision (`[eva] stopping quickvision...`)
+  4. log + stop VisionAgent (`[eva] stopping vision-agent...`)
+- Kept startup failure cleanup using the same shutdown path (ensures no orphan subprocesses on startup errors).
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- Manual subprocess-mode shutdown test passed:
+  1. started Eva in subprocess mode (VisionAgent + QuickVision + Eva healthy)
+  2. sent Ctrl+C to Eva process
+  3. observed shutdown logs in required order:
+     - `[eva] shutting down...`
+     - `[eva] stopping quickvision...`
+     - `[eva] stopping vision-agent...`
+  4. observed subprocess exits for both daemons.
+  5. confirmed ports released after shutdown:
+     - `curl http://127.0.0.1:8000/health` -> connection refused
+     - `curl http://127.0.0.1:8790/health` -> connection refused
+
+### Manual test steps
+1. Enable subprocess mode in Eva local config.
+2. Ensure QuickVision Python environment is installed (`.venv` + requirements).
+3. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+4. Wait for startup to show all services healthy.
+5. Press Ctrl+C in Eva terminal.
+6. Confirm logs show shutdown order and subprocess stops.
+7. Verify ports are free:
+   - `curl http://127.0.0.1:8000/health`
+   - `curl http://127.0.0.1:8790/health`
+
+### Notes
+- Coordinated shutdown now handles both normal signal-triggered shutdown and startup-error cleanup via the same idempotent path.
+- README workflow updates are deferred to Iteration 28.
+
+## Iteration 28 — Docs: “one command boots the stack”
+
+**Status:** ✅ Completed (2026-02-17)
+
+### Completed
+- Updated `packages/eva/README.md` to document both workflows clearly:
+  - **external mode** (status quo): start VisionAgent + QuickVision manually, then Eva
+  - **subprocess mode**: copy `eva.config.local.example.json` -> `eva.config.local.json`, then run `npm run dev` in `packages/eva`
+- Added explicit prerequisites in Eva README:
+  - VisionAgent one-time setup (Node deps + secrets file)
+  - QuickVision one-time setup (venv + `pip install -r requirements.txt`)
+  - Eva one-time setup (Node deps)
+- Added troubleshooting guidance for common subprocess-mode QuickVision startup issue:
+  - `ModuleNotFoundError: No module named 'uvicorn'`
+  - documented how to point `subprocesses.quickvision.command` to `.venv/bin/python`.
+- (Optional) Updated root `README.md` with a short one-command stack boot summary section for Eva subprocess mode.
+
+### Verification
+- Documentation update only (no runtime code changes in this iteration).
+- Build spot-check:
+  - `cd packages/eva && npm run build` passes.
+- Manual guidance validation:
+  - README steps match implemented Iterations 23–27 behavior:
+    - subprocess mode remains opt-in
+    - Eva waits on VisionAgent/QuickVision health before serving
+    - Ctrl+C shutdown tears down subprocesses.
+
+### Manual test steps
+1. Complete one-time dependencies:
+   - VisionAgent `npm install` + secrets file
+   - QuickVision `.venv` + `pip install -r requirements.txt`
+   - Eva `npm install`
+2. Copy subprocess example config:
+   - `cd packages/eva`
+   - `cp eva.config.local.example.json eva.config.local.json`
+3. Run stack from one command:
+   - `npm run dev`
+4. Verify health endpoints:
+   - `curl http://127.0.0.1:8790/health`
+   - `curl http://127.0.0.1:8000/health`
+   - `curl http://127.0.0.1:8787/`
+
+### Notes
+- Iterations 23–28 are now fully documented in repo progress and Eva README workflow sections.

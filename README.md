@@ -39,6 +39,18 @@ Protocol docs/schema are in `packages/protocol`.
 - `packages/ui/public/config.json` (committed)
 - `packages/ui/public/config.local.json` (optional local override, gitignored)
 
+## One-command stack boot (Eva subprocess mode)
+
+After one-time dependency setup (Node deps + QuickVision venv + VisionAgent secrets), you can boot Eva + VisionAgent + QuickVision from one command:
+
+```bash
+cd packages/eva
+cp eva.config.local.example.json eva.config.local.json
+npm run dev
+```
+
+If QuickVision fails to start because `python` is not the venv interpreter, set `subprocesses.quickvision.command` in `eva.config.local.json` to `packages/quickvision/.venv/bin/python -m app.run`.
+
 ## Development Run Instructions
 
 ### 1) Eva (TypeScript)

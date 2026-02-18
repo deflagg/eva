@@ -16,6 +16,7 @@ packages/quickvision/*.pt
 
 # Local overrides / secrets
 packages/**/**/*.local.*
+!packages/eva/eva.config.local.example.json
 packages/vision-agent/vision-agent.config.local.json
 packages/vision-agent/*.secrets.local.json
 packages/ui/public/config.local.json
