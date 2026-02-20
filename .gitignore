@@ -21,6 +21,12 @@ packages/vision-agent/vision-agent.config.local.json
 packages/vision-agent/*.secrets.local.json
 packages/ui/public/config.local.json
 
+# EVA memory runtime artifacts
+packages/eva/memory/working_memory.log
+packages/eva/memory/short_term_memory.db
+packages/eva/memory/cache/**
+packages/eva/memory/vector_db/**
+
 # OS/editor
 .DS_Store
 .vscode/

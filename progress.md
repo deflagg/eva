@@ -2150,3 +2150,136 @@
 
 ### Notes
 - With this iteration, the 39–43 chain is complete: VisionAgent generates `tts_response`, QuickVision/Eva relay it, UI displays it, and UI auto-speaks it.
+
+## Iteration 44 — Add EVA memory folder + tags/persona (no runtime behavior)
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Added Eva memory scaffold directory and committed base memory assets:
+  - `packages/eva/memory/persona.md`
+  - `packages/eva/memory/experience_tags.json`
+- Updated root `.gitignore` with EVA memory runtime artifact ignore rules:
+  - `packages/eva/memory/working_memory.log`
+  - `packages/eva/memory/short_term_memory.db`
+  - `packages/eva/memory/cache/**`
+  - `packages/eva/memory/vector_db/**`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+
+### Manual test steps
+1. Confirm committed scaffold files exist:
+   - `packages/eva/memory/persona.md`
+   - `packages/eva/memory/experience_tags.json`
+2. Confirm memory runtime files are ignored by git:
+   - `git check-ignore -v packages/eva/memory/working_memory.log`
+   - `git check-ignore -v packages/eva/memory/short_term_memory.db`
+   - `git check-ignore -v packages/eva/memory/cache/example.json`
+   - `git check-ignore -v packages/eva/memory/vector_db/example.txt`
+
+### Notes
+- No Eva runtime behavior changed in this iteration.
+- QuickVision remains unchanged in this iteration (rename to `packages/vision` is planned later).
+
+## Iteration 45 — Add `packages/agent` skeleton + `/health` (no OpenAI yet)
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Added new `packages/agent` service skeleton:
+  - `.nvmrc`
+  - `package.json`
+  - `tsconfig.json`
+  - `README.md`
+  - `agent.config.json`
+  - `src/config.ts`
+  - `src/server.ts`
+  - `src/index.ts`
+- Added local-only (gitignored) runtime files:
+  - `packages/agent/agent.config.local.json`
+  - `packages/agent/agent.secrets.local.json`
+- Implemented config loading with `cosmiconfig + zod` in `packages/agent/src/config.ts`:
+  - local-first search order:
+    1. `agent.config.local.json`
+    2. `agent.config.json`
+  - required path handling:
+    - resolves `memory.dir` relative to the loaded config file path.
+- Implemented HTTP server in `packages/agent/src/server.ts` with:
+  - `GET /health` -> `200` JSON including `service`, `status`, `uptime_ms`.
+
+### Files changed
+- `packages/agent/.nvmrc`
+- `packages/agent/package.json`
+- `packages/agent/tsconfig.json`
+- `packages/agent/README.md`
+- `packages/agent/agent.config.json`
+- `packages/agent/src/config.ts`
+- `packages/agent/src/server.ts`
+- `packages/agent/src/index.ts`
+- `progress.md`
+
+### Verification
+- `cd packages/agent && npm i && npm run build` passes.
+- `curl http://127.0.0.1:8791/health` returns `200` with required fields.
+
+### Manual run instructions
+1. Start agent:
+   - `cd packages/agent`
+   - `npm run dev`
+2. Health check:
+   - `curl -s -i http://127.0.0.1:8791/health`
+
+### Notes
+- No OpenAI calls are implemented in this iteration.
+- No changes were made to Eva/QuickVision runtime behavior in this iteration.
+
+## Iteration 46 — Agent: add `POST /insight` stub (deterministic)
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Added deterministic insight stub endpoint in `packages/agent/src/server.ts`:
+  - `POST /insight`
+  - validates `Content-Type: application/json`
+  - enforces max request body size from config (`insight.maxBodyBytes`)
+  - validates minimal payload shape with non-empty `frames` array
+  - returns stable contract response shape:
+    - `summary.one_liner`
+    - `summary.tts_response`
+    - `summary.tags`
+    - `summary.what_changed`
+    - `summary.severity`
+    - `usage` (`input_tokens`, `output_tokens`, `cost_usd`)
+- Added body parsing/error handling helpers for deterministic HTTP errors:
+  - `EMPTY_BODY`, `INVALID_JSON`, `PAYLOAD_TOO_LARGE`, `INVALID_REQUEST`, etc.
+- Extended Agent config schema/defaults with insight guardrail settings:
+  - `insight.maxBodyBytes` (default `8388608`)
+- Updated committed defaults:
+  - `packages/agent/agent.config.json`
+- Updated docs:
+  - `packages/agent/README.md` now documents Iteration 46 behavior and includes `/insight` curl example.
+
+### Files changed
+- `packages/agent/src/server.ts`
+- `packages/agent/src/config.ts`
+- `packages/agent/agent.config.json`
+- `packages/agent/README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/agent && npm run build` passes.
+- `curl -sS -X POST http://127.0.0.1:8791/insight -H 'content-type: application/json' -d '<payload>'` returns `200` and expected response shape.
+
+### Manual run instructions
+1. Start agent:
+   - `cd packages/agent`
+   - `npm run dev`
+2. Call insight endpoint:
+   - `curl -sS -X POST http://127.0.0.1:8791/insight -H 'content-type: application/json' -d '{"clip_id":"clip-1","trigger_frame_id":"frame-2","frames":[{"frame_id":"frame-1","ts_ms":1700000000000,"mime":"image/jpeg","image_b64":"ZmFrZQ=="}]}'`
+
+### Notes
+- This iteration intentionally uses a deterministic stub response and does not call OpenAI yet.
+- Request/response shape is compatible with current QuickVision insight client expectations.
