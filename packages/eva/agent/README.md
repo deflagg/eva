@@ -2,7 +2,7 @@
 
 Node/TypeScript service for EVA text + insight generation.
 
-## Current behavior (Iteration 56)
+## Current behavior (Iteration 58)
 
 - Loads config via `cosmiconfig` + `zod`.
 - Resolves `memory.dir` relative to the loaded config file path.
@@ -15,8 +15,21 @@ Node/TypeScript service for EVA text + insight generation.
   - creates 3-5 short bullet summaries (vision insights, high-surprise chat, chat highlights)
   - inserts bullets into SQLite `packages/eva/memory/short_term_memory.db`
   - atomically rewrites working memory log to keep only the last 60 minutes
+- Exposes `POST /jobs/daily`:
+  - reads yesterday's rows from `packages/eva/memory/short_term_memory.db`
+  - upserts long-term vectors into:
+    - `packages/eva/memory/vector_db/long_term_experiences/index.json`
+    - `packages/eva/memory/vector_db/long_term_personality/index.json`
+  - updates stable cache artifacts:
+    - `packages/eva/memory/cache/core_experiences.json`
+    - `packages/eva/memory/cache/core_personality.json`
 - Exposes real model-backed `POST /respond`:
   - accepts `{ "text": "...", "session_id": "optional" }`
+  - builds retrieval context before the model call from:
+    - recent short-term SQLite summaries (tag-filtered)
+    - top-K long-term vector hits (`long_term_experiences` + `long_term_personality`)
+    - core cache files (`core_experiences.json`, `core_personality.json`)
+  - injects retrieval context into the respond prompt with a hard budget cap (approx token-aware)
   - calls model through `@mariozechner/pi-ai` tool loop (`commit_text_response`)
   - enforces concept whitelist from `packages/eva/memory/experience_tags.json`
     - unknown concepts are dropped and logged
@@ -103,6 +116,20 @@ Optional deterministic run timestamp for testing:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8791/jobs/hourly \
+  -H 'content-type: application/json' \
+  -d '{"now_ms":1700000000000}'
+```
+
+## Daily worker check
+
+```bash
+curl -sS -X POST http://127.0.0.1:8791/jobs/daily
+```
+
+Optional deterministic run timestamp for testing:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8791/jobs/daily \
   -H 'content-type: application/json' \
   -d '{"now_ms":1700000000000}'
 ```

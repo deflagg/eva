@@ -2907,3 +2907,129 @@
 ### Notes
 - This patch is a layout/paths change only; service boundaries and process model remain unchanged.
 - Agent and Vision continue to run as independent subprocess services managed by Eva.
+
+## Iteration 57 — Agent: Worker B (daily) — SQLite→vector DB + cache refresh
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Added daily memory worker endpoint in `packages/eva/agent/src/server.ts`:
+  - `POST /jobs/daily`
+  - accepts optional JSON body `{ "now_ms": <epoch-ms> }` for deterministic testing
+- Added daily-job request validation and response wiring:
+  - new `DailyJobRequestSchema`
+  - error handling mirrors existing hourly endpoint patterns
+- Implemented daily pipeline under the same serialized write queue used by `/respond` and `/jobs/hourly`:
+  - computes yesterday window from local midnight boundaries
+  - reads yesterday rows from SQLite `short_term_summaries`
+  - upserts long-term entries into JSON-persisted vector stores:
+    - `packages/eva/memory/vector_db/long_term_experiences/index.json`
+    - `packages/eva/memory/vector_db/long_term_personality/index.json`
+  - updates stable cache files:
+    - `packages/eva/memory/cache/core_experiences.json`
+    - `packages/eva/memory/cache/core_personality.json`
+- Added lightweight deterministic embedding + upsert machinery for persisted vector records:
+  - fixed-dimension normalized hashed embeddings (`64` dims)
+  - per-entry IDs derived from short-term summary IDs
+  - safe read/validate/create behavior for vector store files
+- Added conservative personality-delta promotion rules for long-term personality store.
+- Extended `/health` payload + startup logs with daily-memory artifact paths.
+- Updated docs:
+  - `packages/eva/agent/README.md` (Iteration 57 behavior + `/jobs/daily` usage)
+  - root `README.md` status line
+
+### Files changed
+- `packages/eva/agent/src/server.ts`
+- `packages/eva/agent/README.md`
+- `README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/agent && npm run build` passes.
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/eva/vision && python3 -m compileall app` passes.
+- Manual `/jobs/daily` check (deterministic window) passes:
+  - `POST /jobs/daily` with `{"now_ms":1771664299436}` returned:
+    - `source_row_count: 4`
+    - `experience_upsert_count: 4`
+    - `personality_upsert_count: 1`
+- Verified output artifacts exist and are populated:
+  - `packages/eva/memory/vector_db/long_term_experiences/index.json` (`entries: 4`)
+  - `packages/eva/memory/vector_db/long_term_personality/index.json` (`entries: 1`)
+  - `packages/eva/memory/cache/core_experiences.json`
+  - `packages/eva/memory/cache/core_personality.json`
+
+### Manual run instructions
+1. Start Agent:
+   - `cd packages/eva/agent`
+   - `npm run dev`
+2. Trigger daily worker:
+   - `curl -sS -X POST http://127.0.0.1:8791/jobs/daily`
+3. (Optional deterministic test) use explicit run time:
+   - `curl -sS -X POST http://127.0.0.1:8791/jobs/daily -H 'content-type: application/json' -d '{"now_ms":1771664299436}'`
+4. Inspect outputs:
+   - `cat packages/eva/memory/vector_db/long_term_experiences/index.json`
+   - `cat packages/eva/memory/vector_db/long_term_personality/index.json`
+   - `cat packages/eva/memory/cache/core_experiences.json`
+   - `cat packages/eva/memory/cache/core_personality.json`
+
+### Notes
+- This iteration adds persistent long-term memory artifacts and cache refresh only.
+- Retrieval-in-chat prompt injection remains scheduled for Iteration 58.
+
+## Iteration 58 — Agent: retrieval in chat (short + long memory injection)
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Extended Agent respond pipeline in `packages/eva/agent/src/server.ts` to build per-turn memory retrieval context before model calls.
+- Added short-term retrieval path from SQLite:
+  - reads recent rows from `short_term_summaries`
+  - derives tags and applies query-driven tag filtering
+  - falls back to latest summaries when no tag overlap is found
+- Added long-term retrieval path from persisted vector stores:
+  - loads `long_term_experiences` + `long_term_personality` stores
+  - computes deterministic query embedding
+  - ranks by similarity and selects top-K hits
+- Added core-cache injection path:
+  - reads `cache/core_experiences.json`
+  - reads `cache/core_personality.json`
+  - injects concise highlights/signals into retrieval context
+- Added hard memory-injection cap (token-aware approximation):
+  - bounded prompt memory block to ~900 tokens (char/4 approximation)
+  - line-by-line budgeted inclusion to prevent uncontrolled prompt growth
+- Wired retrieved memory context into respond system prompt:
+  - updated `packages/eva/agent/src/prompts/respond.ts`
+  - prompt now includes bounded retrieval context and guidance for relevance/uncertainty handling.
+- Updated docs:
+  - `packages/eva/agent/README.md` (Iteration 58 behavior)
+  - root `README.md` status line
+
+### Files changed
+- `packages/eva/agent/src/server.ts`
+- `packages/eva/agent/src/prompts/respond.ts`
+- `packages/eva/agent/README.md`
+- `README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/agent && npm run build` passes.
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/eva/vision && python3 -m compileall app` passes.
+- Manual `/respond` memory retrieval check passes:
+  - request: `{"text":"From memory, what happened in the final check?"}`
+  - response referenced prior summarized memory content: “all systems were clear and operational”.
+
+### Manual run instructions
+1. Start Agent:
+   - `cd packages/eva/agent`
+   - `npm run dev`
+2. Call respond endpoint with memory-oriented prompt:
+   - `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"From memory, what happened in the final check?"}'`
+3. Confirm response references prior summarized short-term/long-term context where relevant.
+
+### Notes
+- Retrieval injection is intentionally bounded and relevance-filtered to avoid prompt bloat.
+- This completes the 44–58 implementation-plan sequence.

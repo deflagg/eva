@@ -7,10 +7,18 @@ export interface RespondSystemPromptInput {
   persona: string;
   allowedConcepts: string[];
   maxConcepts: number;
+  memoryContext?: string;
+  memoryApproxTokens?: number;
+  memoryTokenBudget?: number;
 }
 
 export function buildRespondSystemPrompt(input: RespondSystemPromptInput): string {
   const allowedConceptsText = input.allowedConcepts.join(', ');
+
+  const memoryHeader =
+    typeof input.memoryApproxTokens === 'number' && typeof input.memoryTokenBudget === 'number'
+      ? `Retrieved memory context for this turn (approx ${input.memoryApproxTokens}/${input.memoryTokenBudget} tokens):`
+      : 'Retrieved memory context for this turn:';
 
   return [
     'You are EVA Agent handling text chat.',
@@ -19,6 +27,14 @@ export function buildRespondSystemPrompt(input: RespondSystemPromptInput): strin
     '',
     'Persona guidance:',
     input.persona,
+    '',
+    'Memory usage guidance:',
+    '- Use retrieved memory only when relevant to the user request.',
+    '- Prefer recent short-term summaries for recency; use long-term/core memory for stable context.',
+    '- If memory is missing or weakly relevant, answer directly without inventing details.',
+    '',
+    memoryHeader,
+    input.memoryContext ?? 'No retrieved memory context available.',
     '',
     'Output constraints:',
     '- text: the user-facing reply, concise and practical.',

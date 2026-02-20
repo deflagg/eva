@@ -17,9 +17,57 @@ import { RESPOND_TOOL, RESPOND_TOOL_NAME, type RespondPayload } from './tools/re
 const HARD_MAX_FRAMES = 6;
 const WORKING_MEMORY_LOG_FILENAME = 'working_memory.log';
 const SHORT_TERM_MEMORY_DB_FILENAME = 'short_term_memory.db';
+const VECTOR_DB_INDEX_FILENAME = 'index.json';
 const WORKING_MEMORY_WINDOW_MS = 60 * 60 * 1000;
+const DAY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const HOURLY_SUMMARY_MIN_BULLETS = 3;
 const HOURLY_SUMMARY_MAX_BULLETS = 5;
+const VECTOR_EMBEDDING_DIMENSIONS = 64;
+const CORE_EXPERIENCES_CACHE_LIMIT = 16;
+const CORE_PERSONALITY_CACHE_LIMIT = 12;
+const RESPOND_MEMORY_MAX_TOKENS = 900;
+const RESPOND_SHORT_TERM_MAX_ROWS = 8;
+const RESPOND_LONG_TERM_TOP_K = 6;
+const RESPOND_CORE_CACHE_ITEMS = 4;
+
+const VECTOR_STORE_KINDS = {
+  experiences: 'long_term_experiences',
+  personality: 'long_term_personality',
+} as const;
+
+const EXPERIENCE_TAG_RULES: Array<{ pattern: RegExp; tag: string }> = [
+  { pattern: /\bvision\b|\binsight\b/i, tag: 'awareness' },
+  { pattern: /\bhigh[-\s]?surprise\b|\bsurprise\b/i, tag: 'anomaly' },
+  { pattern: /\bchat\b/i, tag: 'chat' },
+  { pattern: /\bquestion\b/i, tag: 'question' },
+  { pattern: /\banswer\b/i, tag: 'answer' },
+  { pattern: /\bdecision\b/i, tag: 'decision' },
+  { pattern: /\bfollow[-_\s]?up\b/i, tag: 'follow_up' },
+  { pattern: /\bplan\b|\bplanning\b/i, tag: 'planning' },
+  { pattern: /\bimplement\b/i, tag: 'implementation' },
+  { pattern: /\bdebug\b/i, tag: 'debugging' },
+  { pattern: /\bsafety\b/i, tag: 'safety' },
+  { pattern: /\burgent\b/i, tag: 'tone_urgent' },
+  { pattern: /\bcalm\b/i, tag: 'tone_calm' },
+  { pattern: /\btask\b/i, tag: 'task' },
+  { pattern: /\bnear[-_\s]?collision\b/i, tag: 'near_collision' },
+  { pattern: /\broi[-_\s]?dwell\b|\bloiter\w*\b/i, tag: 'roi_dwell' },
+  { pattern: /\bline[-_\s]?cross\b/i, tag: 'line_cross' },
+  { pattern: /\btrack[-_\s]?stop\b/i, tag: 'track_stop' },
+  { pattern: /\bsudden\s+motion\b/i, tag: 'sudden_motion' },
+];
+
+const PERSONALITY_TAG_RULES: Array<{ pattern: RegExp; tag: string }> = [
+  { pattern: /\bprefer\w*\b|\bpreference\b/i, tag: 'preference' },
+  { pattern: /\bdecision\b/i, tag: 'decision' },
+  { pattern: /\bfollow[-_\s]?up\b/i, tag: 'follow_up' },
+  { pattern: /\bplan\b|\bplanning\b/i, tag: 'planning' },
+  { pattern: /\bcalm\b/i, tag: 'tone_calm' },
+  { pattern: /\burgent\b/i, tag: 'tone_urgent' },
+  { pattern: /\bsafety\b/i, tag: 'safety' },
+];
+
+const PERSONALITY_SIGNAL_PATTERN = /\b(prefer\w*|preference|tone|calm|urgent|decision|follow[-_\s]?up|planning|safety)\b/i;
 
 const SHORT_TERM_MEMORY_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS short_term_summaries (
@@ -64,6 +112,12 @@ const HourlyJobRequestSchema = z
   })
   .strict();
 
+const DailyJobRequestSchema = z
+  .object({
+    now_ms: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
 const WorkingMemoryRecordSchema = z
   .object({
     type: z.string().trim().min(1),
@@ -71,9 +125,43 @@ const WorkingMemoryRecordSchema = z
   })
   .passthrough();
 
+const ShortTermSummaryRowSchema = z
+  .object({
+    id: z.number().int().nonnegative(),
+    created_at_ms: z.number().int().nonnegative(),
+    bucket_start_ms: z.number().int().nonnegative(),
+    bucket_end_ms: z.number().int().nonnegative(),
+    summary_text: z.string().trim().min(1),
+    source_entry_count: z.number().int().nonnegative(),
+  })
+  .strict();
+
 type InsightRequest = z.infer<typeof InsightRequestSchema>;
 type RespondRequest = z.infer<typeof RespondRequestSchema>;
 type HourlyJobRequest = z.infer<typeof HourlyJobRequestSchema>;
+type DailyJobRequest = z.infer<typeof DailyJobRequestSchema>;
+
+type VectorStoreKind = (typeof VECTOR_STORE_KINDS)[keyof typeof VECTOR_STORE_KINDS];
+
+const VectorStoreEntrySchema = z.object({
+  id: z.string().trim().min(1),
+  source_summary_id: z.number().int().nonnegative(),
+  source_created_at_ms: z.number().int().nonnegative(),
+  updated_at_ms: z.number().int().nonnegative(),
+  text: z.string().trim().min(1),
+  tags: z.array(z.string().trim().min(1)).min(1),
+  embedding: z.array(z.number()).length(VECTOR_EMBEDDING_DIMENSIONS),
+});
+
+const VectorStoreFileSchema = z.object({
+  version: z.literal(1),
+  kind: z.union([z.literal(VECTOR_STORE_KINDS.experiences), z.literal(VECTOR_STORE_KINDS.personality)]),
+  dimensions: z.literal(VECTOR_EMBEDDING_DIMENSIONS),
+  entries: z.array(VectorStoreEntrySchema),
+});
+
+type VectorStoreEntry = z.infer<typeof VectorStoreEntrySchema>;
+type VectorStoreFile = z.infer<typeof VectorStoreFileSchema>;
 
 interface InsightUsage {
   input_tokens: number;
@@ -139,6 +227,46 @@ interface HourlySummaryResult {
   sourceEntryCount: number;
   keptEntryCount: number;
   summaryCount: number;
+}
+
+interface ShortTermSummaryRow {
+  id: number;
+  created_at_ms: number;
+  bucket_start_ms: number;
+  bucket_end_ms: number;
+  summary_text: string;
+  source_entry_count: number;
+}
+
+interface DailySummaryResult {
+  runAtMs: number;
+  windowStartMs: number;
+  windowEndMs: number;
+  sourceRowCount: number;
+  experienceUpsertCount: number;
+  personalityUpsertCount: number;
+  totalExperienceCount: number;
+  totalPersonalityCount: number;
+}
+
+interface RespondMemorySources {
+  shortTermMemoryDbPath: string;
+  experienceVectorStorePath: string;
+  personalityVectorStorePath: string;
+  coreExperiencesCachePath: string;
+  corePersonalityCachePath: string;
+}
+
+interface RespondMemoryContextResult {
+  text: string;
+  approxTokens: number;
+  tokenBudget: number;
+}
+
+interface RetrievedVectorHit {
+  kind: VectorStoreKind;
+  entry: VectorStoreEntry;
+  score: number;
 }
 
 export interface StartAgentServerOptions {
@@ -322,6 +450,20 @@ function parseHourlyJobRequest(payload: unknown | undefined): HourlyJobRequest {
   if (!parsed.success) {
     const details = parsed.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`).join('; ');
     throw new HttpRequestError(400, 'INVALID_REQUEST', `Invalid hourly job payload: ${details}`);
+  }
+
+  return parsed.data;
+}
+
+function parseDailyJobRequest(payload: unknown | undefined): DailyJobRequest {
+  if (payload === undefined) {
+    return {};
+  }
+
+  const parsed = DailyJobRequestSchema.safeParse(payload);
+  if (!parsed.success) {
+    const details = parsed.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`).join('; ');
+    throw new HttpRequestError(400, 'INVALID_REQUEST', `Invalid daily job payload: ${details}`);
   }
 
   return parsed.data;
@@ -823,6 +965,689 @@ async function runHourlyMemoryJob(
   };
 }
 
+function createEmptyVectorStore(kind: VectorStoreKind): VectorStoreFile {
+  return {
+    version: 1,
+    kind,
+    dimensions: VECTOR_EMBEDDING_DIMENSIONS,
+    entries: [],
+  };
+}
+
+async function readVectorStore(storePath: string, expectedKind: VectorStoreKind): Promise<VectorStoreFile> {
+  let raw: string;
+  try {
+    raw = await readFile(storePath, 'utf8');
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && (error as { code?: string }).code === 'ENOENT') {
+      return createEmptyVectorStore(expectedKind);
+    }
+
+    throw error;
+  }
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error(`[agent] invalid JSON in vector store file: ${storePath}`);
+  }
+
+  const parsed = VectorStoreFileSchema.safeParse(parsedJson);
+  if (!parsed.success) {
+    const details = parsed.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`).join('; ');
+    throw new Error(`[agent] invalid vector store payload in ${storePath}: ${details}`);
+  }
+
+  if (parsed.data.kind !== expectedKind) {
+    throw new Error(`[agent] vector store kind mismatch in ${storePath}: expected ${expectedKind}, found ${parsed.data.kind}`);
+  }
+
+  return parsed.data;
+}
+
+function hashToken(token: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < token.length; i += 1) {
+    hash ^= token.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return hash >>> 0;
+}
+
+function tokenizeTextForEmbedding(text: string): string[] {
+  const matches = text.toLowerCase().match(/[a-z0-9_]+/g);
+  return matches ?? [];
+}
+
+function buildHashedEmbedding(text: string, dimensions = VECTOR_EMBEDDING_DIMENSIONS): number[] {
+  const vector = new Array<number>(dimensions).fill(0);
+  const tokens = tokenizeTextForEmbedding(text);
+
+  if (tokens.length === 0) {
+    return vector;
+  }
+
+  for (const token of tokens) {
+    const hash = hashToken(token);
+    const index = hash % dimensions;
+    const sign = (hash & 1) === 0 ? 1 : -1;
+    vector[index] += sign;
+  }
+
+  const magnitude = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
+  if (magnitude === 0) {
+    return vector;
+  }
+
+  return vector.map((value) => Number((value / magnitude).toFixed(6)));
+}
+
+function deriveTagsFromSummary(
+  summaryText: string,
+  rules: Array<{ pattern: RegExp; tag: string }>,
+  tagWhitelist: ExperienceTagWhitelist,
+  fallbackTag: string,
+  label: string,
+): string[] {
+  const candidateTags: string[] = [];
+
+  for (const rule of rules) {
+    if (rule.pattern.test(summaryText)) {
+      candidateTags.push(rule.tag);
+    }
+  }
+
+  return sanitizeAllowedTags(candidateTags, tagWhitelist.allowedTagSet, fallbackTag, label);
+}
+
+function shouldPromoteToPersonality(summaryText: string): boolean {
+  if (PERSONALITY_SIGNAL_PATTERN.test(summaryText)) {
+    return true;
+  }
+
+  const normalized = summaryText.trim().toLowerCase();
+  const isChatNarrative = normalized.startsWith('chat highlight:') || normalized.startsWith('high-surprise chat:');
+
+  if (!isChatNarrative) {
+    return false;
+  }
+
+  return /\b(should|must|need|please|prefer|avoid|don't|do not)\b/i.test(normalized);
+}
+
+function buildExperienceVectorEntry(
+  row: ShortTermSummaryRow,
+  nowMs: number,
+  tagWhitelist: ExperienceTagWhitelist,
+): VectorStoreEntry {
+  const tags = deriveTagsFromSummary(
+    row.summary_text,
+    EXPERIENCE_TAG_RULES,
+    tagWhitelist,
+    tagWhitelist.fallbackTag,
+    'daily experience tags',
+  );
+
+  const embeddingInput = `${row.summary_text}\n${tags.join(' ')}`;
+
+  return {
+    id: `short-term-experience-${row.id}`,
+    source_summary_id: row.id,
+    source_created_at_ms: row.created_at_ms,
+    updated_at_ms: nowMs,
+    text: row.summary_text,
+    tags,
+    embedding: buildHashedEmbedding(embeddingInput),
+  };
+}
+
+function buildPersonalityVectorEntry(
+  row: ShortTermSummaryRow,
+  nowMs: number,
+  tagWhitelist: ExperienceTagWhitelist,
+): VectorStoreEntry {
+  const personalityFallbackTag = tagWhitelist.allowedTagSet.has('preference') ? 'preference' : tagWhitelist.fallbackTag;
+  const tags = deriveTagsFromSummary(
+    row.summary_text,
+    PERSONALITY_TAG_RULES,
+    tagWhitelist,
+    personalityFallbackTag,
+    'daily personality tags',
+  );
+
+  const embeddingInput = `${row.summary_text}\n${tags.join(' ')}`;
+
+  return {
+    id: `short-term-personality-${row.id}`,
+    source_summary_id: row.id,
+    source_created_at_ms: row.created_at_ms,
+    updated_at_ms: nowMs,
+    text: row.summary_text,
+    tags,
+    embedding: buildHashedEmbedding(embeddingInput),
+  };
+}
+
+function upsertVectorStoreEntries(
+  vectorStore: VectorStoreFile,
+  entries: VectorStoreEntry[],
+): { vectorStore: VectorStoreFile; upsertCount: number } {
+  if (entries.length === 0) {
+    return {
+      vectorStore,
+      upsertCount: 0,
+    };
+  }
+
+  const byId = new Map<string, VectorStoreEntry>(vectorStore.entries.map((entry) => [entry.id, entry]));
+  const uniqueIncomingIds = new Set<string>();
+
+  for (const entry of entries) {
+    byId.set(entry.id, entry);
+    uniqueIncomingIds.add(entry.id);
+  }
+
+  const mergedEntries = Array.from(byId.values()).sort(
+    (a, b) => a.source_created_at_ms - b.source_created_at_ms || a.id.localeCompare(b.id),
+  );
+
+  return {
+    vectorStore: {
+      ...vectorStore,
+      entries: mergedEntries,
+    },
+    upsertCount: uniqueIncomingIds.size,
+  };
+}
+
+function summarizeTagCounts(entries: VectorStoreEntry[], maxTags = 12): Record<string, number> {
+  const counts = new Map<string, number>();
+
+  for (const entry of entries) {
+    for (const tag of entry.tags) {
+      counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    }
+  }
+
+  const sorted = Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, maxTags);
+
+  return Object.fromEntries(sorted);
+}
+
+function buildCoreExperiencesCache(vectorStore: VectorStoreFile, nowMs: number): Record<string, unknown> {
+  const recentEntries = [...vectorStore.entries]
+    .sort((a, b) => b.source_created_at_ms - a.source_created_at_ms || b.id.localeCompare(a.id))
+    .slice(0, CORE_EXPERIENCES_CACHE_LIMIT)
+    .map((entry) => ({
+      id: entry.id,
+      source_summary_id: entry.source_summary_id,
+      source_created_at_ms: entry.source_created_at_ms,
+      tags: entry.tags,
+      summary_text: truncateText(entry.text, 220),
+    }));
+
+  return {
+    updated_at_ms: nowMs,
+    store_kind: vectorStore.kind,
+    dimensions: vectorStore.dimensions,
+    total_entries: vectorStore.entries.length,
+    tag_counts: summarizeTagCounts(vectorStore.entries),
+    highlights: recentEntries,
+  };
+}
+
+function buildCorePersonalityCache(vectorStore: VectorStoreFile, nowMs: number): Record<string, unknown> {
+  const recentEntries = [...vectorStore.entries]
+    .sort((a, b) => b.source_created_at_ms - a.source_created_at_ms || b.id.localeCompare(a.id))
+    .slice(0, CORE_PERSONALITY_CACHE_LIMIT)
+    .map((entry) => ({
+      id: entry.id,
+      source_summary_id: entry.source_summary_id,
+      source_created_at_ms: entry.source_created_at_ms,
+      tags: entry.tags,
+      signal: truncateText(entry.text, 220),
+    }));
+
+  return {
+    updated_at_ms: nowMs,
+    store_kind: vectorStore.kind,
+    dimensions: vectorStore.dimensions,
+    total_entries: vectorStore.entries.length,
+    trait_counts: summarizeTagCounts(vectorStore.entries, 10),
+    signals: recentEntries,
+  };
+}
+
+function getYesterdayBounds(nowMs: number): { windowStartMs: number; windowEndMs: number } {
+  const localMidnight = new Date(nowMs);
+  localMidnight.setHours(0, 0, 0, 0);
+  const windowEndMs = localMidnight.getTime();
+
+  return {
+    windowStartMs: windowEndMs - DAY_WINDOW_MS,
+    windowEndMs,
+  };
+}
+
+function selectShortTermSummariesForWindow(
+  dbPath: string,
+  windowStartMs: number,
+  windowEndMs: number,
+): ShortTermSummaryRow[] {
+  const db = new DatabaseSync(dbPath);
+
+  try {
+    db.exec(SHORT_TERM_MEMORY_SCHEMA_SQL);
+
+    const statement = db.prepare(`
+      SELECT
+        id,
+        created_at_ms,
+        bucket_start_ms,
+        bucket_end_ms,
+        summary_text,
+        source_entry_count
+      FROM short_term_summaries
+      WHERE created_at_ms >= ? AND created_at_ms < ?
+      ORDER BY created_at_ms ASC, id ASC
+    `);
+
+    const rows = statement.all(windowStartMs, windowEndMs) as unknown[];
+    const normalizedRows: ShortTermSummaryRow[] = [];
+
+    for (const row of rows) {
+      const parsed = ShortTermSummaryRowSchema.safeParse(row);
+      if (!parsed.success) {
+        console.warn('[agent] skipping invalid short-term summary row while running daily job');
+        continue;
+      }
+
+      normalizedRows.push(parsed.data);
+    }
+
+    return normalizedRows;
+  } finally {
+    db.close();
+  }
+}
+
+async function runDailyMemoryJob(params: {
+  shortTermMemoryDbPath: string;
+  experienceVectorStorePath: string;
+  personalityVectorStorePath: string;
+  coreExperiencesCachePath: string;
+  corePersonalityCachePath: string;
+  nowMs: number;
+  tagWhitelist: ExperienceTagWhitelist;
+}): Promise<DailySummaryResult> {
+  const { windowStartMs, windowEndMs } = getYesterdayBounds(params.nowMs);
+
+  await ensureParentDir(params.shortTermMemoryDbPath);
+  const dailyRows = selectShortTermSummariesForWindow(params.shortTermMemoryDbPath, windowStartMs, windowEndMs);
+
+  const experienceEntries = dailyRows.map((row) => buildExperienceVectorEntry(row, params.nowMs, params.tagWhitelist));
+  const personalityEntries = dailyRows
+    .filter((row) => shouldPromoteToPersonality(row.summary_text))
+    .map((row) => buildPersonalityVectorEntry(row, params.nowMs, params.tagWhitelist));
+
+  const [existingExperienceStore, existingPersonalityStore] = await Promise.all([
+    readVectorStore(params.experienceVectorStorePath, VECTOR_STORE_KINDS.experiences),
+    readVectorStore(params.personalityVectorStorePath, VECTOR_STORE_KINDS.personality),
+  ]);
+
+  const experienceUpsert = upsertVectorStoreEntries(existingExperienceStore, experienceEntries);
+  const personalityUpsert = upsertVectorStoreEntries(existingPersonalityStore, personalityEntries);
+
+  await Promise.all([
+    writeJsonAtomic(params.experienceVectorStorePath, experienceUpsert.vectorStore),
+    writeJsonAtomic(params.personalityVectorStorePath, personalityUpsert.vectorStore),
+    writeJsonAtomic(params.coreExperiencesCachePath, buildCoreExperiencesCache(experienceUpsert.vectorStore, params.nowMs)),
+    writeJsonAtomic(params.corePersonalityCachePath, buildCorePersonalityCache(personalityUpsert.vectorStore, params.nowMs)),
+  ]);
+
+  return {
+    runAtMs: params.nowMs,
+    windowStartMs,
+    windowEndMs,
+    sourceRowCount: dailyRows.length,
+    experienceUpsertCount: experienceUpsert.upsertCount,
+    personalityUpsertCount: personalityUpsert.upsertCount,
+    totalExperienceCount: experienceUpsert.vectorStore.entries.length,
+    totalPersonalityCount: personalityUpsert.vectorStore.entries.length,
+  };
+}
+
+function estimateTokens(text: string): number {
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+function appendLineWithinBudget(
+  lines: string[],
+  line: string,
+  budget: { usedTokens: number; maxTokens: number },
+): boolean {
+  const normalized = line.trim();
+  if (!normalized) {
+    return false;
+  }
+
+  const lineTokens = estimateTokens(normalized) + 1;
+  if (budget.usedTokens + lineTokens > budget.maxTokens) {
+    return false;
+  }
+
+  lines.push(normalized);
+  budget.usedTokens += lineTokens;
+  return true;
+}
+
+function deriveAllowedTagsFromText(
+  text: string,
+  rules: Array<{ pattern: RegExp; tag: string }>,
+  allowedTagSet: Set<string>,
+): string[] {
+  const tags: string[] = [];
+  const seen = new Set<string>();
+
+  for (const rule of rules) {
+    if (!rule.pattern.test(text)) {
+      continue;
+    }
+
+    const normalized = normalizeTag(rule.tag);
+    if (!allowedTagSet.has(normalized) || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    tags.push(normalized);
+  }
+
+  return tags;
+}
+
+function haveTagOverlap(left: string[], right: string[]): boolean {
+  if (left.length === 0 || right.length === 0) {
+    return false;
+  }
+
+  const rightSet = new Set(right);
+  return left.some((tag) => rightSet.has(tag));
+}
+
+function selectRecentShortTermSummaries(dbPath: string, limit: number): ShortTermSummaryRow[] {
+  const db = new DatabaseSync(dbPath);
+
+  try {
+    db.exec(SHORT_TERM_MEMORY_SCHEMA_SQL);
+
+    const statement = db.prepare(`
+      SELECT
+        id,
+        created_at_ms,
+        bucket_start_ms,
+        bucket_end_ms,
+        summary_text,
+        source_entry_count
+      FROM short_term_summaries
+      ORDER BY created_at_ms DESC, id DESC
+      LIMIT ?
+    `);
+
+    const rows = statement.all(limit) as unknown[];
+    const normalizedRows: ShortTermSummaryRow[] = [];
+
+    for (const row of rows) {
+      const parsed = ShortTermSummaryRowSchema.safeParse(row);
+      if (!parsed.success) {
+        console.warn('[agent] skipping invalid short-term summary row while building respond memory context');
+        continue;
+      }
+
+      normalizedRows.push(parsed.data);
+    }
+
+    return normalizedRows;
+  } finally {
+    db.close();
+  }
+}
+
+function dotProduct(left: number[], right: number[]): number {
+  const length = Math.min(left.length, right.length);
+  let total = 0;
+
+  for (let index = 0; index < length; index += 1) {
+    total += left[index]! * right[index]!;
+  }
+
+  return total;
+}
+
+function rankVectorHits(params: {
+  kind: VectorStoreKind;
+  entries: VectorStoreEntry[];
+  queryEmbedding: number[];
+  queryTags: string[];
+  topK: number;
+}): RetrievedVectorHit[] {
+  const scored: RetrievedVectorHit[] = [];
+
+  for (const entry of params.entries) {
+    if (params.queryTags.length > 0 && !haveTagOverlap(entry.tags, params.queryTags)) {
+      continue;
+    }
+
+    scored.push({
+      kind: params.kind,
+      entry,
+      score: dotProduct(entry.embedding, params.queryEmbedding),
+    });
+  }
+
+  return scored
+    .sort((a, b) => b.score - a.score || b.entry.source_created_at_ms - a.entry.source_created_at_ms)
+    .slice(0, params.topK);
+}
+
+async function readJsonObjectIfExists(filePath: string): Promise<Record<string, unknown> | null> {
+  let raw: string;
+  try {
+    raw = await readFile(filePath, 'utf8');
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && (error as { code?: string }).code === 'ENOENT') {
+      return null;
+    }
+
+    throw error;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    console.warn(`[agent] invalid JSON in cache file: ${filePath}`);
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return null;
+  }
+
+  return parsed as Record<string, unknown>;
+}
+
+function getArrayField(record: Record<string, unknown>, key: string): unknown[] {
+  const value = record[key];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value;
+}
+
+function getStringArrayField(record: Record<string, unknown>, key: string): string[] {
+  const value = record[key];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+}
+
+async function buildRespondMemoryContext(params: {
+  request: RespondRequest;
+  memorySources: RespondMemorySources;
+  tagWhitelist: ExperienceTagWhitelist;
+}): Promise<RespondMemoryContextResult> {
+  const { request, memorySources, tagWhitelist } = params;
+
+  const budget = {
+    usedTokens: 0,
+    maxTokens: RESPOND_MEMORY_MAX_TOKENS,
+  };
+
+  const queryTags = deriveAllowedTagsFromText(
+    request.text,
+    [...EXPERIENCE_TAG_RULES, ...PERSONALITY_TAG_RULES],
+    tagWhitelist.allowedTagSet,
+  );
+  if (queryTags.length === 0 && tagWhitelist.allowedTagSet.has('chat')) {
+    queryTags.push('chat');
+  }
+
+  const lines: string[] = [];
+  appendLineWithinBudget(lines, 'Retrieved EVA memory context (bounded by token budget).', budget);
+  appendLineWithinBudget(
+    lines,
+    `Context budget: ~${RESPOND_MEMORY_MAX_TOKENS} tokens (approximation); used tags for filtering: ${
+      queryTags.length > 0 ? queryTags.join(', ') : 'none'
+    }.`,
+    budget,
+  );
+
+  const recentRows = selectRecentShortTermSummaries(memorySources.shortTermMemoryDbPath, RESPOND_SHORT_TERM_MAX_ROWS);
+  const recentRowsWithTags = recentRows.map((row) => ({
+    row,
+    tags: deriveAllowedTagsFromText(row.summary_text, EXPERIENCE_TAG_RULES, tagWhitelist.allowedTagSet),
+  }));
+
+  let filteredRecentRows = recentRowsWithTags.filter((item) => haveTagOverlap(item.tags, queryTags));
+  if (filteredRecentRows.length === 0) {
+    filteredRecentRows = recentRowsWithTags.slice(0, Math.min(3, recentRowsWithTags.length));
+  }
+
+  appendLineWithinBudget(lines, 'Recent short-term summaries (tag-filtered):', budget);
+  for (const item of filteredRecentRows) {
+    const tagsText = item.tags.length > 0 ? item.tags.join(',') : 'none';
+    const line = `- short_term#${item.row.id} tags=[${tagsText}] ${truncateText(item.row.summary_text, 180)}`;
+    if (!appendLineWithinBudget(lines, line, budget)) {
+      break;
+    }
+  }
+
+  const queryEmbedding = buildHashedEmbedding(`${request.text}\n${queryTags.join(' ')}`);
+  const [experienceStore, personalityStore] = await Promise.all([
+    readVectorStore(memorySources.experienceVectorStorePath, VECTOR_STORE_KINDS.experiences),
+    readVectorStore(memorySources.personalityVectorStorePath, VECTOR_STORE_KINDS.personality),
+  ]);
+
+  const longTermHits = [
+    ...rankVectorHits({
+      kind: VECTOR_STORE_KINDS.experiences,
+      entries: experienceStore.entries,
+      queryEmbedding,
+      queryTags,
+      topK: RESPOND_LONG_TERM_TOP_K,
+    }),
+    ...rankVectorHits({
+      kind: VECTOR_STORE_KINDS.personality,
+      entries: personalityStore.entries,
+      queryEmbedding,
+      queryTags,
+      topK: Math.max(1, Math.floor(RESPOND_LONG_TERM_TOP_K / 2)),
+    }),
+  ]
+    .sort((a, b) => b.score - a.score || b.entry.source_created_at_ms - a.entry.source_created_at_ms)
+    .slice(0, RESPOND_LONG_TERM_TOP_K);
+
+  appendLineWithinBudget(lines, 'Long-term retrieval hits (top-K):', budget);
+  for (const hit of longTermHits) {
+    const tagsText = hit.entry.tags.join(',');
+    const line = `- ${hit.kind}#${hit.entry.source_summary_id} score=${hit.score.toFixed(3)} tags=[${tagsText}] ${truncateText(hit.entry.text, 180)}`;
+    if (!appendLineWithinBudget(lines, line, budget)) {
+      break;
+    }
+  }
+
+  const [coreExperiencesCache, corePersonalityCache] = await Promise.all([
+    readJsonObjectIfExists(memorySources.coreExperiencesCachePath),
+    readJsonObjectIfExists(memorySources.corePersonalityCachePath),
+  ]);
+
+  if (coreExperiencesCache) {
+    const totalEntries = getNumberField(coreExperiencesCache, 'total_entries') ?? 0;
+    appendLineWithinBudget(lines, `Core experiences cache: total_entries=${Math.round(totalEntries)}.`, budget);
+
+    const highlights = getArrayField(coreExperiencesCache, 'highlights');
+    for (const highlight of highlights.slice(0, RESPOND_CORE_CACHE_ITEMS)) {
+      const highlightRecord = asRecord(highlight);
+      if (!highlightRecord) {
+        continue;
+      }
+
+      const summaryText = getStringField(highlightRecord, 'summary_text');
+      if (!summaryText) {
+        continue;
+      }
+
+      const tags = getStringArrayField(highlightRecord, 'tags');
+      const line = `- core_experience tags=[${tags.join(',') || 'none'}] ${truncateText(summaryText, 160)}`;
+      if (!appendLineWithinBudget(lines, line, budget)) {
+        break;
+      }
+    }
+  }
+
+  if (corePersonalityCache) {
+    const totalEntries = getNumberField(corePersonalityCache, 'total_entries') ?? 0;
+    appendLineWithinBudget(lines, `Core personality cache: total_entries=${Math.round(totalEntries)}.`, budget);
+
+    const signals = getArrayField(corePersonalityCache, 'signals');
+    for (const signal of signals.slice(0, RESPOND_CORE_CACHE_ITEMS)) {
+      const signalRecord = asRecord(signal);
+      if (!signalRecord) {
+        continue;
+      }
+
+      const signalText = getStringField(signalRecord, 'signal');
+      if (!signalText) {
+        continue;
+      }
+
+      const tags = getStringArrayField(signalRecord, 'tags');
+      const line = `- core_personality tags=[${tags.join(',') || 'none'}] ${truncateText(signalText, 160)}`;
+      if (!appendLineWithinBudget(lines, line, budget)) {
+        break;
+      }
+    }
+  }
+
+  if (lines.length <= 2) {
+    appendLineWithinBudget(lines, 'No relevant memory snippets were available for this turn.', budget);
+  }
+
+  return {
+    text: lines.join('\n'),
+    approxTokens: budget.usedTokens,
+    tokenBudget: budget.maxTokens,
+  };
+}
+
 async function generateInsight(
   request: InsightRequest,
   config: AgentConfig,
@@ -907,14 +1732,24 @@ async function generateRespond(
   secrets: AgentSecrets,
   tagWhitelist: ExperienceTagWhitelist,
   personaPrompt: PersonaPrompt,
+  memorySources: RespondMemorySources,
 ): Promise<{ text: string; meta: RespondMeta }> {
   const model = getModel(config.model.provider as never, config.model.id as never);
+
+  const memoryContext = await buildRespondMemoryContext({
+    request,
+    memorySources,
+    tagWhitelist,
+  });
 
   const context = {
     systemPrompt: buildRespondSystemPrompt({
       persona: personaPrompt.text,
       allowedConcepts: tagWhitelist.allowedTags,
       maxConcepts: 6,
+      memoryContext: memoryContext.text,
+      memoryApproxTokens: memoryContext.approxTokens,
+      memoryTokenBudget: memoryContext.tokenBudget,
     }),
     messages: [
       {
@@ -978,6 +1813,20 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
   const workingMemoryLogPath = path.resolve(config.memoryDirPath, WORKING_MEMORY_LOG_FILENAME);
   const shortTermMemoryDbPath = path.resolve(config.memoryDirPath, SHORT_TERM_MEMORY_DB_FILENAME);
   const personalityToneCachePath = path.resolve(config.memoryDirPath, 'cache', 'personality_tone.json');
+  const coreExperiencesCachePath = path.resolve(config.memoryDirPath, 'cache', 'core_experiences.json');
+  const corePersonalityCachePath = path.resolve(config.memoryDirPath, 'cache', 'core_personality.json');
+  const experienceVectorStorePath = path.resolve(
+    config.memoryDirPath,
+    'vector_db',
+    VECTOR_STORE_KINDS.experiences,
+    VECTOR_DB_INDEX_FILENAME,
+  );
+  const personalityVectorStorePath = path.resolve(
+    config.memoryDirPath,
+    'vector_db',
+    VECTOR_STORE_KINDS.personality,
+    VECTOR_DB_INDEX_FILENAME,
+  );
   const workingMemoryWriteQueue = new SerialTaskQueue();
 
   mkdirSync(config.memoryDirPath, { recursive: true });
@@ -1011,6 +1860,10 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
             workingMemoryLogPath,
             shortTermMemoryDbPath,
             personalityToneCachePath,
+            coreExperiencesCachePath,
+            corePersonalityCachePath,
+            experienceVectorStorePath,
+            personalityVectorStorePath,
           },
         });
         return;
@@ -1071,6 +1924,79 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
         return;
       }
 
+      if (method === 'POST' && requestUrl.pathname === '/jobs/daily') {
+        let body: unknown | undefined;
+        try {
+          body = await readOptionalJsonBody(req, config.insight.maxBodyBytes);
+        } catch (error) {
+          if (error instanceof HttpRequestError) {
+            sendError(res, error.statusCode, error.code, error.message, error.extra);
+            return;
+          }
+
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(res, 400, 'INVALID_BODY', message);
+          return;
+        }
+
+        let parsedJobRequest: DailyJobRequest;
+        try {
+          parsedJobRequest = parseDailyJobRequest(body);
+        } catch (error) {
+          if (error instanceof HttpRequestError) {
+            sendError(res, error.statusCode, error.code, error.message, error.extra);
+            return;
+          }
+
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(res, 400, 'INVALID_REQUEST', message);
+          return;
+        }
+
+        const runAtMs = parsedJobRequest.now_ms ?? Date.now();
+
+        let result: DailySummaryResult;
+        try {
+          result = await workingMemoryWriteQueue.run(async () =>
+            runDailyMemoryJob({
+              shortTermMemoryDbPath,
+              experienceVectorStorePath,
+              personalityVectorStorePath,
+              coreExperiencesCachePath,
+              corePersonalityCachePath,
+              nowMs: runAtMs,
+              tagWhitelist,
+            }),
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(res, 500, 'DAILY_JOB_FAILED', message);
+          return;
+        }
+
+        sendJson(res, 200, {
+          job: 'daily',
+          run_at_ms: result.runAtMs,
+          window_start_ms: result.windowStartMs,
+          window_end_ms: result.windowEndMs,
+          source_row_count: result.sourceRowCount,
+          experience_upsert_count: result.experienceUpsertCount,
+          personality_upsert_count: result.personalityUpsertCount,
+          total_experience_count: result.totalExperienceCount,
+          total_personality_count: result.totalPersonalityCount,
+          short_term_memory_db: shortTermMemoryDbPath,
+          vector_db: {
+            experiences: experienceVectorStorePath,
+            personality: personalityVectorStorePath,
+          },
+          cache: {
+            core_experiences: coreExperiencesCachePath,
+            core_personality: corePersonalityCachePath,
+          },
+        });
+        return;
+      }
+
       if (method === 'POST' && requestUrl.pathname === '/respond') {
         const contentType = String(req.headers['content-type'] ?? '').toLowerCase();
         if (!contentType.includes('application/json')) {
@@ -1110,7 +2036,13 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
 
         let generatedResponse: { text: string; meta: RespondMeta };
         try {
-          generatedResponse = await generateRespond(respondRequest, config, secrets, tagWhitelist, personaPrompt);
+          generatedResponse = await generateRespond(respondRequest, config, secrets, tagWhitelist, personaPrompt, {
+            shortTermMemoryDbPath,
+            experienceVectorStorePath,
+            personalityVectorStorePath,
+            coreExperiencesCachePath,
+            corePersonalityCachePath,
+          });
         } catch (error) {
           if (error instanceof HttpRequestError) {
             sendError(res, error.statusCode, error.code, error.message, error.extra);
@@ -1266,6 +2198,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
     console.log(`[agent] listening on http://localhost:${config.server.port}`);
     console.log('[agent] health endpoint GET /health');
     console.log('[agent] jobs endpoint POST /jobs/hourly (working→sqlite rollup + trim)');
+    console.log('[agent] jobs endpoint POST /jobs/daily (sqlite→vector upsert + core cache refresh)');
     console.log('[agent] respond endpoint POST /respond (model tool-call + memory writes)');
     console.log('[agent] insight endpoint POST /insight');
     console.log(`[agent] model: ${config.model.provider}/${config.model.id}`);
@@ -1274,6 +2207,10 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
     console.log(`[agent] working memory log: ${workingMemoryLogPath}`);
     console.log(`[agent] short-term memory db: ${shortTermMemoryDbPath}`);
     console.log(`[agent] personality tone cache: ${personalityToneCachePath}`);
+    console.log(`[agent] core experiences cache: ${coreExperiencesCachePath}`);
+    console.log(`[agent] core personality cache: ${corePersonalityCachePath}`);
+    console.log(`[agent] experiences vector store: ${experienceVectorStorePath}`);
+    console.log(`[agent] personality vector store: ${personalityVectorStorePath}`);
     console.log(`[agent] experience tags: ${tagWhitelist.allowedTags.length} (${tagWhitelist.sourcePath})`);
   });
 

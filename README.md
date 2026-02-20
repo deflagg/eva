@@ -99,4 +99,4 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 56** (Agent hourly worker endpoint rolls old working-memory entries into SQLite and trims working log to the last hour).
+Implemented through **Iteration 58** (Agent `/respond` now injects bounded memory retrieval context from short-term SQLite summaries, long-term vector stores, and core cache files).
