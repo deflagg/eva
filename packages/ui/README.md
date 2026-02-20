@@ -2,15 +2,21 @@
 
 React + Vite client for webcam capture and overlays.
 
-## Current behavior (Iteration 43)
+## Current behavior (Iteration 54)
 
 - Loads runtime config from:
   - `/config.local.json` first (if present)
   - fallback to `/config.json`
 - Connects to Eva using configured `eva.wsUrl`
-- Derives Eva HTTP base from `eva.wsUrl` (`ws://` -> `http://`, `wss://` -> `https://`) for speech requests
+- Derives Eva HTTP base from `eva.wsUrl` (`ws://` -> `http://`, `wss://` -> `https://`)
+  - uses `POST /text` for chat input
+  - uses configured speech path (`speech.path`, default `/speech`) for speech requests
 - Displays connection status (connecting/connected/disconnected)
 - Shows a live log panel of inbound/outbound/system messages
+- Includes a minimal chat panel:
+  - input + submit button sends text to Eva `POST /text`
+  - renders local `user` messages and incoming `text_output` replies
+  - listens for `text_output` on existing `/eye` WebSocket
 - Provides controls:
   - **Send test message**
   - **Trigger insight test** (sends `{"type":"command","v":1,"name":"insight_test"}`)

@@ -22,7 +22,11 @@ const WsUrlSchema = z.string().min(1).refine((value) => {
   } catch {
     return false;
   }
-}, 'quickvision.wsUrl must be a valid ws:// or wss:// URL');
+}, 'must be a valid ws:// or wss:// URL');
+
+const VisionWsConfigSchema = z.object({
+  wsUrl: WsUrlSchema,
+});
 
 const CommandSchema = z
   .array(z.string().trim().min(1, 'command entries must be non-empty strings'))
@@ -60,18 +64,34 @@ const SpeechConfigSchema = z.object({
   }),
 });
 
-const VisionAgentSubprocessConfigSchema = z.object({
+const AgentConfigSchema = z.object({
+  baseUrl: HttpUrlSchema.default('http://127.0.0.1:8791'),
+  timeoutMs: PositiveTimeoutMsSchema.default(30_000),
+});
+
+const TextConfigSchema = z.object({
   enabled: z.boolean().default(true),
-  cwd: z.string().trim().min(1).default('packages/vision-agent'),
+  path: z
+    .string()
+    .min(1)
+    .default('/text')
+    .refine((value) => value.startsWith('/'), 'text.path must start with "/"'),
+  maxBodyBytes: z.number().int().positive().default(16_384),
+  maxTextChars: z.number().int().positive().default(4_000),
+});
+
+const AgentSubprocessConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  cwd: z.string().trim().min(1).default('packages/eva/agent'),
   command: CommandSchema.default(['npm', 'run', 'dev']),
-  healthUrl: HttpUrlSchema.default('http://127.0.0.1:8790/health'),
+  healthUrl: HttpUrlSchema.default('http://127.0.0.1:8791/health'),
   readyTimeoutMs: PositiveTimeoutMsSchema.default(30_000),
   shutdownTimeoutMs: PositiveTimeoutMsSchema.default(5_000),
 });
 
-const QuickVisionSubprocessConfigSchema = z.object({
+const VisionSubprocessConfigSchema = z.object({
   enabled: z.boolean().default(true),
-  cwd: z.string().trim().min(1).default('packages/quickvision'),
+  cwd: z.string().trim().min(1).default('packages/eva/vision'),
   command: CommandSchema.default(['python', '-m', 'app.run']),
   healthUrl: HttpUrlSchema.default('http://127.0.0.1:8000/health'),
   readyTimeoutMs: PositiveTimeoutMsSchema.default(60_000),
@@ -80,17 +100,17 @@ const QuickVisionSubprocessConfigSchema = z.object({
 
 const SubprocessesConfigSchema = z.object({
   enabled: z.boolean().default(false),
-  visionAgent: VisionAgentSubprocessConfigSchema.default({
+  agent: AgentSubprocessConfigSchema.default({
     enabled: true,
-    cwd: 'packages/vision-agent',
+    cwd: 'packages/eva/agent',
     command: ['npm', 'run', 'dev'],
-    healthUrl: 'http://127.0.0.1:8790/health',
+    healthUrl: 'http://127.0.0.1:8791/health',
     readyTimeoutMs: 30_000,
     shutdownTimeoutMs: 5_000,
   }),
-  quickvision: QuickVisionSubprocessConfigSchema.default({
+  quickvision: VisionSubprocessConfigSchema.default({
     enabled: true,
-    cwd: 'packages/quickvision',
+    cwd: 'packages/eva/vision',
     command: ['python', '-m', 'app.run'],
     healthUrl: 'http://127.0.0.1:8000/health',
     readyTimeoutMs: 60_000,
@@ -107,9 +127,8 @@ const EvaConfigSchema = z.object({
       .default('/eye')
       .refine((value) => value.startsWith('/'), 'server.eyePath must start with "/"'),
   }),
-  quickvision: z.object({
-    wsUrl: WsUrlSchema,
-  }),
+  vision: VisionWsConfigSchema.optional(),
+  quickvision: VisionWsConfigSchema.optional(),
   insightRelay: InsightRelayConfigSchema.default({
     enabled: true,
     cooldownMs: 10_000,
@@ -128,19 +147,29 @@ const EvaConfigSchema = z.object({
       maxEntries: 64,
     },
   }),
+  agent: AgentConfigSchema.default({
+    baseUrl: 'http://127.0.0.1:8791',
+    timeoutMs: 30_000,
+  }),
+  text: TextConfigSchema.default({
+    enabled: true,
+    path: '/text',
+    maxBodyBytes: 16_384,
+    maxTextChars: 4_000,
+  }),
   subprocesses: SubprocessesConfigSchema.default({
     enabled: false,
-    visionAgent: {
+    agent: {
       enabled: true,
-      cwd: 'packages/vision-agent',
+      cwd: 'packages/eva/agent',
       command: ['npm', 'run', 'dev'],
-      healthUrl: 'http://127.0.0.1:8790/health',
+      healthUrl: 'http://127.0.0.1:8791/health',
       readyTimeoutMs: 30_000,
       shutdownTimeoutMs: 5_000,
     },
     quickvision: {
       enabled: true,
-      cwd: 'packages/quickvision',
+      cwd: 'packages/eva/vision',
       command: ['python', '-m', 'app.run'],
       healthUrl: 'http://127.0.0.1:8000/health',
       readyTimeoutMs: 60_000,
@@ -149,7 +178,13 @@ const EvaConfigSchema = z.object({
   }),
 });
 
-export type EvaConfig = z.infer<typeof EvaConfigSchema>;
+type EvaConfigParsed = z.infer<typeof EvaConfigSchema>;
+
+export type EvaConfig = Omit<EvaConfigParsed, 'vision'> & {
+  vision: {
+    wsUrl: string;
+  };
+};
 
 export function loadEvaConfig(): EvaConfig {
   const explorer = cosmiconfigSync('eva', {
@@ -173,5 +208,20 @@ export function loadEvaConfig(): EvaConfig {
     throw new Error(`[eva] invalid config in ${result.filepath}: ${details}`);
   }
 
-  return parsed.data;
+  let resolvedVision = parsed.data.vision;
+  if (!resolvedVision && parsed.data.quickvision) {
+    console.warn('[eva] quickvision.wsUrl is deprecated; use vision.wsUrl');
+    resolvedVision = parsed.data.quickvision;
+  }
+
+  if (!resolvedVision) {
+    throw new Error(
+      `[eva] invalid config in ${result.filepath}: missing required vision.wsUrl (or deprecated quickvision.wsUrl)`,
+    );
+  }
+
+  return {
+    ...parsed.data,
+    vision: resolvedVision,
+  };
 }

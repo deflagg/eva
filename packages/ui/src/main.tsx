@@ -11,7 +11,14 @@ import {
   isAudioLockedError,
   type SpeechClient,
 } from './speech';
-import type { DetectionsMessage, EventEntry, FrameBinaryMeta, InsightMessage, InsightSeverity } from './types';
+import type {
+  DetectionsMessage,
+  EventEntry,
+  FrameBinaryMeta,
+  InsightMessage,
+  InsightSeverity,
+  TextOutputMessage,
+} from './types';
 import { createEvaWsClient, type EvaWsClient, type WsConnectionStatus } from './ws';
 
 type LogDirection = 'system' | 'outgoing' | 'incoming';
@@ -35,6 +42,16 @@ interface EventFeedEntry {
   severity: InsightSeverity;
   trackId: number | null;
   summary: string;
+}
+
+type ChatMessageRole = 'user' | 'assistant';
+
+interface ChatMessage {
+  id: number;
+  ts: string;
+  role: ChatMessageRole;
+  text: string;
+  requestId?: string;
 }
 
 interface InFlightFrame {
@@ -92,6 +109,25 @@ function summarizeMessage(message: unknown): string {
   }
 }
 
+function parseTextEndpointErrorMessage(raw: string): string | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object') {
+      return null;
+    }
+
+    const errorValue = (parsed as Record<string, unknown>).error;
+    if (!errorValue || typeof errorValue !== 'object') {
+      return null;
+    }
+
+    const message = (errorValue as Record<string, unknown>).message;
+    return typeof message === 'string' && message.trim() ? message.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 function isDetectionsMessage(message: unknown): message is DetectionsMessage {
   if (!message || typeof message !== 'object') {
     return false;
@@ -130,6 +166,34 @@ function isInsightMessage(message: unknown): message is InsightMessage {
     typeof candidate.trigger_frame_id === 'string' &&
     typeof summaryRecord.one_liner === 'string' &&
     typeof summaryRecord.tts_response === 'string'
+  );
+}
+
+function isTextOutputMessage(message: unknown): message is TextOutputMessage {
+  if (!message || typeof message !== 'object') {
+    return false;
+  }
+
+  const candidate = message as Record<string, unknown>;
+  if (candidate.type !== 'text_output' || candidate.v !== 1) {
+    return false;
+  }
+
+  if (typeof candidate.request_id !== 'string' || typeof candidate.ts_ms !== 'number' || typeof candidate.text !== 'string') {
+    return false;
+  }
+
+  const meta = candidate.meta;
+  if (!meta || typeof meta !== 'object') {
+    return false;
+  }
+
+  const metaRecord = meta as Record<string, unknown>;
+  return (
+    typeof metaRecord.tone === 'string' &&
+    Array.isArray(metaRecord.concepts) &&
+    typeof metaRecord.surprise === 'number' &&
+    typeof metaRecord.note === 'string'
   );
 }
 
@@ -207,6 +271,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const speechConfig = runtimeConfig.speech;
 
   const evaHttpBaseUrl = React.useMemo(() => deriveEvaHttpBaseUrl(evaWsUrl), [evaWsUrl]);
+  const textEndpointUrl = React.useMemo(() => new URL('/text', `${evaHttpBaseUrl}/`).toString(), [evaHttpBaseUrl]);
   const speechEndpointUrl = React.useMemo(
     () => new URL(speechConfig.path, `${evaHttpBaseUrl}/`).toString(),
     [evaHttpBaseUrl, speechConfig.path],
@@ -215,6 +280,10 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const [status, setStatus] = React.useState<WsConnectionStatus>('connecting');
   const [logs, setLogs] = React.useState<LogEntry[]>([]);
   const [connectionAttempt, setConnectionAttempt] = React.useState(0);
+
+  const [chatMessages, setChatMessages] = React.useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = React.useState('');
+  const [chatPending, setChatPending] = React.useState(false);
 
   const [cameraStatus, setCameraStatus] = React.useState<CameraStatus>('idle');
   const [cameraError, setCameraError] = React.useState<string | null>(null);
@@ -247,6 +316,8 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const overlayCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const nextLogIdRef = React.useRef(1);
   const nextEventIdRef = React.useRef(1);
+  const nextChatIdRef = React.useRef(1);
+  const seenTextOutputRequestIdsRef = React.useRef<string[]>([]);
   const inFlightRef = React.useRef<InFlightFrame | null>(null);
   const captureInProgressRef = React.useRef(false);
   const latestDetectionsRef = React.useRef<DetectionsMessage | null>(null);
@@ -293,6 +364,46 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
     setRecentEvents((prev) => [...mapped, ...prev].slice(0, EVENT_FEED_LIMIT));
   }, []);
+
+  const appendChatMessage = React.useCallback((role: ChatMessageRole, text: string, requestId?: string) => {
+    const trimmedText = text.trim();
+    if (!trimmedText) {
+      return;
+    }
+
+    const entry: ChatMessage = {
+      id: nextChatIdRef.current,
+      ts: new Date().toLocaleTimeString(),
+      role,
+      text: trimmedText,
+      ...(requestId ? { requestId } : {}),
+    };
+
+    nextChatIdRef.current += 1;
+    setChatMessages((prev) => [...prev.slice(-99), entry]);
+  }, []);
+
+  const appendTextOutputMessage = React.useCallback(
+    (textOutput: TextOutputMessage, source: 'ws' | 'http') => {
+      if (seenTextOutputRequestIdsRef.current.includes(textOutput.request_id)) {
+        return;
+      }
+
+      seenTextOutputRequestIdsRef.current.push(textOutput.request_id);
+      if (seenTextOutputRequestIdsRef.current.length > 500) {
+        seenTextOutputRequestIdsRef.current = seenTextOutputRequestIdsRef.current.slice(-500);
+      }
+
+      appendChatMessage('assistant', textOutput.text, textOutput.request_id);
+
+      if (source === 'ws') {
+        appendLog('system', `Chat reply received via WS (${textOutput.request_id}).`);
+      } else {
+        appendLog('system', `Chat reply received via HTTP fallback (${textOutput.request_id}).`);
+      }
+    },
+    [appendChatMessage, appendLog],
+  );
 
   const dropInFlight = React.useCallback(
     (reason: string) => {
@@ -489,6 +600,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         const inFlight = inFlightRef.current;
         const detectionsMessage = isDetectionsMessage(message) ? message : null;
         const insightMessage = isInsightMessage(message) ? message : null;
+        const textOutputMessage = isTextOutputMessage(message) ? message : null;
 
         if (detectionsMessage) {
           renderDetections(detectionsMessage);
@@ -501,6 +613,10 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         if (insightMessage) {
           setLatestInsight(insightMessage);
           maybeAutoSpeakInsight(insightMessage);
+        }
+
+        if (textOutputMessage) {
+          appendTextOutputMessage(textOutputMessage, 'ws');
         }
 
         if (detectionsMessage && inFlight && detectionsMessage.frame_id === inFlight.frameId) {
@@ -543,7 +659,16 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       client.disconnect();
       clientRef.current = null;
     };
-  }, [appendEvents, appendLog, connectionAttempt, dropInFlight, evaWsUrl, maybeAutoSpeakInsight, renderDetections]);
+  }, [
+    appendEvents,
+    appendLog,
+    appendTextOutputMessage,
+    connectionAttempt,
+    dropInFlight,
+    evaWsUrl,
+    maybeAutoSpeakInsight,
+    renderDetections,
+  ]);
 
   const handleSendTestMessage = React.useCallback(() => {
     const payload = {
@@ -582,6 +707,70 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     appendLog('system', 'Reconnect requested.');
     setConnectionAttempt((prev) => prev + 1);
   }, [appendLog]);
+
+  const handleChatSubmit = React.useCallback(
+    async (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+
+      const text = chatInput.trim();
+      if (!text || chatPending) {
+        return;
+      }
+
+      setChatInput('');
+      appendChatMessage('user', text);
+      appendLog('outgoing', `POST /text text=${JSON.stringify(text)}`);
+      setChatPending(true);
+
+      try {
+        const response = await fetch(textEndpointUrl, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            text,
+            source: 'ui',
+          }),
+        });
+
+        if (!response.ok) {
+          const errorBody = await response.text();
+          const detail = parseTextEndpointErrorMessage(errorBody) ?? `HTTP ${response.status}`;
+          appendLog('system', `POST /text failed: ${detail}`);
+          appendChatMessage('assistant', `Error: ${detail}`);
+          return;
+        }
+
+        let payload: unknown;
+        try {
+          payload = (await response.json()) as unknown;
+        } catch {
+          appendLog('system', 'POST /text failed: expected JSON response from Eva.');
+          appendChatMessage('assistant', 'Error: invalid response from Eva /text.');
+          return;
+        }
+
+        if (!isTextOutputMessage(payload)) {
+          appendLog('system', 'POST /text failed: response did not match text_output shape.');
+          appendChatMessage('assistant', 'Error: invalid text_output response shape.');
+          return;
+        }
+
+        const wsConnected = clientRef.current?.getStatus() === 'connected';
+        if (!wsConnected) {
+          appendTextOutputMessage(payload, 'http');
+        }
+      } catch (error) {
+        const message = toErrorMessage(error);
+        appendLog('system', `POST /text request failed: ${message}`);
+        appendChatMessage('assistant', `Error: ${message}`);
+      } finally {
+        setChatPending(false);
+      }
+    },
+    [appendChatMessage, appendLog, appendTextOutputMessage, chatInput, chatPending, textEndpointUrl],
+  );
 
   const handleClearLogs = React.useCallback(() => {
     setLogs([]);
@@ -854,7 +1043,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
   return (
     <main style={{ fontFamily: 'sans-serif', padding: 16, lineHeight: 1.4 }}>
-      <h1>Eva UI (Iteration 43)</h1>
+      <h1>Eva UI (Iteration 54)</h1>
 
       <p>
         WebSocket target: <code>{evaWsUrl}</code>
@@ -876,9 +1065,9 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       </p>
 
       <p>
-        Eva HTTP base: <code>{evaHttpBaseUrl}</code> · Speech endpoint: <code>{speechEndpointUrl}</code> · Speech:{' '}
-        <strong>{speechConfig.enabled ? 'enabled' : 'disabled'}</strong> · Auto Speak:{' '}
-        <strong>{autoSpeakEnabled ? 'on' : 'off'}</strong> · Audio unlock:{' '}
+        Eva HTTP base: <code>{evaHttpBaseUrl}</code> · Text endpoint: <code>{textEndpointUrl}</code> · Speech endpoint:{' '}
+        <code>{speechEndpointUrl}</code> · Speech: <strong>{speechConfig.enabled ? 'enabled' : 'disabled'}</strong> ·
+        Auto Speak: <strong>{autoSpeakEnabled ? 'on' : 'off'}</strong> · Audio unlock:{' '}
         <strong style={{ color: audioLocked ? '#b91c1c' : '#166534' }}>{audioLocked ? 'required' : 'ready'}</strong>
       </p>
 
@@ -940,6 +1129,51 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
           Clear logs
         </button>
       </div>
+
+      <section style={{ marginBottom: 16 }}>
+        <h2 style={{ marginBottom: 8 }}>Chat (text via Eva /text)</h2>
+        <form onSubmit={handleChatSubmit} style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+          <input
+            type="text"
+            value={chatInput}
+            onChange={(event) => setChatInput(event.target.value)}
+            placeholder="Type a message..."
+            disabled={chatPending}
+            style={{ flex: 1, minWidth: 240 }}
+          />
+          <button type="submit" disabled={chatPending || chatInput.trim().length === 0}>
+            {chatPending ? 'Sending…' : 'Send text'}
+          </button>
+        </form>
+        <div
+          style={{
+            border: '1px solid #ddd',
+            borderRadius: 6,
+            backgroundColor: '#fafafa',
+            padding: 12,
+            minHeight: 120,
+            maxHeight: 220,
+            overflow: 'auto',
+          }}
+        >
+          {chatMessages.length === 0 ? (
+            <p style={{ margin: 0 }}>No chat messages yet.</p>
+          ) : (
+            <ul style={{ margin: 0, paddingLeft: 20 }}>
+              {chatMessages.map((message) => (
+                <li key={message.id}>
+                  <code>{message.ts}</code> <strong>[{message.role}]</strong> {message.text}{' '}
+                  {message.requestId ? (
+                    <small>
+                      req=<code>{message.requestId}</code>
+                    </small>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
 
       <section style={{ marginBottom: 16 }}>
         <h2 style={{ marginBottom: 8 }}>Camera preview</h2>

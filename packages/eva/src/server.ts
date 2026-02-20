@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import WebSocket, { WebSocketServer, type RawData } from 'ws';
+import { z } from 'zod';
 
 import {
   BinaryFrameDecodeError,
@@ -8,6 +9,7 @@ import {
   decodeBinaryFrameEnvelope,
   makeError,
   makeHello,
+  PROTOCOL_VERSION,
   QuickVisionInboundMessageSchema,
 } from './protocol.js';
 import { createQuickVisionClient } from './quickvisionClient.js';
@@ -30,6 +32,27 @@ class SpeechRequestValidationError extends Error {
   }
 }
 
+class TextRequestValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TextRequestValidationError';
+  }
+}
+
+class AgentRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AgentRequestError';
+  }
+}
+
+class AgentRequestTimeoutError extends AgentRequestError {
+  constructor(timeoutMs: number) {
+    super(`Agent request timed out after ${timeoutMs}ms.`);
+    this.name = 'AgentRequestTimeoutError';
+  }
+}
+
 export interface StartServerOptions {
   port: number;
   eyePath: string;
@@ -38,6 +61,16 @@ export interface StartServerOptions {
     enabled: boolean;
     cooldownMs: number;
     dedupeWindowMs: number;
+  };
+  agent: {
+    baseUrl: string;
+    timeoutMs: number;
+  };
+  text: {
+    enabled: boolean;
+    path: string;
+    maxBodyBytes: number;
+    maxTextChars: number;
   };
   speech: {
     enabled: boolean;
@@ -107,7 +140,43 @@ function getOptionalFrameId(payload: unknown): string | undefined {
   return typeof frameId === 'string' ? frameId : undefined;
 }
 
+const TextOutputMetaSchema = z
+  .object({
+    tone: z.string().trim().min(1),
+    concepts: z.array(z.string().trim().min(1)),
+    surprise: z.number(),
+    note: z.string().trim().min(1),
+  })
+  .passthrough();
+
+const AgentRespondResponseSchema = z
+  .object({
+    request_id: z.string().trim().min(1),
+    session_id: z.string().trim().min(1).optional(),
+    text: z.string(),
+    meta: TextOutputMetaSchema,
+  })
+  .passthrough();
+
+type AgentRespondResponse = z.infer<typeof AgentRespondResponseSchema>;
+
+interface TextOutputMessage {
+  type: 'text_output';
+  v: number;
+  request_id: string;
+  session_id?: string;
+  ts_ms: number;
+  text: string;
+  meta: z.infer<typeof TextOutputMetaSchema>;
+}
+
 function setSpeechCorsHeaders(res: ServerResponse): void {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'content-type');
+}
+
+function setTextCorsHeaders(res: ServerResponse): void {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'content-type');
@@ -117,6 +186,26 @@ function sendServiceOk(res: ServerResponse): void {
   res.statusCode = 200;
   res.setHeader('content-type', 'application/json');
   res.end(JSON.stringify({ service: 'eva', status: 'ok' }));
+}
+
+function sendTextJson(res: ServerResponse, statusCode: number, payload: unknown): void {
+  if (res.writableEnded) {
+    return;
+  }
+
+  setTextCorsHeaders(res);
+  res.statusCode = statusCode;
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify(payload));
+}
+
+function sendTextJsonError(res: ServerResponse, statusCode: number, code: string, message: string): void {
+  sendTextJson(res, statusCode, {
+    error: {
+      code,
+      message,
+    },
+  });
 }
 
 function sendSpeechJsonError(
@@ -234,6 +323,80 @@ function parseSpeechPayload(payload: unknown, speechConfig: StartServerOptions['
   };
 }
 
+interface ParsedTextRequest {
+  text: string;
+  session_id?: string;
+  source?: string;
+}
+
+function parseTextPayload(payload: unknown, textConfig: StartServerOptions['text']): ParsedTextRequest {
+  if (!isRecord(payload)) {
+    throw new TextRequestValidationError('Expected JSON object payload.');
+  }
+
+  const textValue = payload.text;
+  if (typeof textValue !== 'string') {
+    throw new TextRequestValidationError('text must be a string.');
+  }
+
+  const text = textValue.trim();
+  if (text.length === 0) {
+    throw new TextRequestValidationError('text must be non-empty.');
+  }
+
+  if (text.length > textConfig.maxTextChars) {
+    throw new TextRequestValidationError(`text exceeds maxTextChars (${textConfig.maxTextChars}).`);
+  }
+
+  let sessionId: string | undefined;
+  if (payload.session_id !== undefined) {
+    if (typeof payload.session_id !== 'string') {
+      throw new TextRequestValidationError('session_id must be a string when provided.');
+    }
+
+    const normalizedSessionId = payload.session_id.trim();
+    if (normalizedSessionId.length === 0) {
+      throw new TextRequestValidationError('session_id must be non-empty when provided.');
+    }
+
+    sessionId = normalizedSessionId;
+  }
+
+  let source: string | undefined;
+  if (payload.source !== undefined) {
+    if (typeof payload.source !== 'string') {
+      throw new TextRequestValidationError('source must be a string when provided.');
+    }
+
+    const normalizedSource = payload.source.trim();
+    if (normalizedSource.length === 0) {
+      throw new TextRequestValidationError('source must be non-empty when provided.');
+    }
+
+    source = normalizedSource;
+  }
+
+  return {
+    text,
+    ...(sessionId ? { session_id: sessionId } : {}),
+    ...(source ? { source } : {}),
+  };
+}
+
+function makeTextOutputMessage(response: AgentRespondResponse, fallbackSessionId?: string): TextOutputMessage {
+  const sessionId = response.session_id ?? fallbackSessionId;
+
+  return {
+    type: 'text_output',
+    v: PROTOCOL_VERSION,
+    request_id: response.request_id,
+    ...(sessionId ? { session_id: sessionId } : {}),
+    ts_ms: Date.now(),
+    text: response.text,
+    meta: response.meta,
+  };
+}
+
 type SpeechInput = ReturnType<typeof parseSpeechPayload>;
 
 interface SpeechCacheEntry {
@@ -260,10 +423,68 @@ function sendSpeechAudio(res: ServerResponse, audioBytes: Buffer, cacheStatus: '
   res.end(audioBytes);
 }
 
+function resolveAgentRespondUrl(baseUrl: string): string {
+  const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  return new URL('respond', normalizedBaseUrl).toString();
+}
+
+async function callAgentRespond(
+  agentConfig: StartServerOptions['agent'],
+  request: ParsedTextRequest,
+): Promise<AgentRespondResponse> {
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => {
+    timeoutController.abort();
+  }, agentConfig.timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch(resolveAgentRespondUrl(agentConfig.baseUrl), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        text: request.text,
+        ...(request.session_id ? { session_id: request.session_id } : {}),
+      }),
+      signal: timeoutController.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new AgentRequestTimeoutError(agentConfig.timeoutMs);
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    throw new AgentRequestError(`Agent request failed: ${message}`);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!response.ok) {
+    throw new AgentRequestError(`Agent /respond returned HTTP ${response.status}.`);
+  }
+
+  let parsedPayload: unknown;
+  try {
+    parsedPayload = await response.json();
+  } catch {
+    throw new AgentRequestError('Agent /respond returned non-JSON payload.');
+  }
+
+  const parsedResponse = AgentRespondResponseSchema.safeParse(parsedPayload);
+  if (!parsedResponse.success) {
+    throw new AgentRequestError('Agent /respond response shape is invalid.');
+  }
+
+  return parsedResponse.data;
+}
+
 export function startServer(options: StartServerOptions): Server {
-  const { port, eyePath, quickvisionWsUrl, insightRelay, speech } = options;
+  const { port, eyePath, quickvisionWsUrl, insightRelay, agent, text, speech } = options;
 
   let lastSpeechRequestStartedAtMs: number | null = null;
+  let activeUiClient: WebSocket | null = null;
 
   const speechCache = new Map<string, SpeechCacheEntry>();
   const inFlightSpeechSynthesis = new Map<string, Promise<Buffer>>();
@@ -397,6 +618,89 @@ export function startServer(options: StartServerOptions): Server {
     };
   };
 
+  const parseTextInputFromRequest = async (
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<ParsedTextRequest | null> => {
+    let requestBodyBuffer: Buffer;
+    try {
+      requestBodyBuffer = await readRequestBody(req, text.maxBodyBytes);
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        sendTextJsonError(res, 413, 'PAYLOAD_TOO_LARGE', error.message);
+        return null;
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      sendTextJsonError(res, 400, 'INVALID_REQUEST', message);
+      return null;
+    }
+
+    let parsedBody: unknown;
+    try {
+      parsedBody = JSON.parse(requestBodyBuffer.toString('utf8'));
+    } catch {
+      sendTextJsonError(res, 400, 'INVALID_JSON', 'Expected valid JSON payload.');
+      return null;
+    }
+
+    try {
+      return parseTextPayload(parsedBody, text);
+    } catch (error) {
+      if (error instanceof TextRequestValidationError) {
+        sendTextJsonError(res, 400, 'INVALID_REQUEST', error.message);
+        return null;
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      sendTextJsonError(res, 400, 'INVALID_REQUEST', message);
+      return null;
+    }
+  };
+
+  const handleTextRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const method = (req.method ?? 'GET').toUpperCase();
+
+    if (method === 'OPTIONS') {
+      setTextCorsHeaders(res);
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+
+    if (method !== 'POST') {
+      sendTextJsonError(res, 405, 'METHOD_NOT_ALLOWED', 'Method not allowed.');
+      return;
+    }
+
+    const textInput = await parseTextInputFromRequest(req, res);
+    if (!textInput) {
+      return;
+    }
+
+    let agentResponse: AgentRespondResponse;
+    try {
+      agentResponse = await callAgentRespond(agent, textInput);
+    } catch (error) {
+      if (error instanceof AgentRequestTimeoutError) {
+        sendTextJsonError(res, 504, 'AGENT_TIMEOUT', error.message);
+        return;
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      sendTextJsonError(res, 502, 'AGENT_ERROR', message);
+      return;
+    }
+
+    const textOutputMessage = makeTextOutputMessage(agentResponse, textInput.session_id);
+
+    if (activeUiClient && activeUiClient.readyState === WebSocket.OPEN) {
+      sendJson(activeUiClient, textOutputMessage);
+    }
+
+    sendTextJson(res, 200, textOutputMessage);
+  };
+
   const handleSpeechRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const method = (req.method ?? 'GET').toUpperCase();
 
@@ -437,6 +741,15 @@ export function startServer(options: StartServerOptions): Server {
   const server = createServer((req, res) => {
     const requestUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
+    if (text.enabled && requestUrl.pathname === text.path) {
+      void handleTextRequest(req, res).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[eva] text request failed: ${message}`);
+        sendTextJsonError(res, 500, 'INTERNAL_ERROR', 'Internal server error.');
+      });
+      return;
+    }
+
     if (speech.enabled && requestUrl.pathname === speech.path) {
       void handleSpeechRequest(req, res).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -449,7 +762,6 @@ export function startServer(options: StartServerOptions): Server {
     sendServiceOk(res);
   });
 
-  let activeUiClient: WebSocket | null = null;
   let lastRelayedInsightTsMs: number | null = null;
   const seenInsightClipIds = new Map<string, number>();
 
@@ -706,6 +1018,10 @@ export function startServer(options: StartServerOptions): Server {
     console.log(`[eva] QuickVision target ${quickvisionClient.getUrl()}`);
     console.log(
       `[eva] insight relay enabled=${insightRelay.enabled} cooldownMs=${insightRelay.cooldownMs} dedupeWindowMs=${insightRelay.dedupeWindowMs}`,
+    );
+    console.log(`[eva] agent respond target ${resolveAgentRespondUrl(agent.baseUrl)} timeoutMs=${agent.timeoutMs}`);
+    console.log(
+      `[eva] text endpoint enabled=${text.enabled} path=${text.path} maxBodyBytes=${text.maxBodyBytes} maxTextChars=${text.maxTextChars}`,
     );
     console.log(
       `[eva] speech endpoint enabled=${speech.enabled} path=${speech.path} maxTextChars=${speech.maxTextChars} maxBodyBytes=${speech.maxBodyBytes} cooldownMs=${speech.cooldownMs}`,

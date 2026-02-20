@@ -1,15 +1,18 @@
 {
   "server": {
-    "port": 8790
+    "port": 8791
+  },
+  "memory": {
+    "dir": "../memory"
   },
   "model": {
     "provider": "openai",
     "id": "gpt-4o-mini"
   },
-  "guardrails": {
+  "insight": {
     "cooldownMs": 5000,
     "maxFrames": 6,
     "maxBodyBytes": 8388608
   },
-  "secretsFile": "vision-agent.secrets.local.json"
+  "secretsFile": "agent.secrets.local.json"
 }

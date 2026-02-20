@@ -3,13 +3,23 @@
     "port": 8787,
     "eyePath": "/eye"
   },
-  "quickvision": {
+  "vision": {
     "wsUrl": "ws://localhost:8000/infer"
   },
   "insightRelay": {
     "enabled": true,
     "cooldownMs": 10000,
     "dedupeWindowMs": 60000
+  },
+  "agent": {
+    "baseUrl": "http://127.0.0.1:8791",
+    "timeoutMs": 30000
+  },
+  "text": {
+    "enabled": true,
+    "path": "/text",
+    "maxBodyBytes": 16384,
+    "maxTextChars": 4000
   },
   "speech": {
     "enabled": true,
@@ -26,17 +36,17 @@
   },
   "subprocesses": {
     "enabled": true,
-    "visionAgent": {
+    "agent": {
       "enabled": true,
-      "cwd": "packages/vision-agent",
+      "cwd": "packages/eva/agent",
       "command": ["npm", "run", "dev"],
-      "healthUrl": "http://127.0.0.1:8790/health",
+      "healthUrl": "http://127.0.0.1:8791/health",
       "readyTimeoutMs": 30000,
       "shutdownTimeoutMs": 5000
     },
     "quickvision": {
       "enabled": true,
-      "cwd": "packages/quickvision",
+      "cwd": "packages/eva/vision",
       "command": ["python", "-m", "app.run"],
       "healthUrl": "http://127.0.0.1:8000/health",
       "readyTimeoutMs": 60000,

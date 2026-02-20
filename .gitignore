@@ -1,24 +1,24 @@
 # Node dependencies
 node_modules/
 packages/*/node_modules/
+packages/eva/*/node_modules/
 
 # Build output
 packages/*/dist/
+packages/eva/*/dist/
 packages/ui/*.tsbuildinfo
 packages/ui/vite.config.js
 packages/ui/vite.config.d.ts
 
 # Python
-packages/quickvision/.venv/
-packages/quickvision/**/__pycache__/
-packages/quickvision/*.pt
+packages/eva/vision/.venv/
+packages/eva/vision/**/__pycache__/
+packages/eva/vision/*.pt
 *.pyc
 
 # Local overrides / secrets
 packages/**/**/*.local.*
 !packages/eva/eva.config.local.example.json
-packages/vision-agent/vision-agent.config.local.json
-packages/vision-agent/*.secrets.local.json
 packages/ui/public/config.local.json
 
 # EVA memory runtime artifacts

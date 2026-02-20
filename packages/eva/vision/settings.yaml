@@ -62,7 +62,10 @@ abandoned:
 
 insights:
   enabled: true
-  vision_agent_url: http://localhost:8790/insight
+  agent_url: http://127.0.0.1:8791/insight
+  # Deprecated alias. Kept for migration compatibility.
+  # Use insights.agent_url for all new configs.
+  vision_agent_url: http://127.0.0.1:8791/insight
   timeout_ms: 20000
   max_frames: 6
   pre_frames: 3

@@ -55,7 +55,7 @@ class InsightDownsampleSettings:
 @dataclass(slots=True)
 class InsightSettings:
     enabled: bool
-    vision_agent_url: str
+    agent_url: str
     timeout_ms: int
     max_frames: int
     pre_frames: int
@@ -82,7 +82,7 @@ class InsightBuffer:
         self._frame_event = asyncio.Event()
         self._last_insight_ts_ms: int | None = None
         self._last_surprise_trigger_ts_ms: int | None = None
-        self._vision_agent = VisionAgentClient(config.vision_agent_url, config.timeout_ms)
+        self._vision_agent = VisionAgentClient(config.agent_url, config.timeout_ms)
 
     def add_frame(self, meta: FrameBinaryMetaMessage, image_payload: bytes) -> None:
         self._frames.append(
@@ -392,20 +392,35 @@ def _as_surprise_weights(value: Any) -> dict[str, float]:
     return weights
 
 
-def _validate_url(url: str) -> str:
+def _validate_url(url: str, *, key: str) -> str:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise RuntimeError("QuickVision config error: insights.vision_agent_url must be a valid http(s) URL")
+        raise RuntimeError(f"QuickVision config error: {key} must be a valid http(s) URL")
 
     return url
+
+
+def _resolve_insight_service_url() -> tuple[str, str]:
+    raw_agent_url = settings.get("insights.agent_url", default=None)
+    if raw_agent_url is not None:
+        if not isinstance(raw_agent_url, str) or not raw_agent_url.strip():
+            raise RuntimeError("QuickVision config error: insights.agent_url must be a non-empty string")
+        return raw_agent_url.strip(), "insights.agent_url"
+
+    raw_legacy_url = settings.get("insights.vision_agent_url", default=None)
+    if raw_legacy_url is not None:
+        if not isinstance(raw_legacy_url, str) or not raw_legacy_url.strip():
+            raise RuntimeError("QuickVision config error: insights.vision_agent_url must be a non-empty string")
+        print("[quickvision] insights.vision_agent_url is deprecated; use insights.agent_url")
+        return raw_legacy_url.strip(), "insights.vision_agent_url"
+
+    return "http://127.0.0.1:8791/insight", "insights.agent_url"
 
 
 def load_insight_settings() -> InsightSettings:
     enabled = _as_bool(settings.get("insights.enabled", default=False), default=False)
 
-    raw_url = settings.get("insights.vision_agent_url", default="http://localhost:8790/insight")
-    if not isinstance(raw_url, str) or not raw_url.strip():
-        raise RuntimeError("QuickVision config error: insights.vision_agent_url must be a non-empty string")
+    raw_url, raw_url_key = _resolve_insight_service_url()
 
     timeout_ms = _as_non_negative_int(
         settings.get("insights.timeout_ms", default=2000),
@@ -469,7 +484,7 @@ def load_insight_settings() -> InsightSettings:
 
     return InsightSettings(
         enabled=enabled,
-        vision_agent_url=_validate_url(raw_url.strip()),
+        agent_url=_validate_url(raw_url, key=raw_url_key),
         timeout_ms=max(timeout_ms, 1),
         max_frames=max_frames,
         pre_frames=pre_frames,

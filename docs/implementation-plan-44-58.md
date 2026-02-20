@@ -13,12 +13,12 @@ Implement the system below in SMALL ITERATIONS so diffs stay small and reviewabl
 # GOAL
 
 1. **Remove VisionAgent** entirely (no `packages/vision-agent` service).
-2. Add a new **`packages/agent`** service (Node/TS) that is the **only** place that:
+2. Add a new **`packages/eva/agent`** service (Node/TS) that is the **only** place that:
 
    * calls OpenAI (pi tool-loop)
    * writes EVA memory artifacts (working/short/long + caches)
 3. **QuickVision calls `agent` for insights** (instead of VisionAgent).
-4. Rename **`packages/quickvision` → `packages/vision`** (Python service).
+4. Rename **`packages/quickvision` → `packages/eva/vision`** (Python service).
 5. Eva adds **text I/O**:
 
    * `POST /text` accepts user text (HTTP)
@@ -29,7 +29,7 @@ Implement the system below in SMALL ITERATIONS so diffs stay small and reviewabl
 
 # DECISIONS (LOCKED)
 
-* **OpenAI calls live only in `packages/agent`.** No other package contains an OpenAI key.
+* **OpenAI calls live only in `packages/eva/agent`.** No other package contains an OpenAI key.
 * Vision insight transport v1: **Vision → Agent via HTTP POST** (no WS tool-loop).
 * Eva text transport v1:
 
@@ -48,6 +48,12 @@ Implement the system below in SMALL ITERATIONS so diffs stay small and reviewabl
 
   * no large refactors
   * rename and deletions are isolated iterations with lots of verification
+* Layout update (requested 2026-02-20):
+
+  * keep **Agent** and **Vision** as independent subprocess services
+  * place service folders under Eva package:
+    * `packages/eva/agent`
+    * `packages/eva/vision`
 
 ---
 
@@ -242,7 +248,7 @@ Stop; update progress.md.
 
 ---
 
-## Iteration 45 — Add `packages/agent` skeleton + `/health` (no OpenAI yet)
+## Iteration 45 — Add `packages/eva/agent` skeleton + `/health` (no OpenAI yet)
 
 Goal:
 
@@ -250,7 +256,7 @@ Goal:
 
 Deliverables:
 
-* Create `packages/agent` package with:
+* Create `packages/eva/agent` package with:
 
   * `.nvmrc`, `package.json`, `tsconfig.json`, `README.md`
   * `agent.config.json` committed defaults
@@ -268,7 +274,7 @@ Deliverables:
 
 Acceptance:
 
-* `cd packages/agent && npm i && npm run build` passes
+* `cd packages/eva/agent && npm i && npm run build` passes
 * `curl http://127.0.0.1:8791/health` returns 200
 
 Stop; update progress.md.
@@ -297,7 +303,7 @@ Deliverables:
 
 Acceptance:
 
-* `cd packages/agent && npm run build`
+* `cd packages/eva/agent && npm run build`
 * `curl -sS -X POST http://127.0.0.1:8791/insight -H 'content-type: application/json' -d '<payload>'` returns 200 and expected shape
 
 Stop; update progress.md.
@@ -375,7 +381,7 @@ Goal:
 
 Deliverables:
 
-* Port the core logic from `packages/vision-agent/src/server.ts` into `packages/agent`:
+* Port the core logic from `packages/vision-agent/src/server.ts` into `packages/eva/agent`:
 
   * request parsing with maxBodyBytes
   * maxFrames enforcement (keep HARD_MAX_FRAMES=6 to match current clip builder)
@@ -392,12 +398,12 @@ Deliverables:
     * **drop unknown tags** and log warning (v1)
 * Add minimal prompt files:
 
-  * `packages/agent/src/prompts/insight.ts`
-  * `packages/agent/src/tools/insight.ts`
+  * `packages/eva/agent/src/prompts/insight.ts`
+  * `packages/eva/agent/src/tools/insight.ts`
 
 Acceptance:
 
-* `cd packages/agent && npm run build`
+* `cd packages/eva/agent && npm run build`
 * Manual: start stack, trigger insight, confirm `tts_response` looks correct and UI auto-speaks it
 
 Stop; update progress.md.
@@ -432,7 +438,7 @@ Stop; update progress.md.
 
 ---
 
-## Iteration 51 — Rename `packages/quickvision` → `packages/vision` (mechanical rename only)
+## Iteration 51 — Rename `packages/quickvision` → `packages/eva/vision` (mechanical rename only)
 
 Goal:
 
@@ -440,22 +446,22 @@ Goal:
 
 Deliverables:
 
-* `git mv packages/quickvision packages/vision`
+* `git mv packages/quickvision packages/eva/vision`
 * Update all references in repo:
 
   * docs, READMEs, subprocess config paths, scripts
 * Update `.gitignore` paths:
 
-  * `packages/vision/.venv/`
-  * `packages/vision/**/__pycache__/`
-  * `packages/vision/*.pt`
+  * `packages/eva/vision/.venv/`
+  * `packages/eva/vision/**/__pycache__/`
+  * `packages/eva/vision/*.pt`
 * Eva config: add deprecation alias for one iteration:
 
   * if `vision.wsUrl` missing but `quickvision.wsUrl` present → use it and log warning
 
 Acceptance:
 
-* `cd packages/vision && python3 -m compileall app`
+* `cd packages/eva/vision && python3 -m compileall app`
 * `cd packages/eva && npm run build`
 * `cd packages/ui && npm run build`
 * Manual: detections still flow and insights still work
@@ -481,7 +487,7 @@ Deliverables:
 
 Acceptance:
 
-* `cd packages/agent && npm run build`
+* `cd packages/eva/agent && npm run build`
 * `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"hello"}'` works
 
 Stop; update progress.md.

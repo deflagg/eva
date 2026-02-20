@@ -78,7 +78,7 @@ async def on_startup() -> None:
     print(
         "[quickvision] insights config: "
         f"enabled={_insight_settings.enabled} "
-        f"vision_agent_url={_insight_settings.vision_agent_url} "
+        f"agent_url={_insight_settings.agent_url} "
         f"max_frames={_insight_settings.max_frames} "
         f"pre_frames={_insight_settings.pre_frames} "
         f"post_frames={_insight_settings.post_frames} "

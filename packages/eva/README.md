@@ -2,65 +2,53 @@
 
 TypeScript daemon for UI/WebSocket orchestration.
 
-## Current behavior (Iteration 35)
+## Current behavior (Iteration 53)
 
 - HTTP server on configured `server.port` (default `8787`)
+- Optional text endpoint (when `text.enabled=true`):
+  - `OPTIONS <text.path>` (default `/text`) -> `204` + CORS
+  - `POST <text.path>` forwards input to Agent `POST /respond`
+    - request JSON: `{ "text": "...", "session_id": "optional", "source": "ui" }`
+    - response JSON + WS payload shape: `text_output`
+    - guardrails: `maxBodyBytes`, `maxTextChars`, agent timeout/error mapping
 - Optional speech endpoint (when `speech.enabled=true`):
   - `POST <speech.path>` (default `/speech`) -> `audio/mpeg` bytes
     - supports request guardrails (`maxBodyBytes`, `maxTextChars`, cooldown)
     - includes `X-Eva-TTS-Cache: HIT|MISS` header
-- Eva opens a WebSocket client to configured `quickvision.wsUrl` (default `ws://localhost:8000/infer`)
-  - reconnects automatically with exponential backoff (`250ms` -> `5000ms` cap)
+- Eva opens a WebSocket client to configured Vision URL:
+  - primary key: `vision.wsUrl` (default `ws://localhost:8000/infer`)
+  - deprecated alias (one-iteration compatibility): `quickvision.wsUrl`
 - WebSocket endpoint at configured `server.eyePath` (default `/eye`)
   - sends a `hello` message on connect
-  - accepts **binary frame envelopes** (`frame_binary`) for camera frames
-  - validates binary metadata + image length before forwarding to QuickVision
-  - tracks `frame_id -> ui client` routes with 5s TTL eviction
-  - routes QuickVision `detections` (and frame-scoped `error`) back to the originating client
-  - forwards non-frame messages (for example `insight`) to the active UI client
-  - applies insight relay guardrails for `insight` messages:
-    - optional relay enable/disable (`insightRelay.enabled`)
-    - relay cooldown (`insightRelay.cooldownMs`)
-    - clip-id dedupe window (`insightRelay.dedupeWindowMs`)
-  - forwards JSON `command` messages from UI to QuickVision (used for temporary `insight_test` trigger)
-  - returns `QV_UNAVAILABLE` immediately when QuickVision is not connected
-  - cleans up all in-flight `frame_id` routes when a UI client disconnects
-
-### Current limitation
-
-- Only **one UI client** is supported at a time.
-- A second concurrent UI connection receives `SINGLE_CLIENT_ONLY` and is closed.
+  - accepts binary frame envelopes (`frame_binary`) for camera frames
+  - forwards frames to Vision and routes detections/errors/insights back to UI
+  - forwards JSON `command` messages from UI (`insight_test`)
+  - returns `QV_UNAVAILABLE` when Vision is not connected
 
 ## Runtime modes
 
-Eva supports two run modes.
+### 1) External mode (default)
 
-### 1) External mode (status quo, default)
+- `subprocesses.enabled=false`
+- Start Agent + Vision manually, then start Eva.
 
-- `subprocesses.enabled` is `false` by default.
-- You start QuickVision + VisionAgent manually, then start Eva.
-- Eva behaves exactly like pre-subprocess iterations.
+### 2) Subprocess mode (one command boots stack)
 
-### 2) Subprocess mode (one command boots the stack)
-
-- Set `subprocesses.enabled=true` in `eva.config.local.json`.
+- Set `subprocesses.enabled=true`.
 - Eva will:
-  1. start VisionAgent and wait for `GET /health` = 200
-  2. start QuickVision and wait for `GET /health` = 200
+  1. start Agent and wait for `GET /health` = 200
+  2. start Vision and wait for `GET /health` = 200
   3. start Eva server
-- On shutdown (`Ctrl+C` / `SIGTERM` / `SIGHUP`), Eva stops QuickVision + VisionAgent (no orphan daemons).
-- Shutdown hardening:
-  - a second interrupt signal during shutdown forces immediate process-tree kill/exit
-  - if graceful shutdown exceeds the internal timeout window, Eva force-kills subprocesses and exits.
+- On shutdown, Eva stops Vision + Agent.
 
 ## Configuration (cosmiconfig + zod)
 
-Eva loads configuration from the package root with this priority:
+Eva loads configuration from package root with priority:
 
-1. `eva.config.local.json` (optional local override)
-2. `eva.config.json` (committed default)
+1. `eva.config.local.json`
+2. `eva.config.json`
 
-Current schema:
+Current schema (abridged):
 
 ```json
 {
@@ -68,66 +56,60 @@ Current schema:
     "port": 8787,
     "eyePath": "/eye"
   },
+  "vision": {
+    "wsUrl": "ws://localhost:8000/infer"
+  },
   "quickvision": {
     "wsUrl": "ws://localhost:8000/infer"
   },
-  "insightRelay": {
-    "enabled": true,
-    "cooldownMs": 10000,
-    "dedupeWindowMs": 60000
+  "agent": {
+    "baseUrl": "http://127.0.0.1:8791",
+    "timeoutMs": 30000
   },
-  "speech": {
-    "enabled": false,
-    "path": "/speech",
-    "defaultVoice": "en-US-JennyNeural",
-    "maxTextChars": 1000,
-    "maxBodyBytes": 65536,
-    "cooldownMs": 0,
-    "cache": {
-      "enabled": true,
-      "ttlMs": 600000,
-      "maxEntries": 64
-    }
+  "text": {
+    "enabled": true,
+    "path": "/text",
+    "maxBodyBytes": 16384,
+    "maxTextChars": 4000
   },
   "subprocesses": {
     "enabled": false,
-    "visionAgent": {
+    "agent": {
       "enabled": true,
-      "cwd": "packages/vision-agent",
+      "cwd": "packages/eva/agent",
       "command": ["npm", "run", "dev"],
-      "healthUrl": "http://127.0.0.1:8790/health",
-      "readyTimeoutMs": 30000,
-      "shutdownTimeoutMs": 5000
+      "healthUrl": "http://127.0.0.1:8791/health"
     },
     "quickvision": {
       "enabled": true,
-      "cwd": "packages/quickvision",
+      "cwd": "packages/eva/vision",
       "command": ["python", "-m", "app.run"],
-      "healthUrl": "http://127.0.0.1:8000/health",
-      "readyTimeoutMs": 60000,
-      "shutdownTimeoutMs": 10000
+      "healthUrl": "http://127.0.0.1:8000/health"
     }
   }
 }
 ```
 
+Notes:
+- `vision.wsUrl` is the canonical key.
+- If `vision.wsUrl` is missing but `quickvision.wsUrl` is present, Eva will use it and log a deprecation warning.
+
 ## One-time prerequisites
 
-### VisionAgent
+### Agent
 
 ```bash
-cd packages/vision-agent
+cd packages/eva/agent
 nvm install node
 nvm use node
 npm install
-cp vision-agent.secrets.local.example.json vision-agent.secrets.local.json
-# then edit vision-agent.secrets.local.json with a valid openaiApiKey
+# ensure agent.secrets.local.json contains a valid openaiApiKey
 ```
 
-### QuickVision
+### Vision
 
 ```bash
-cd packages/quickvision
+cd packages/eva/vision
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -142,19 +124,19 @@ nvm use node
 npm install
 ```
 
-## External mode run (manual daemons)
+## External mode run
 
-1. Start VisionAgent:
+1. Start Agent:
 
 ```bash
-cd packages/vision-agent
+cd packages/eva/agent
 npm run dev
 ```
 
-2. Start QuickVision:
+2. Start Vision:
 
 ```bash
-cd packages/quickvision
+cd packages/eva/vision
 source .venv/bin/activate
 python -m app.run
 ```
@@ -166,7 +148,7 @@ cd packages/eva
 npm run dev
 ```
 
-## Subprocess mode run (one command)
+## Subprocess mode run
 
 1. Copy local subprocess config:
 
@@ -175,13 +157,13 @@ cd packages/eva
 cp eva.config.local.example.json eva.config.local.json
 ```
 
-2. (If needed) update QuickVision command to your venv python in `eva.config.local.json`:
+2. (If needed) point Vision command to your venv python in `eva.config.local.json`:
 
 ```json
 {
   "subprocesses": {
     "quickvision": {
-      "command": ["/absolute/path/to/packages/quickvision/.venv/bin/python", "-m", "app.run"]
+      "command": ["/absolute/path/to/packages/eva/vision/.venv/bin/python", "-m", "app.run"]
     }
   }
 }
@@ -194,33 +176,8 @@ cd packages/eva
 npm run dev
 ```
 
-4. Verify:
-
-```bash
-curl http://127.0.0.1:8790/health
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8787/
-```
-
-## Speech API quick checks
-
-When `speech.enabled=true`:
-
-```bash
-curl -sS -D - -X POST http://127.0.0.1:8787/speech \
-  -H 'content-type: application/json' \
-  -d '{"text":"hello from eva","voice":"en-US-JennyNeural"}' \
-  -o out.mp3
-```
-
 ## Build
 
 ```bash
 npm run build
 ```
-
-## Troubleshooting
-
-- `ModuleNotFoundError: No module named 'uvicorn'` when Eva starts QuickVision:
-  - QuickVision deps are not installed in the Python runtime used by `subprocesses.quickvision.command`.
-  - Fix by activating/installing `.venv`, or point command to `.venv/bin/python` explicitly.

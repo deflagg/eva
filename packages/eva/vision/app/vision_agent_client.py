@@ -87,12 +87,12 @@ class VisionAgentClient:
         except httpx.TimeoutException:
             raise VisionAgentClientError(
                 "VISION_AGENT_TIMEOUT",
-                f"VisionAgent request timed out after {self.timeout_ms}ms.",
+                f"Insight service request timed out after {self.timeout_ms}ms.",
             ) from None
         except httpx.HTTPError as exc:
             raise VisionAgentClientError(
                 "VISION_AGENT_UNREACHABLE",
-                f"VisionAgent request failed: {exc}",
+                f"Insight service request failed: {exc}",
             ) from exc
 
         if response.status_code >= 400:
@@ -104,19 +104,19 @@ class VisionAgentClient:
 
             message = _extract_error_message(
                 payload,
-                f"VisionAgent returned HTTP {response.status_code}.",
+                f"Insight service returned HTTP {response.status_code}.",
             )
             raise VisionAgentClientError("VISION_AGENT_ERROR", message)
 
         try:
             payload = response.json()
         except Exception:
-            raise VisionAgentClientError("VISION_AGENT_INVALID_RESPONSE", "VisionAgent returned non-JSON response.")
+            raise VisionAgentClientError("VISION_AGENT_INVALID_RESPONSE", "Insight service returned non-JSON response.")
 
         try:
             return VisionAgentInsightResponse.model_validate(payload)
         except ValidationError as exc:
             raise VisionAgentClientError(
                 "VISION_AGENT_INVALID_RESPONSE",
-                f"VisionAgent response schema validation failed: {exc}",
+                f"Insight service response schema validation failed: {exc}",
             ) from exc

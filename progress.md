@@ -2283,3 +2283,627 @@
 ### Notes
 - This iteration intentionally uses a deterministic stub response and does not call OpenAI yet.
 - Request/response shape is compatible with current QuickVision insight client expectations.
+
+## Iteration 47 — QuickVision: add `insights.agent_url` + deprecate `vision_agent_url` (no rename yet)
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Updated QuickVision defaults in `packages/quickvision/settings.yaml`:
+  - added `insights.agent_url: http://127.0.0.1:8791/insight`
+  - kept `insights.vision_agent_url` as a deprecated alias (with migration comments)
+  - updated deprecated alias default value to point at Agent (`:8791`) for migration compatibility.
+- Updated insight settings loader in `packages/quickvision/app/insights.py`:
+  - reads `insights.agent_url` first
+  - if missing, falls back to `insights.vision_agent_url`
+  - logs deprecation warning on fallback:
+    - `[quickvision] insights.vision_agent_url is deprecated; use insights.agent_url`
+  - URL validation errors now reference the active key (`insights.agent_url` when present).
+- Updated `InsightSettings` URL field from `vision_agent_url` to `agent_url` and wired client construction to use it.
+- Updated startup observability in `packages/quickvision/app/main.py`:
+  - insights config log now prints `agent_url=...`.
+- Updated insight client wording in `packages/quickvision/app/vision_agent_client.py`:
+  - timeout/unreachable/invalid-response messages now say `Insight service` (filename/class kept as-is per migration scope).
+- Updated docs in `packages/quickvision/README.md`:
+  - documented `insights.agent_url` as primary key
+  - documented `insights.vision_agent_url` as deprecated fallback alias.
+
+### Files changed
+- `packages/quickvision/settings.yaml`
+- `packages/quickvision/app/insights.py`
+- `packages/quickvision/app/main.py`
+- `packages/quickvision/app/vision_agent_client.py`
+- `packages/quickvision/README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/quickvision && python3 -m compileall app` passes.
+- Targeted loader checks in QuickVision `.venv`:
+  - default config resolves `insights.agent_url` to `http://127.0.0.1:8791/insight`
+  - legacy-only config path logs deprecation warning and resolves deprecated alias
+  - invalid `insights.agent_url` emits validation error mentioning `insights.agent_url`.
+
+### Manual test steps
+1. Start Agent stub:
+   - `cd packages/agent && npm run dev`
+2. Start QuickVision + Eva + UI as usual.
+3. In UI:
+   - start camera + streaming
+   - click **Trigger insight test**
+4. Confirm UI receives an `insight` payload that includes `summary.tts_response`.
+
+### Notes
+- This iteration intentionally keeps `app/vision_agent_client.py` filename to minimize refactor scope.
+- QuickVision package/service rename is intentionally deferred to Iteration 51.
+
+## Iteration 48 — Eva subprocess: spawn `agent` first (keep VisionAgent for now)
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Extended Eva subprocess config schema in `packages/eva/src/config.ts` with `subprocesses.agent` block (same shape as existing subprocess entries):
+  - `enabled`
+  - `cwd`
+  - `command`
+  - `healthUrl`
+  - `readyTimeoutMs`
+  - `shutdownTimeoutMs`
+- Added defaults for `subprocesses.agent` in Eva config parsing:
+  - default `cwd: packages/agent`
+  - default `command: ["npm", "run", "dev"]`
+  - default health URL `http://127.0.0.1:8791/health`
+- Updated Eva bootstrap order in `packages/eva/src/index.ts`:
+  1. agent
+  2. vision-agent
+  3. quickvision
+  4. eva server start
+- Updated Eva coordinated shutdown and forced-kill paths to include the new agent subprocess.
+- Updated `packages/eva/eva.config.local.example.json` to include a `subprocesses.agent` block.
+
+### Files changed
+- `packages/eva/src/config.ts`
+- `packages/eva/src/index.ts`
+- `packages/eva/eva.config.local.example.json`
+- `progress.md`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- Manual subprocess-mode startup log shows Agent startup + health wait success before VisionAgent:
+  - `[eva] starting agent subprocess ...`
+  - `[eva] waiting for agent health at http://127.0.0.1:8791/health...`
+  - `[eva] agent healthy at http://127.0.0.1:8791/health`
+
+### Manual test steps
+1. Enable subprocess mode (for example by using `eva.config.local.json` with `subprocesses.enabled: true`).
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Confirm startup logs show agent health wait/success before VisionAgent startup.
+
+### Notes
+- This iteration intentionally keeps VisionAgent in the subprocess flow; removal is planned for Iteration 50.
+
+## Iteration 49 — Agent: implement real `POST /insight` via OpenAI tool-call (port VisionAgent logic)
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Replaced Agent deterministic `/insight` stub with real model-backed insight generation in `packages/agent/src/server.ts`:
+  - request parsing with max-body enforcement (`insight.maxBodyBytes`)
+  - max frame enforcement (`insight.maxFrames`, hard-capped at `6`)
+  - insight cooldown enforcement (`insight.cooldownMs`)
+  - pi-ai model call via `complete(...)` with API key from Agent secrets
+  - required single tool call enforcement (`submit_insight`)
+  - strict tool-argument validation using `validateToolCall(...)`
+  - usage extraction (`input_tokens`, `output_tokens`, `cost_usd`)
+- Added prompt/tool modules for the insight tool-loop:
+  - `packages/agent/src/prompts/insight.ts`
+  - `packages/agent/src/tools/insight.ts`
+- Added Agent model + guardrail config fields in `packages/agent/src/config.ts` / `packages/agent/agent.config.json`:
+  - `model.provider`
+  - `model.id`
+  - `insight.cooldownMs`
+  - `insight.maxFrames`
+  - `insight.maxBodyBytes`
+- Added Agent secrets loading in `packages/agent/src/config.ts`:
+  - `loadAgentSecrets(...)` reads local secrets JSON and validates `openaiApiKey`.
+- Updated Agent bootstrap in `packages/agent/src/index.ts`:
+  - validates configured model id/provider at startup via `getModel(...)`
+  - starts server with loaded config + secrets.
+- Added tag-whitelist enforcement for insight output tags in `packages/agent/src/server.ts`:
+  - loads `packages/eva/memory/experience_tags.json` from `memory.dir`
+  - drops unknown model-returned tags and logs warning
+  - ensures non-empty allowed tags with fallback to an allowed tag.
+- Updated Agent dependencies in `packages/agent/package.json`:
+  - added `@mariozechner/pi-ai`
+  - added `@sinclair/typebox`
+- Updated Agent docs in `packages/agent/README.md` for real `/insight` behavior.
+
+### Files changed
+- `packages/agent/package.json`
+- `packages/agent/package-lock.json`
+- `packages/agent/src/config.ts`
+- `packages/agent/src/index.ts`
+- `packages/agent/src/server.ts`
+- `packages/agent/src/prompts/insight.ts`
+- `packages/agent/src/tools/insight.ts`
+- `packages/agent/agent.config.json`
+- `packages/agent/README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/agent && npm run build` passes.
+- Manual endpoint checks with Agent running:
+  - `POST /insight` returns real structured summary with `tts_response` and non-zero usage values.
+  - cooldown guardrail returns `429 COOLDOWN_ACTIVE` on rapid repeat requests.
+  - max-frames guardrail returns `400 TOO_MANY_FRAMES` for clips with >6 frames.
+
+### Manual run instructions
+1. Ensure `packages/agent/agent.secrets.local.json` contains a valid `openaiApiKey`.
+2. Start Agent:
+   - `cd packages/agent`
+   - `npm run dev`
+3. Send an insight request:
+   - `curl -sS -X POST http://127.0.0.1:8791/insight -H 'content-type: application/json' -d '<valid clip payload>'`
+4. Confirm response includes:
+   - `summary.one_liner`
+   - `summary.tts_response`
+   - `summary.tags` (whitelist-filtered)
+   - `summary.what_changed`
+   - `summary.severity`
+   - `usage`
+
+### Notes
+- OpenAI insight calls now live in `packages/agent` (VisionAgent port-in path completed for insight endpoint).
+- End-to-end UI auto-speak behavior remains driven by existing QuickVision/Eva/UI wiring and was not refactored in this iteration.
+
+## Iteration 50 — Remove `packages/vision-agent` completely (now safe)
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Removed `packages/vision-agent/` directory from the repository.
+- Removed VisionAgent-specific ignore rules from root `.gitignore`:
+  - `packages/vision-agent/vision-agent.config.local.json`
+  - `packages/vision-agent/*.secrets.local.json`
+- Removed VisionAgent subprocess config from Eva runtime config schema/defaults in `packages/eva/src/config.ts`.
+- Removed VisionAgent startup/shutdown orchestration from Eva bootstrap in `packages/eva/src/index.ts`.
+- Updated Eva local subprocess example config to remove VisionAgent block:
+  - `packages/eva/eva.config.local.example.json`
+- Updated docs/README references to reflect Agent + QuickVision stack:
+  - `README.md`
+  - `packages/eva/README.md`
+- Confirmed QuickVision defaults point to Agent (no default calls to port `8790`):
+  - `packages/quickvision/settings.yaml` uses `insights.agent_url` + deprecated alias both at `http://127.0.0.1:8791/insight`.
+
+### Files changed
+- `.gitignore`
+- `README.md`
+- `packages/eva/src/config.ts`
+- `packages/eva/src/index.ts`
+- `packages/eva/eva.config.local.example.json`
+- `packages/eva/README.md`
+- `packages/vision-agent/**` (removed)
+- `progress.md`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/quickvision && python3 -m compileall app` passes.
+- Manual stack check (Agent + QuickVision + Eva + UI) with insight flow:
+  - started Eva in subprocess mode (spawns Agent + QuickVision)
+  - started UI dev server
+  - sent frame + `insight_test` through Eva `/eye` WebSocket
+  - received end-to-end `insight` payload with `summary.tts_response`.
+
+### Manual run instructions
+1. Start stack:
+   - `cd packages/eva`
+   - `npm run dev`
+2. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+3. In UI, trigger insight test while streaming and confirm insight payload/tts response arrives.
+
+### Notes
+- VisionAgent has been fully removed from runtime wiring and repository package layout.
+- QuickVision package rename to `packages/vision` remains scheduled for Iteration 51.
+
+## Iteration 51 — Rename `packages/quickvision` → `packages/vision` (mechanical rename only)
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Renamed Python service package directory:
+  - `packages/quickvision` -> `packages/vision`
+- Updated path-based references to the renamed package in config/docs:
+  - root `.gitignore` Python ignore rules now target `packages/vision/...`
+  - root `README.md` updated to use `packages/vision` paths and run steps
+  - `packages/eva/README.md` updated to use `packages/vision` paths and run steps
+  - `packages/eva/eva.config.local.example.json` subprocess cwd updated to `packages/vision`
+- Updated Eva config schema/defaults (`packages/eva/src/config.ts`):
+  - new canonical top-level key: `vision.wsUrl`
+  - kept `quickvision.wsUrl` as one-iteration deprecated alias
+  - when `vision.wsUrl` is missing but `quickvision.wsUrl` is present, Eva now:
+    - uses the alias value
+    - logs deprecation warning:
+      - `[eva] quickvision.wsUrl is deprecated; use vision.wsUrl`
+- Updated Eva runtime wiring (`packages/eva/src/index.ts`) to use `config.vision.wsUrl`.
+- Updated committed Eva defaults (`packages/eva/eva.config.json`) to use `vision.wsUrl`.
+
+### Files changed
+- `.gitignore`
+- `README.md`
+- `packages/eva/src/config.ts`
+- `packages/eva/src/index.ts`
+- `packages/eva/eva.config.json`
+- `packages/eva/eva.config.local.example.json`
+- `packages/eva/README.md`
+- `packages/vision/**` (renamed from `packages/quickvision/**`)
+- `progress.md`
+
+### Verification
+- `cd packages/vision && python3 -m compileall app` passes.
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- Alias behavior check passes:
+  - config with only `quickvision.wsUrl` resolves successfully
+  - deprecation warning is logged.
+- Manual end-to-end stack check passes (Agent + Vision + Eva + UI path):
+  - Eva subprocess mode starts Agent + Vision from renamed paths
+  - insight test over `/eye` still returns `insight` with `summary.tts_response`.
+
+### Manual run instructions
+1. Start Eva stack:
+   - `cd packages/eva`
+   - `npm run dev`
+2. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+3. Trigger insight test from UI while streaming and confirm detections/insights continue to flow.
+
+### Notes
+- This iteration is intentionally mechanical (package/path/config-key rename + alias compatibility) with no protocol behavior changes.
+
+## Iteration 52 — Agent: add `POST /respond` stub (no OpenAI yet)
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Added deterministic chat response endpoint in `packages/agent/src/server.ts`:
+  - `POST /respond`
+  - accepts JSON payload: `{ "text": "...", "session_id": "optional" }`
+  - validates payload with zod schema (`text` required, optional non-empty `session_id`)
+  - returns deterministic response shape:
+    - `request_id` (UUID)
+    - `text`
+    - optional `session_id`
+    - `meta` (`tone`, `concepts`, `surprise`, `note`)
+- Added startup log line for the new endpoint:
+  - `[agent] respond endpoint POST /respond (deterministic stub)`
+- Updated Agent docs in `packages/agent/README.md`:
+  - documented `/respond` deterministic behavior
+  - added `/respond` curl example.
+
+### Files changed
+- `packages/agent/src/server.ts`
+- `packages/agent/README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/agent && npm run build` passes.
+- `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"hello"}'` returns deterministic `{ text, meta, request_id }`.
+- Optional session passthrough check:
+  - `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"hello","session_id":"s-1"}'` returns `session_id` in response.
+
+### Manual run instructions
+1. Start Agent:
+   - `cd packages/agent`
+   - `npm run dev`
+2. Call respond endpoint:
+   - `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"hello"}'`
+
+### Notes
+- `/respond` is intentionally deterministic in this iteration; real chat model integration remains scheduled for Iteration 55.
+
+## Iteration 53 — Eva: implement `POST /text` + CORS + emit `text_output` over `/eye`
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Extended Eva config schema/defaults in `packages/eva/src/config.ts` with:
+  - `agent.baseUrl`
+  - `agent.timeoutMs`
+  - `text.enabled`
+  - `text.path`
+  - `text.maxBodyBytes`
+  - `text.maxTextChars`
+- Added committed config defaults:
+  - `packages/eva/eva.config.json`
+  - `packages/eva/eva.config.local.example.json`
+- Updated Eva server (`packages/eva/src/server.ts`) with text input path:
+  - `OPTIONS <text.path>` returns `204` and CORS headers
+  - `POST <text.path>`:
+    - enforces max request-body bytes while streaming (`413 PAYLOAD_TOO_LARGE`)
+    - validates JSON + fields (`400 INVALID_JSON` / `400 INVALID_REQUEST`)
+    - calls Agent `POST /respond` using `agent.baseUrl` with timeout (`agent.timeoutMs`)
+    - returns `504 AGENT_TIMEOUT` on timeout
+    - returns `502 AGENT_ERROR` on agent/network/bad-response failures
+    - builds protocol-style message:
+      - `type: "text_output"`
+      - `v: 1`
+      - `request_id`
+      - optional `session_id`
+      - `ts_ms`
+      - `text`
+      - `meta`
+    - emits the same `text_output` payload to connected UI over `/eye` WS (if connected)
+    - returns the same `text_output` JSON payload in HTTP response
+- Wired new config to Eva bootstrap in `packages/eva/src/index.ts` (`startServer` now receives `agent` + `text`).
+- Updated Eva docs in `packages/eva/README.md` for Iteration 53 text-path behavior.
+
+### Files changed
+- `packages/eva/src/config.ts`
+- `packages/eva/eva.config.json`
+- `packages/eva/eva.config.local.example.json`
+- `packages/eva/src/server.ts`
+- `packages/eva/src/index.ts`
+- `packages/eva/README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+
+### Manual test steps
+1. Start Agent:
+   - `cd packages/agent`
+   - `npm run dev`
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Call Eva text endpoint:
+   - `curl -sS -X POST http://127.0.0.1:8787/text -H 'content-type: application/json' -d '{"text":"hello from ui","source":"ui"}'`
+4. Confirm HTTP response shape is `text_output` and includes `request_id`, `ts_ms`, `text`, `meta`.
+5. With UI connected to `/eye`, confirm the same `text_output` payload appears on WS.
+
+### Notes
+- This iteration intentionally keeps Agent `/respond` deterministic (real model-backed respond remains Iteration 55).
+- UI chat controls/rendering are intentionally deferred to Iteration 54.
+
+## Iteration 54 — UI: minimal chat panel + render `text_output`
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Added `text_output` protocol type support in UI types:
+  - `packages/ui/src/types.ts`
+  - includes `TextOutputMessage` + `TextOutputMeta`
+- Updated UI runtime behavior in `packages/ui/src/main.tsx`:
+  - derives Eva HTTP base from `eva.wsUrl` (existing behavior)
+  - derives text endpoint URL as `${evaHttpBase}/text`
+  - adds minimal chat panel with:
+    - input + submit button
+    - local user message list
+    - assistant message list from `text_output`
+  - sends chat text to Eva via HTTP `POST /text` with body:
+    - `{ "text": "...", "source": "ui" }`
+  - listens for `text_output` on existing `/eye` WebSocket and renders replies in chat panel
+  - adds dedupe by `request_id` so repeated `text_output` payloads are not double-rendered
+  - uses HTTP response as fallback render path only when WS is not connected.
+- Updated UI docs:
+  - `packages/ui/README.md` now documents chat panel + `/text` usage
+  - updated current behavior marker to Iteration 54
+- Updated root status line in `README.md` to reflect Iteration 54.
+
+### Files changed
+- `packages/ui/src/types.ts`
+- `packages/ui/src/main.tsx`
+- `packages/ui/README.md`
+- `README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/ui && npm run build` passes.
+
+### Manual test steps
+1. Start Agent:
+   - `cd packages/agent`
+   - `npm run dev`
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+4. Open UI, enter text in the chat panel, and click **Send text**.
+5. Confirm:
+   - user message appears in chat panel
+   - assistant reply appears from `text_output`
+   - camera/streaming controls remain functional.
+
+### Notes
+- Chat still depends on deterministic Agent `/respond` behavior in this iteration.
+- Real model-backed chat response generation remains scheduled for Iteration 55.
+
+## Iteration 55 — Agent: real chat (`/respond`) via OpenAI tool-call + working memory writes
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Replaced deterministic Agent `/respond` stub with real model-backed tool-call path in `packages/agent/src/server.ts`:
+  - required single tool call: `commit_text_response`
+  - prompt/tool wiring added:
+    - `packages/agent/src/prompts/respond.ts`
+    - `packages/agent/src/tools/respond.ts`
+  - validates tool output via `validateToolCall(...)`
+- Added concept whitelist enforcement for `/respond` metadata:
+  - concepts are normalized + deduped
+  - unknown concepts are dropped with warning logs
+  - fallback concept used when all model concepts are filtered
+- Implemented working-memory artifact writes for successful `/respond` calls:
+  - append `text_input` JSONL entry to `packages/eva/memory/working_memory.log`
+  - append `text_output` JSONL entry to `packages/eva/memory/working_memory.log`
+  - update mutable tone cache file:
+    - `packages/eva/memory/cache/personality_tone.json`
+- Added write serialization (mutex/queue) for memory artifacts:
+  - introduced serial task queue around working log append + cache update
+  - prevents concurrent append corruption under rapid `/respond` traffic
+- Added atomic JSON cache write behavior for tone cache (`tmp` file + rename).
+- Added persona prompt loading for respond path from:
+  - `packages/eva/memory/persona.md`
+- Updated Agent startup logs and health payload to include working-memory and tone-cache paths.
+- Updated docs:
+  - `packages/agent/README.md`
+  - root `README.md` status line
+
+### Files changed
+- `packages/agent/src/server.ts`
+- `packages/agent/src/prompts/respond.ts` (new)
+- `packages/agent/src/tools/respond.ts` (new)
+- `packages/agent/README.md`
+- `README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/agent && npm run build` passes.
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/vision && python3 -m compileall app` passes.
+- Manual `/respond` smoke check returns real structured payload (`text`, `meta`, `request_id`).
+- Manual memory artifact checks:
+  - `working_memory.log` grows with valid JSONL `text_input` + `text_output` pairs
+  - `cache/personality_tone.json` updates after `/respond`
+- Rapid request burst check (parallel `/respond` requests) confirms no JSONL corruption and complete input/output pairs per session.
+
+### Manual run instructions
+1. Start Agent:
+   - `cd packages/agent`
+   - `npm run dev`
+2. Call respond endpoint:
+   - `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"hello","session_id":"demo-1"}'`
+3. Confirm memory artifacts:
+   - `tail -n 4 packages/eva/memory/working_memory.log`
+   - `cat packages/eva/memory/cache/personality_tone.json`
+
+### Notes
+- Iteration 55 intentionally focuses on chat generation + working-memory writes only.
+- Hourly/daily memory workers and retrieval injection remain scheduled for Iterations 56–58.
+
+## Iteration 56 — Agent: Worker A (hourly) — working→SQLite + trim working log
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Added short-term memory SQLite initialization in `packages/agent/src/server.ts`:
+  - creates `packages/eva/memory/short_term_memory.db`
+  - initializes schema/table `short_term_summaries` + created-at index
+- Added hourly worker endpoint:
+  - `POST /jobs/hourly`
+  - accepts optional JSON body `{ "now_ms": <epoch-ms> }` for deterministic testing
+- Implemented hourly job pipeline under the same write queue/mutex used by `/respond` memory writes:
+  - reads `packages/eva/memory/working_memory.log`
+  - selects entries older than 60 minutes
+  - builds 3–5 bullet summaries prioritizing:
+    - vision insight entries
+    - high-surprise chat responses
+    - chat highlights
+  - inserts bullets into SQLite `short_term_summaries`
+  - atomically rewrites `working_memory.log` to retain only the last 60 minutes
+- Added robust working-log handling:
+  - skips malformed JSONL lines with warning logs
+  - skips entries missing required `type` / `ts_ms`
+- Extended health/startup observability:
+  - `/health` now includes `shortTermMemoryDbPath`
+  - startup logs now include `/jobs/hourly` route and DB path
+- Updated docs:
+  - `packages/agent/README.md` (Iteration 56 behavior + `/jobs/hourly` usage)
+  - root `README.md` status line
+
+### Files changed
+- `packages/agent/src/server.ts`
+- `packages/agent/README.md`
+- `README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/agent && npm run build` passes.
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/vision && python3 -m compileall app` passes.
+- Manual endpoint checks:
+  - `POST /jobs/hourly` (no body) returns summary JSON and succeeds.
+  - `POST /jobs/hourly` with future `now_ms` returns non-zero `summary_count` when old entries exist.
+- Manual data checks:
+  - SQLite `short_term_summaries` contains inserted bullet rows.
+  - `working_memory.log` is atomically trimmed to entries within last-hour window (or empty when all entries are older).
+
+### Manual run instructions
+1. Start Agent:
+   - `cd packages/agent`
+   - `npm run dev`
+2. Trigger hourly worker:
+   - `curl -sS -X POST http://127.0.0.1:8791/jobs/hourly`
+3. (Optional deterministic test) use explicit run time:
+   - `curl -sS -X POST http://127.0.0.1:8791/jobs/hourly -H 'content-type: application/json' -d '{"now_ms":1700000000000}'`
+4. Inspect outputs:
+   - `node -e "import { DatabaseSync } from 'node:sqlite'; const db=new DatabaseSync('packages/eva/memory/short_term_memory.db'); console.log(db.prepare('SELECT id, summary_text FROM short_term_summaries ORDER BY id DESC LIMIT 5').all()); db.close();"`
+   - `tail -n 20 packages/eva/memory/working_memory.log`
+
+### Notes
+- This iteration focuses on Worker A (hourly) only.
+- Daily vectorization/cache refresh and retrieval-in-chat remain for Iterations 57–58.
+
+## Iteration 56 (follow-up patch) — Move Agent/Vision under Eva package (keep subprocess model)
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Relocated service folders while keeping them independent daemons:
+  - `packages/agent` -> `packages/eva/agent`
+  - `packages/vision` -> `packages/eva/vision`
+- Kept subprocess architecture unchanged:
+  - Eva still starts Agent and Vision as separate subprocesses when `subprocesses.enabled=true`.
+- Updated Eva subprocess default paths/config:
+  - `packages/eva/src/config.ts`
+  - `packages/eva/eva.config.local.example.json`
+  - `packages/eva/eva.config.local.json`
+- Updated local venv command path in Eva local config:
+  - `/mnt/d/source/vscode/eva/packages/eva/vision/.venv/bin/python`
+- Updated Agent config defaults after relocation:
+  - `packages/eva/agent/agent.config.json` memory dir -> `../memory`
+  - `packages/eva/agent/agent.config.local.json` memory dir -> `../memory`
+- Updated docs and plan to reflect new layout and retained subprocess intent:
+  - `.gitignore`
+  - `README.md`
+  - `packages/eva/README.md`
+  - `packages/eva/agent/README.md`
+  - `docs/implementation-plan-44-58.md`
+
+### Files changed
+- `.gitignore`
+- `README.md`
+- `docs/implementation-plan-44-58.md`
+- `packages/eva/src/config.ts`
+- `packages/eva/eva.config.local.example.json`
+- `packages/eva/eva.config.local.json`
+- `packages/eva/README.md`
+- `packages/eva/agent/agent.config.json`
+- `packages/eva/agent/agent.config.local.json`
+- `packages/eva/agent/README.md`
+- `progress.md`
+- moved directories:
+  - `packages/eva/agent/**`
+  - `packages/eva/vision/**`
+
+### Verification
+- `cd packages/eva/agent && npm run build` passes.
+- `cd packages/eva/vision && python3 -m compileall app` passes.
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- Subprocess boot smoke check (`timeout 45s npm run dev` in `packages/eva`) shows:
+  - Agent subprocess started from `packages/eva/agent` and passed health wait.
+  - Vision subprocess started from `packages/eva/vision` (venv python path) and entered health-wait stage.
+
+### Notes
+- This patch is a layout/paths change only; service boundaries and process model remain unchanged.
+- Agent and Vision continue to run as independent subprocess services managed by Eva.

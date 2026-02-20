@@ -84,4 +84,28 @@ export interface InsightMessage {
   usage: InsightUsage;
 }
 
-export type ProtocolMessage = HelloMessage | DetectionsMessage | ErrorMessage | InsightMessage | CommandMessage;
+export interface TextOutputMeta {
+  tone: string;
+  concepts: string[];
+  surprise: number;
+  note: string;
+  [key: string]: unknown;
+}
+
+export interface TextOutputMessage {
+  type: 'text_output';
+  v: 1;
+  request_id: string;
+  session_id?: string;
+  ts_ms: number;
+  text: string;
+  meta: TextOutputMeta;
+}
+
+export type ProtocolMessage =
+  | HelloMessage
+  | DetectionsMessage
+  | ErrorMessage
+  | InsightMessage
+  | TextOutputMessage
+  | CommandMessage;
