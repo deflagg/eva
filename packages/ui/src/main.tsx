@@ -83,12 +83,6 @@ const FRAME_TIMEOUT_MS = 500;
 const FRAME_LOOP_INTERVAL_MS = 100;
 const EVENT_FEED_LIMIT = 60;
 
-const SEVERITY_RANK: Record<InsightSeverity, number> = {
-  low: 0,
-  medium: 1,
-  high: 2,
-};
-
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -164,8 +158,7 @@ function isInsightMessage(message: unknown): message is InsightMessage {
     candidate.v === 1 &&
     typeof candidate.clip_id === 'string' &&
     typeof candidate.trigger_frame_id === 'string' &&
-    typeof summaryRecord.one_liner === 'string' &&
-    typeof summaryRecord.tts_response === 'string'
+    typeof summaryRecord.one_liner === 'string'
   );
 }
 
@@ -250,19 +243,8 @@ function isAbortError(error: unknown): boolean {
   return error.name === 'AbortError';
 }
 
-function shouldSpeakSeverity(
-  severity: InsightSeverity,
-  minSeverity: InsightSeverity,
-): boolean {
-  return SEVERITY_RANK[severity] >= SEVERITY_RANK[minSeverity];
-}
-
 function normalizeSpeechText(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
-}
-
-function getInsightSpeechId(insight: InsightMessage): string {
-  return insight.clip_id;
 }
 
 function App({ runtimeConfig }: AppProps): JSX.Element {
@@ -327,8 +309,8 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const framesAckedRef = React.useRef(0);
   const framesTimedOutRef = React.useRef(0);
   const activeSpeechAbortControllerRef = React.useRef<AbortController | null>(null);
-  const autoSpeakLastStartedAtMsRef = React.useRef<number | null>(null);
-  const lastSpokenInsightIdRef = React.useRef<string | null>(null);
+  const lastSpokenTextOutputRequestIdRef = React.useRef<string | null>(null);
+  const chatAutoSpeakLastStartedAtMsRef = React.useRef<number | null>(null);
 
   const appendLog = React.useCallback((direction: LogDirection, text: string) => {
     const entry: LogEntry = {
@@ -485,7 +467,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   }, [speechConfig.autoSpeak.enabled]);
 
   const runSpeechRequest = React.useCallback(
-    async ({ text, voice, source }: { text: string; voice: string; source: 'auto' | 'manual' }): Promise<boolean> => {
+    async ({ text, voice, source }: { text: string; voice: string; source: 'auto-chat' | 'manual' }): Promise<boolean> => {
       const speechClient = speechClientRef.current;
       if (!speechClient) {
         appendLog('system', 'Speech client is not ready yet.');
@@ -518,7 +500,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         if (source === 'manual') {
           appendLog('system', `Test speech played using voice ${voice}.`);
         } else {
-          appendLog('system', 'Auto-speak played latest insight.');
+          appendLog('system', 'Auto-speak played chat reply.');
         }
 
         return true;
@@ -532,7 +514,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
           setAudioLocked(true);
         }
 
-        appendLog('system', `${source === 'auto' ? 'Auto-speak' : 'Test speech'} failed: ${message}`);
+        appendLog('system', `${source === 'auto-chat' ? 'Auto-speak' : 'Test speech'} failed: ${message}`);
         return false;
       } finally {
         if (activeSpeechAbortControllerRef.current === controller) {
@@ -544,42 +526,37 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     [appendLog],
   );
 
-  const maybeAutoSpeakInsight = React.useCallback(
-    (insight: InsightMessage): void => {
+  const maybeAutoSpeakTextOutput = React.useCallback(
+    (textOutput: TextOutputMessage): void => {
       if (!speechConfig.enabled || !autoSpeakEnabled) {
         return;
       }
 
-      if (!shouldSpeakSeverity(insight.summary.severity, speechConfig.autoSpeak.minSeverity)) {
+      if (lastSpokenTextOutputRequestIdRef.current === textOutput.request_id) {
         return;
       }
 
-      const insightId = getInsightSpeechId(insight);
-      if (lastSpokenInsightIdRef.current === insightId) {
-        return;
-      }
-
-      const speechText = normalizeSpeechText(insight.summary.tts_response);
+      const speechText = normalizeSpeechText(textOutput.text);
       if (!speechText) {
         return;
       }
 
       const nowMs = Date.now();
-      if (speechConfig.autoSpeak.cooldownMs > 0 && autoSpeakLastStartedAtMsRef.current !== null) {
-        const elapsedMs = nowMs - autoSpeakLastStartedAtMsRef.current;
+      if (speechConfig.autoSpeak.cooldownMs > 0 && chatAutoSpeakLastStartedAtMsRef.current !== null) {
+        const elapsedMs = nowMs - chatAutoSpeakLastStartedAtMsRef.current;
         if (elapsedMs < speechConfig.autoSpeak.cooldownMs) {
           return;
         }
       }
 
-      autoSpeakLastStartedAtMsRef.current = nowMs;
-      lastSpokenInsightIdRef.current = insightId;
+      chatAutoSpeakLastStartedAtMsRef.current = nowMs;
+      lastSpokenTextOutputRequestIdRef.current = textOutput.request_id;
 
       const voice = speechVoice.trim() || speechConfig.defaultVoice;
       void runSpeechRequest({
         text: speechText,
         voice,
-        source: 'auto',
+        source: 'auto-chat',
       });
     },
     [autoSpeakEnabled, runSpeechRequest, speechConfig, speechVoice],
@@ -612,11 +589,11 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
         if (insightMessage) {
           setLatestInsight(insightMessage);
-          maybeAutoSpeakInsight(insightMessage);
         }
 
         if (textOutputMessage) {
           appendTextOutputMessage(textOutputMessage, 'ws');
+          maybeAutoSpeakTextOutput(textOutputMessage);
         }
 
         if (detectionsMessage && inFlight && detectionsMessage.frame_id === inFlight.frameId) {
@@ -666,7 +643,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     connectionAttempt,
     dropInFlight,
     evaWsUrl,
-    maybeAutoSpeakInsight,
+    maybeAutoSpeakTextOutput,
     renderDetections,
   ]);
 
@@ -760,6 +737,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         const wsConnected = clientRef.current?.getStatus() === 'connected';
         if (!wsConnected) {
           appendTextOutputMessage(payload, 'http');
+          maybeAutoSpeakTextOutput(payload);
         }
       } catch (error) {
         const message = toErrorMessage(error);
@@ -769,7 +747,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         setChatPending(false);
       }
     },
-    [appendChatMessage, appendLog, appendTextOutputMessage, chatInput, chatPending, textEndpointUrl],
+    [appendChatMessage, appendLog, appendTextOutputMessage, chatInput, chatPending, maybeAutoSpeakTextOutput, textEndpointUrl],
   );
 
   const handleClearLogs = React.useCallback(() => {
@@ -792,7 +770,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const handleToggleAutoSpeak = React.useCallback(() => {
     setAutoSpeakEnabled((prev) => {
       const next = !prev;
-      appendLog('system', `Auto Speak ${next ? 'enabled' : 'disabled'}.`);
+      appendLog('system', `Chat auto-speak ${next ? 'enabled' : 'disabled'}.`);
       return next;
     });
   }, [appendLog]);
@@ -1041,9 +1019,11 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     };
   }, [clearOverlayCanvas]);
 
+  // Insights are rendered silently (no spoken line).
+
   return (
     <main style={{ fontFamily: 'sans-serif', padding: 16, lineHeight: 1.4 }}>
-      <h1>Eva UI (Iteration 54)</h1>
+      <h1>Eva UI (Iteration 79)</h1>
 
       <p>
         WebSocket target: <code>{evaWsUrl}</code>
@@ -1067,7 +1047,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       <p>
         Eva HTTP base: <code>{evaHttpBaseUrl}</code> · Text endpoint: <code>{textEndpointUrl}</code> · Speech endpoint:{' '}
         <code>{speechEndpointUrl}</code> · Speech: <strong>{speechConfig.enabled ? 'enabled' : 'disabled'}</strong> ·
-        Auto Speak: <strong>{autoSpeakEnabled ? 'on' : 'off'}</strong> · Audio unlock:{' '}
+        Chat Auto Speak: <strong>{autoSpeakEnabled ? 'on' : 'off'}</strong> · Audio unlock:{' '}
         <strong style={{ color: audioLocked ? '#b91c1c' : '#166534' }}>{audioLocked ? 'required' : 'ready'}</strong>
       </p>
 
@@ -1080,7 +1060,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       {speechConfig.enabled && audioLocked ? (
         <p style={{ color: '#92400e', marginTop: 0 }}>
           <strong>Audio is locked by browser autoplay policy.</strong> Click <strong>Enable Audio</strong> once, then use
-          <strong> Test Speak</strong> or wait for auto-speak triggers.
+          <strong> Test Speak</strong> or wait for chat auto-speak on replies.
         </p>
       ) : null}
 
@@ -1092,7 +1072,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
           Trigger insight test
         </button>
         <button type="button" onClick={handleToggleAutoSpeak} disabled={!speechConfig.enabled}>
-          Auto Speak: {autoSpeakEnabled ? 'on' : 'off'}
+          Chat Auto Speak: {autoSpeakEnabled ? 'on' : 'off'}
         </button>
         <button type="button" onClick={() => void handleEnableAudio()} disabled={!speechConfig.enabled || speechBusy}>
           Enable Audio
@@ -1240,9 +1220,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
                 </strong>{' '}
                 · {latestInsight.summary.one_liner}
               </p>
-              <p style={{ marginTop: 0, marginBottom: 8 }}>
-                <strong>Spoken line:</strong> {latestInsight.summary.tts_response}
-              </p>
+              {/* Iteration 78: no spoken-line rendering for insights. */}
               <p style={{ marginTop: 0, marginBottom: 8 }}>
                 Tags:{' '}
                 {latestInsight.summary.tags.length > 0 ? (

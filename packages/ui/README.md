@@ -2,7 +2,7 @@
 
 React + Vite client for webcam capture and overlays.
 
-## Current behavior (Iteration 54)
+## Current behavior (Iteration 79)
 
 - Loads runtime config from:
   - `/config.local.json` first (if present)
@@ -20,27 +20,28 @@ React + Vite client for webcam capture and overlays.
 - Provides controls:
   - **Send test message**
   - **Trigger insight test** (sends `{"type":"command","v":1,"name":"insight_test"}`)
-  - **Auto Speak** toggle (defaults ON)
+  - **Chat Auto Speak** toggle
   - **Enable Audio** (one-time unlock for browser autoplay policy)
   - **Voice** input + **Test Speak** button (calls Eva `POST /speech`)
   - **Show/Hide ROI/line overlay** (when debug overlay geometry is configured)
   - **Start camera** / **Stop camera**
   - **Start/Pause streaming**
 - If browser blocks `audio.play()`, UI marks audio as locked and prompts user to click **Enable Audio**
-- Auto-speaks new `insight` messages when policy allows:
+- Auto-speaks new **chat replies** (`text_output`) when policy allows:
   - `speech.enabled=true`
-  - Auto Speak toggle is on
-  - insight severity >= `speech.autoSpeak.minSeverity` (`low`, `medium`, or `high`)
-  - cooldown window (`speech.autoSpeak.cooldownMs`) has elapsed
-  - resolved speech text is non-empty
-- Auto-speak spoken text source:
-  - exactly `insight.summary.tts_response`
-  - UI does not generate fallback narration from other fields
+  - Chat Auto Speak toggle is on
+  - `speech.autoSpeak.cooldownMs` window has elapsed
+  - reply text is non-empty
+  - `request_id` has not already been spoken (dedupe)
+- Speech source for auto-speak:
+  - exactly `text_output.text`
 - Speech interruption behavior:
   - starting a new speech aborts any in-flight fetch (`AbortController`)
   - pauses current audio playback
   - revokes prior blob URL
-  - guards duplicate speaking of same insight with `lastSpokenInsightId`
+- Insight panel behavior:
+  - insights are **silent factual UI updates** (no spoken line and no insight-triggered auto-speak)
+  - panel shows one-liner, severity, tags, change bullets, and usage/cost summary
 - Captures JPEG frames from the video stream via a hidden `<canvas>`
 - Sends frames as **binary WebSocket envelopes**:
   - 4-byte big-endian metadata length
@@ -57,8 +58,6 @@ React + Vite client for webcam capture and overlays.
   - `drawRect(x1*scaleX, y1*scaleY, (x2-x1)*scaleX, (y2-y1)*scaleY)`
 - Shows **recent event feed** from `detections.events[]`:
   - event `name`, `severity`, optional `track_id`, and compact `data` summary
-- Shows **latest insight panel** from `insight` messages:
-  - one-liner, severity, tags, change bullets, usage/cost summary
 - Supports optional **debug ROI/line overlay** from UI runtime config:
   - `debugOverlay.regions` (`x1,y1,x2,y2`)
   - `debugOverlay.lines` (`x1,y1,x2,y2`)
@@ -95,6 +94,9 @@ Example:
   }
 }
 ```
+
+Notes:
+- `speech.autoSpeak.minSeverity` is currently retained for compatibility and is not used by chat auto-speak logic.
 
 ## Run (dev)
 

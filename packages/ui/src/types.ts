@@ -62,7 +62,6 @@ export interface DetectionsMessage {
 
 export interface InsightSummary {
   one_liner: string;
-  tts_response: string;
   what_changed: string[];
   severity: InsightSeverity;
   tags: string[];

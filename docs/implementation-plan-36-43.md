@@ -1,5 +1,11 @@
 ## docs/implementation-plan-36-43.md — Eva Speech Endpoint + Auto Speak via `tts_response`
 
+> Historical plan note (superseded): this document captures a previous `tts_response` insight contract.
+> Current behavior is defined by `docs/implementation-plan-75-82.md`:
+> - protocol `InsightSummary` does not include narration fields
+> - insights are silent UI facts
+> - auto-speak uses chat `text_output` replies.
+
 Implement the system below in SMALL ITERATIONS so diffs stay small and reviewable. Do NOT do big refactors. Do NOT “get ahead” of the current iteration. Each iteration must end with:
 
 * build/lint/typecheck passing (or explicit “no tests yet; manual test steps included”)

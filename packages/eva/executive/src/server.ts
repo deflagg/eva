@@ -19,7 +19,7 @@ import {
   saveToneStateAtomic,
   updateToneForSession,
 } from './memcontext/tone.js';
-import { readRecentWmEvents } from './memcontext/live_events.js';
+import { buildEnvironmentSnapshot, readRecentWmEvents } from './memcontext/live_events.js';
 import type { AgentConfig, AgentSecrets } from './config.js';
 import { buildInsightSystemPrompt, buildInsightUserPrompt } from './prompts/insight.js';
 import { buildRespondSystemPrompt, buildRespondUserPrompt } from './prompts/respond.js';
@@ -274,7 +274,25 @@ interface WorkingMemoryWmEventEntry {
   data: Record<string, unknown>;
 }
 
-type WorkingMemoryEntry = WorkingMemoryTextInputEntry | WorkingMemoryTextOutputEntry | WorkingMemoryWmEventEntry;
+interface WorkingMemoryWmInsightEntry {
+  type: 'wm_insight';
+  ts_ms: number;
+  source: 'vision';
+  clip_id: string;
+  trigger_frame_id: string;
+  severity: InsightSummary['severity'];
+  one_liner: string;
+  what_changed: string[];
+  tags: string[];
+  narration?: string;
+  usage: InsightUsage;
+}
+
+type WorkingMemoryEntry =
+  | WorkingMemoryTextInputEntry
+  | WorkingMemoryTextOutputEntry
+  | WorkingMemoryWmEventEntry
+  | WorkingMemoryWmInsightEntry;
 
 type WorkingMemoryRecord = {
   type: string;
@@ -911,6 +929,35 @@ function buildWorkingMemoryEventEntries(payload: EventsIngestRequest): WorkingMe
     summary: buildWmEventSummary(event),
     data: event.data,
   }));
+}
+
+function buildWorkingMemoryInsightEntry(
+  request: InsightRequest,
+  insight: InsightResult,
+  tsMs: number,
+): WorkingMemoryWmInsightEntry {
+  const clipId = request.clip_id?.trim() || `clip-${randomUUID()}`;
+  const triggerFrameId = request.trigger_frame_id?.trim() || request.frames[0]?.frame_id?.trim() || 'trigger-unknown';
+
+  const rawNarration = insight.summary.tts_response?.trim();
+
+  return {
+    type: 'wm_insight',
+    ts_ms: tsMs,
+    source: 'vision',
+    clip_id: clipId,
+    trigger_frame_id: triggerFrameId,
+    severity: insight.summary.severity,
+    one_liner: insight.summary.one_liner,
+    what_changed: [...insight.summary.what_changed],
+    tags: [...insight.summary.tags],
+    ...(rawNarration ? { narration: rawNarration } : {}),
+    usage: {
+      input_tokens: insight.usage.input_tokens,
+      output_tokens: insight.usage.output_tokens,
+      cost_usd: insight.usage.cost_usd,
+    },
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -1783,7 +1830,19 @@ async function buildRespondMemoryContext(params: {
     maxItems: LIVE_EVENT_MAX_ITEMS,
   });
 
-  appendLineWithinBudget(lines, 'Live events (last ~2 minutes):', budget);
+  const environmentSnapshot = buildEnvironmentSnapshot(recentLiveEvents);
+
+  appendLineWithinBudget(lines, 'Environment snapshot (derived from live events in the last ~2 minutes):', budget);
+  appendLineWithinBudget(lines, environmentSnapshot.paragraph, budget);
+
+  for (const bullet of environmentSnapshot.bullets) {
+    const line = truncateText(`- ${bullet}`, LIVE_EVENT_MAX_LINE_CHARS);
+    if (!appendLineWithinBudget(lines, line, budget)) {
+      break;
+    }
+  }
+
+  appendLineWithinBudget(lines, 'Live event raw lines (debug fallback):', budget);
   if (recentLiveEvents.length === 0) {
     appendLineWithinBudget(lines, '- none', budget);
   }
@@ -2548,6 +2607,12 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
 
         try {
           const insight = await generateInsight(insightRequest, config, secrets, tagWhitelist);
+          const wmInsightEntry = buildWorkingMemoryInsightEntry(insightRequest, insight, Date.now());
+
+          await workingMemoryWriteQueue.run(async () => {
+            await appendWorkingMemoryEntries(workingMemoryLogPath, [wmInsightEntry]);
+          });
+
           sendJson(res, 200, {
             summary: insight.summary,
             usage: insight.usage,

@@ -3791,3 +3791,323 @@
 ### Notes
 - Remaining `vector_db` mentions are intentionally historical in prior implementation-plan docs and progress history.
 - Runtime long-term store path and operational docs are now aligned on `long_term_memory_db`.
+
+## Iteration 75 — Align code to protocol schema: remove `tts_response` from protocol InsightSummary
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated EVA protocol validator in `packages/eva/src/protocol.ts`:
+  - removed `tts_response` from `InsightSummarySchema` so runtime schema matches protocol contract.
+- Updated Vision protocol model in `packages/eva/vision/app/protocol.py`:
+  - removed `tts_response` from `InsightSummary`.
+- Updated UI protocol types in `packages/ui/src/types.ts`:
+  - removed `tts_response` from `InsightSummary` interface.
+- Updated UI runtime insight guard in `packages/ui/src/main.tsx`:
+  - `isInsightMessage(...)` no longer requires `summary.tts_response`.
+- Added compatibility handling in UI for transition period:
+  - optional narration extraction now reads legacy `summary.tts_response` only when present, so insights still render when field is absent.
+
+### Files changed
+- `packages/eva/src/protocol.ts`
+- `packages/eva/vision/app/protocol.py`
+- `packages/ui/src/types.ts`
+- `packages/ui/src/main.tsx`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+
+### Manual run instructions
+1. Start stack (Executive + Vision + EVA + UI) as usual.
+2. Trigger an insight and confirm UI still renders insight fields (`one_liner`, severity, tags, what_changed).
+3. Confirm UI does not reject insight payloads that omit `summary.tts_response`.
+
+### Notes
+- This iteration aligns runtime schemas/types with protocol `InsightSummary` (no narration field).
+- Any legacy `tts_response` field from upstream is now treated as optional compatibility data in UI only.
+
+## Iteration 76 — Ensure outbound InsightMessage never contains narration
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated QuickVision insight message construction in `packages/eva/vision/app/insights.py`:
+  - replaced pass-through summary serialization (`insight.summary.model_dump(...)`) with explicit schema-shaped summary payload.
+  - outbound `InsightMessage.summary` now includes only protocol fields:
+    - `one_liner`
+    - `what_changed`
+    - `severity`
+    - `tags`
+- This guarantees QuickVision -> EVA -> UI insight payloads never transmit narration fields (for example `tts_response`), even if the upstream insight service still returns them.
+
+### Files changed
+- `packages/eva/vision/app/insights.py`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+
+### Manual run instructions
+1. Start Executive, Vision, EVA, and UI.
+2. Trigger an insight (`insight_test` or automatic trigger).
+3. Confirm UI Latest Insight panel shows no `Spoken line` row.
+4. (Optional hard check) inspect the inbound insight payload in UI logs/devtools and verify `summary` does not include `tts_response`.
+
+### Notes
+- Upstream narration can still exist internally in insight-service responses, but QuickVision now strips narration before protocol emission.
+
+## Iteration 77 — Executive writes `wm_insight` (single-writer) when serving `/insight`
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Extended executive working-memory entry types in `packages/eva/executive/src/server.ts`:
+  - added `WorkingMemoryWmInsightEntry` with fields:
+    - `type: "wm_insight"`
+    - `ts_ms`, `source`, `clip_id`, `trigger_frame_id`
+    - `severity`, `one_liner`, `what_changed`, `tags`
+    - optional `narration`
+    - `usage` token/cost object
+- Added `buildWorkingMemoryInsightEntry(...)` helper in executive:
+  - maps `/insight` request + generated insight result into a normalized `wm_insight` JSONL entry
+  - stores narration under dedicated optional `narration` field (sourced from model `tts_response` when present)
+- Updated `/insight` handler in executive:
+  - after successful insight generation, appends one `wm_insight` entry to `working_memory.log`
+  - write path uses the existing `workingMemoryWriteQueue` (same serial single-writer queue used by `/respond` and `/events`)
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+- Static verification:
+  - confirmed `wm_insight` type + writer wiring in `server.ts` (`buildWorkingMemoryInsightEntry` + `/insight` queue append path)
+
+### Manual run instructions
+1. Start Executive (with valid OpenAI key), Vision, EVA, and UI.
+2. Trigger an insight (`insight_test` or automatic trigger).
+3. Verify working memory contains a new `wm_insight` JSONL row:
+   - `tail -n 20 packages/eva/memory/working_memory.log`
+   - confirm line includes `"type":"wm_insight"` and expected fields (`clip_id`, `trigger_frame_id`, `one_liner`, optional `narration`).
+
+### Notes
+- `wm_insight` writes are now serialized with all other executive memory writes via the single `SerialTaskQueue`.
+
+## Iteration 78 — UI: remove “Spoken line” rendering + remove insight auto-speak behavior
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated UI insight handling in `packages/ui/src/main.tsx`:
+  - disabled `maybeAutoSpeakInsight(...)` behavior so incoming `insight` messages no longer trigger speech playback.
+- Removed UI reliance on `insight.summary.tts_response`:
+  - removed transitional narration extraction path from insight payloads.
+- Removed “Spoken line” rendering from **Latest insight** panel.
+- Optional quick win applied:
+  - updated hardcoded UI title from `Iteration 54` to `Iteration 78`.
+
+### Files changed
+- `packages/ui/src/main.tsx`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva && npm run build`
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+
+### Manual run instructions
+1. Start Executive, Vision, EVA, and UI.
+2. Trigger a new insight (`insight_test` or auto-trigger).
+3. Confirm UI **Latest insight** panel does not show any “Spoken line” section.
+4. Confirm no audio playback is triggered when insight messages arrive.
+
+### Notes
+- Insight messages are now treated as silent factual UI updates; speech playback for chat responses is planned next.
+
+## Iteration 79 — UI: auto-speak chat replies (TextOutputMessage)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated UI chat-reply handling in `packages/ui/src/main.tsx`:
+  - wired auto-speak to incoming `TextOutputMessage` payloads.
+  - when chat reply arrives (WS, or HTTP fallback when WS is disconnected), UI now calls speech client with `text_output.text`.
+- Added auto-speak guardrails for chat replies:
+  - dedupe guard via `lastSpokenTextOutputRequestIdRef` (tracks last spoken `request_id`).
+  - cooldown guard via `chatAutoSpeakLastStartedAtMsRef` using `speech.autoSpeak.cooldownMs`.
+  - empty/whitespace reply text is skipped.
+- Kept existing speech UX and controls, but clarified labels for chat behavior:
+  - status line now shows **Chat Auto Speak**.
+  - toggle button label now shows **Chat Auto Speak: on/off**.
+  - toggle log message now says `Chat auto-speak enabled/disabled`.
+  - autoplay notice text now references chat auto-speak on replies.
+- Updated speech auto-play log text:
+  - `Auto-speak played chat reply.`
+- Updated UI title marker:
+  - `Eva UI (Iteration 79)`.
+
+### Files changed
+- `packages/ui/src/main.tsx`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva && npm run build`
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+
+### Manual run instructions
+1. Start Executive, Vision, EVA, and UI.
+2. In UI, click **Enable Audio** once.
+3. Send chat text through the chat panel (`POST /text` path).
+4. Confirm assistant reply is rendered and auto-spoken.
+5. Send repeated/duplicate reply payloads with same `request_id` and confirm no duplicate speech playback.
+6. Send replies quickly and confirm cooldown gate suppresses speech starts within configured cooldown window.
+
+### Notes
+- Insights remain silent (no auto-speak trigger from `insight` messages).
+- Chat auto-speak now uses `TextOutputMessage.text` as the speech source.
+
+## Iteration 80 — Executive: treat recent events as system metadata (not user-facing telemetry)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated respond system prompt generation in `packages/eva/executive/src/prompts/respond.ts` (`buildRespondSystemPrompt`):
+  - added explicit guidance that live `wm_event` lines are environment-state context, not user-facing telemetry dumps.
+  - added instruction to default to natural-language summaries of what is happening.
+  - added instruction to avoid repeating raw telemetry fields (for example track IDs, speed metrics, detector key/value payloads) unless user explicitly asks for low-level/debug details.
+
+### Files changed
+- `packages/eva/executive/src/prompts/respond.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+- Prompt static check:
+  - confirmed new guidance lines are present in `buildRespondSystemPrompt` for `wm_event` handling and telemetry suppression.
+
+### Manual run instructions
+1. Start Executive, Vision, EVA, and UI.
+2. Generate a few live detector events (ROI/line/motion/etc.).
+3. Ask chat: “what are the recent events?”
+4. Confirm response is natural-language context (for example “Two people moved quickly past each other…”), not a raw telemetry/key-value dump.
+5. Ask explicitly for details/debug fields and confirm lower-level telemetry can be provided when requested.
+
+### Notes
+- This iteration is prompt-behavior guidance only; no protocol/schema/runtime routing changes were introduced.
+
+## Iteration 81 — Executive: add an “Environment Snapshot” formatter
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Added environment snapshot formatter in `packages/eva/executive/src/memcontext/live_events.ts`:
+  - new `buildEnvironmentSnapshot(events)` helper that converts recent `wm_event` entries into:
+    - a short paragraph summary
+    - 3–7 plain-English bullets
+  - includes event-pattern/severity/source summarization and no-event fallback snapshot output.
+- Updated respond memory-context assembly in `packages/eva/executive/src/server.ts`:
+  - now injects **Environment snapshot (derived from live events in the last ~2 minutes)** near the top of memory context.
+  - keeps raw event lines as fallback/debug under:
+    - `Live event raw lines (debug fallback):`
+- Updated imports/wiring:
+  - `buildEnvironmentSnapshot` is now imported and used alongside `readRecentWmEvents`.
+
+### Files changed
+- `packages/eva/executive/src/memcontext/live_events.ts`
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+
+### Manual run instructions
+1. Start Executive, Vision, EVA, and UI.
+2. Generate multiple live events (ROI, motion, line-cross, etc.).
+3. Ask chat: “What are the recent events?”
+4. Confirm responses remain natural and stable even with heavier event flow.
+5. Optional debug check:
+   - verify context still includes raw fallback event lines for low-level grounding when needed.
+
+### Notes
+- Snapshot-first + raw-fallback structure is now in place, improving natural-language event handling without removing debug traceability.
+
+## Iteration 82 — Cleanup + docs
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated active UI docs to match silent-insight + spoken-chat runtime in `packages/ui/README.md`:
+  - current behavior marker updated to Iteration 79.
+  - removed outdated insight auto-speak/`tts_response` guidance.
+  - documented chat auto-speak source as `text_output.text` with cooldown + dedupe behavior.
+  - documented that insights are silent factual UI updates.
+  - clarified control labels (`Chat Auto Speak`).
+- Updated Vision docs in `packages/eva/vision/README.md`:
+  - removed outdated claim that emitted insight payload preserves `summary.tts_response`.
+  - documented schema-aligned emitted summary fields (`one_liner`, `what_changed`, `severity`, `tags`) and narration-field stripping.
+- Updated root status summary in `README.md`:
+  - now reflects Iteration 82 behavior (silent insights, chat auto-speak, narration internal-only).
+- Added explicit historical supersession notes to older implementation-plan docs that describe the previous insight auto-speak model:
+  - `docs/implementation-plan-29-35.md`
+  - `docs/implementation-plan-36-43.md`
+  - `docs/implementation-plan-44-58.md`
+  - each now points to `docs/implementation-plan-75-82.md` for current behavior.
+
+### Files changed
+- `README.md`
+- `packages/ui/README.md`
+- `packages/eva/vision/README.md`
+- `docs/implementation-plan-29-35.md`
+- `docs/implementation-plan-36-43.md`
+- `docs/implementation-plan-44-58.md`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+- Doc consistency checks:
+  - active READMEs no longer claim insight spoken-line rendering or insight-triggered auto-speak.
+  - protocol docs remain authoritative for silent `InsightSummary` contract.
+
+### Manual run instructions
+1. Start Executive, Vision, EVA, and UI.
+2. Trigger an insight and confirm:
+   - UI shows factual insight panel only (no spoken line).
+   - no insight-triggered audio playback occurs.
+3. Send chat text and confirm:
+   - assistant `text_output` reply is auto-spoken (after one-time Enable Audio unlock).
+4. Review updated docs:
+   - `README.md`
+   - `packages/ui/README.md`
+   - `packages/eva/vision/README.md`
+
+### Notes
+- Runtime behavior and active docs are now aligned on: **silent insights, spoken chat**.

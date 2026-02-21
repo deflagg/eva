@@ -99,6 +99,11 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 64** (Agent `/respond` long-term retrieval now reads from LanceDB tables only; JSON long-term read fallback removed).
+Implemented through **Iteration 82**.
+
+Key current behavior:
+- Insight protocol/UI is **silent + factual** (`one_liner`, `what_changed`, `tags`, severity/ids/usage).
+- Narration text is internal-only working memory (`wm_insight.narration`, executive single-writer path).
+- UI auto-speaks **chat replies** (`text_output.text`) via `/speech`.
 
 > **Hard cutover note:** Long-term memory is now LanceDB. Existing JSON long-term memory is not used.

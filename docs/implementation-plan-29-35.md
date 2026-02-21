@@ -2,6 +2,12 @@
 
 ## docs/implementation-plan-29-35.md — Eva Speech Endpoint (Edge TTS) + Auto Speak
 
+> Historical plan note (superseded): this document describes an older insight auto-speak model.
+> Current behavior is defined by `docs/implementation-plan-75-82.md`:
+> - insight UI/protocol is silent/factual
+> - narration is internal-only working memory
+> - auto-speak target is chat `text_output`, not insights.
+
 Implement the system below in SMALL ITERATIONS so diffs stay small and reviewable. Do NOT do big refactors. Do NOT “get ahead” of the current iteration. Each iteration must end with:
 
 * build/lint/typecheck passing (or explicit “no tests yet; manual test steps included”)

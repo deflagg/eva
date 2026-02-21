@@ -79,7 +79,6 @@ export const DetectionsMessageSchema = z.object({
 
 export const InsightSummarySchema = z.object({
   one_liner: z.string().min(1),
-  tts_response: z.string().min(1),
   what_changed: z.array(z.string().min(1)),
   severity: InsightSeveritySchema,
   tags: z.array(z.string().min(1)),

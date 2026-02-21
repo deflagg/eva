@@ -152,11 +152,18 @@ class InsightBuffer:
         except VisionAgentClientError as exc:
             raise InsightError(exc.code, str(exc)) from exc
 
+        summary_payload = {
+            "one_liner": insight.summary.one_liner,
+            "what_changed": list(insight.summary.what_changed),
+            "severity": insight.summary.severity,
+            "tags": list(insight.summary.tags),
+        }
+
         return InsightMessage(
             clip_id=clip_id,
             trigger_frame_id=trigger.frame_id,
             ts_ms=int(time.time() * 1000),
-            summary=insight.summary.model_dump(exclude_none=True),
+            summary=summary_payload,
             usage=insight.usage.model_dump(exclude_none=True),
         )
 

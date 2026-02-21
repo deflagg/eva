@@ -91,7 +91,6 @@ class DetectionsMessage(ProtocolMessage):
 
 class InsightSummary(BaseModel):
     one_liner: str = Field(min_length=1)
-    tts_response: str = Field(min_length=1)
     what_changed: list[str]
     severity: InsightSeverity
     tags: list[str]

@@ -1,5 +1,9 @@
 ## docs/implementation-plan-44-??.md — Replace VisionAgent with `agent`, Rename QuickVision→Vision, Add EVA Text + Memory
 
+> Historical plan note (partially superseded): architecture/memory migration details here remain useful,
+> but earlier references to insight `tts_response` + insight auto-speak are no longer current.
+> For current speech/insight behavior, use `docs/implementation-plan-75-82.md`.
+
 Implement the system below in SMALL ITERATIONS so diffs stay small and reviewable. Do NOT do big refactors. Do NOT “get ahead” of the current iteration. Each iteration must end with:
 
 * build/lint/typecheck passing (or explicit “no tests yet; manual test steps included”)

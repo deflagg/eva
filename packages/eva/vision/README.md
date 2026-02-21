@@ -2,7 +2,7 @@
 
 Python daemon that hosts YOLO inference and (optional) insight triggering.
 
-## Current behavior (Iteration 51)
+## Current behavior (Iteration 82)
 
 - HTTP health endpoint at `/health`
 - WebSocket endpoint at `/infer`
@@ -13,7 +13,9 @@ Python daemon that hosts YOLO inference and (optional) insight triggering.
 - Insight path:
   - calls Agent via HTTP (`insights.agent_url`)
   - emits protocol `insight` on success
-  - preserves `summary.tts_response`
+  - emits schema-aligned summary fields only:
+    - `one_liner`, `what_changed`, `severity`, `tags`
+  - strips narration-style fields (for example `tts_response`) before protocol emission
 
 ## Configuration (Dynaconf)
 
