@@ -3033,3 +3033,390 @@
 ### Notes
 - Retrieval injection is intentionally bounded and relevance-filtered to avoid prompt bloat.
 - This completes the 44–58 implementation-plan sequence.
+
+## Iteration 59 — Add memory reset scripts + npm hooks (safe path guardrails)
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Added reset script utilities in `packages/eva/agent/scripts/reset-common.mjs`:
+  - loads Agent config using the same local-first search order as runtime (`agent.config.local.json`, then `agent.config.json`)
+  - resolves `memory.dir` relative to the loaded config file path (same rule as Agent config loader)
+  - enforces hard safety guardrails before any deletion:
+    - resolved memory dir must end with `packages/eva/memory`
+    - `persona.md` and `experience_tags.json` must both exist in that directory
+- Added `packages/eva/agent/scripts/reset-working.mjs`:
+  - deletes `working_memory.log`
+  - deletes `cache/personality_tone.json`
+  - ensures `cache/` exists after run
+- Added `packages/eva/agent/scripts/reset-session.mjs`:
+  - deletes `working_memory.log`
+  - deletes `short_term_memory.db`
+  - deletes `cache/**` by removing `cache/` directory
+  - ensures `cache/` exists after run
+- Added `packages/eva/agent/scripts/reset-all.mjs`:
+  - deletes working/session runtime files above
+  - deletes `vector_db/**` by removing `vector_db/` directory
+  - ensures both `cache/` and `vector_db/` exist after run
+- Added npm scripts in `packages/eva/agent/package.json`:
+  - `mem:reset:working`
+  - `mem:reset:session`
+  - `mem:reset:all`
+
+### Files changed
+- `packages/eva/agent/package.json`
+- `packages/eva/agent/scripts/reset-common.mjs`
+- `packages/eva/agent/scripts/reset-working.mjs`
+- `packages/eva/agent/scripts/reset-session.mjs`
+- `packages/eva/agent/scripts/reset-all.mjs`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/agent && npm run build` passes.
+- Scope checks with dummy runtime files pass for all three scripts:
+  - `reset-working` removes only `working_memory.log` + `cache/personality_tone.json` and keeps other runtime files.
+  - `reset-session` removes `working_memory.log`, `short_term_memory.db`, and `cache/**` while preserving `vector_db/**`.
+  - `reset-all` removes working/session runtime files plus `vector_db/**`, then recreates required directories.
+- Guardrail sanity checks during script runs:
+  - committed files `packages/eva/memory/persona.md` and `packages/eva/memory/experience_tags.json` remain present.
+
+### Manual run instructions
+1. Working reset:
+   - `cd packages/eva/agent && npm run mem:reset:working`
+2. Session reset:
+   - `cd packages/eva/agent && npm run mem:reset:session`
+3. Full reset:
+   - `cd packages/eva/agent && npm run mem:reset:all`
+
+### Notes
+- Operational expectation remains: stop Eva/Agent before running reset scripts to avoid transient write/delete races.
+- Reset scripts intentionally do not touch committed memory source files (`persona.md`, `experience_tags.json`).
+
+## Iteration 60 — Session-aware EVA tone cache with decay + `/respond` prompt injection
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Added new tone state module: `packages/eva/agent/src/memory/tone.ts` with required API:
+  - `loadToneState(memoryDir)`
+  - `getSessionKey(sessionId?)`
+  - `getToneForSession(state, sessionKey, nowMs)`
+  - `updateToneForSession(state, sessionKey, tone, nowMs, reason?)`
+  - `saveToneStateAtomic(memoryDir, state)`
+- Implemented tone cache schema v1 and persistence at:
+  - `packages/eva/memory/cache/personality_tone.json`
+  - state now includes top-level defaults + per-session map + bounded history.
+- Implemented session-aware fallback behavior:
+  - missing `session_id` resolves to deterministic session key: `default`.
+- Implemented decay behavior:
+  - per-session `expires_ts_ms` is enforced by `getToneForSession(...)`
+  - expired/missing session tone falls back to `default_tone`.
+- Added allowed tone list in one place (`tone.ts`):
+  - `neutral, calm, friendly, playful, serious, technical, empathetic, urgent`
+- Implemented unknown-tone handling:
+  - unknown model tone labels map to `neutral` and emit warning log.
+- Updated `/respond` pipeline in `packages/eva/agent/src/server.ts`:
+  - reads current session tone at request start
+  - injects current tone + session key into system prompt before model call
+  - prompt now instructs model to maintain current tone unless natural shift or explicit user request
+  - after successful tool-call result, writes back `meta.tone` via tone cache update with refreshed expiry.
+- Updated respond prompt builder in `packages/eva/agent/src/prompts/respond.ts`:
+  - includes current tone directive
+  - constrains `meta.tone` to allowed tones list in instructions.
+
+### Files changed
+- `packages/eva/agent/src/memory/tone.ts`
+- `packages/eva/agent/src/server.ts`
+- `packages/eva/agent/src/prompts/respond.ts`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/agent && npm run build` passes.
+- `cd packages/eva && npm run build` passes.
+- Two real `/respond` calls with the same session id (`tone-demo-60`) return stable tone and persist to cache:
+  - response 1 tone: `calm`
+  - response 2 tone: `calm`
+  - cache session tone (`sessions["tone-demo-60"].tone`): `calm`
+- Tone module smoke harness passes:
+  - persisted tone remains stable for same session before expiry
+  - expired session tone falls back to `neutral`
+  - unknown tone maps to `neutral` with warning.
+
+### Manual run instructions
+1. Start Agent:
+   - `cd packages/eva/agent`
+   - `npm run dev`
+2. Send two `/respond` requests with same `session_id` and inspect tone cache:
+   - `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"hello","session_id":"tone-demo"}'`
+   - `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"continue","session_id":"tone-demo"}'`
+   - `cat packages/eva/memory/cache/personality_tone.json`
+3. For local expiry check, temporarily reduce `TONE_SESSION_TTL_MS` in `src/memory/tone.ts`, rebuild, run one request, wait past TTL, then verify fallback tone behavior on next request.
+
+### Notes
+- Tone smoothing and explicit future-only tone-shift rules remain planned for Iteration 61.
+
+## Iteration 61 — Tone smoothing + explicit “change tone” handling (future-only)
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Extended tone cache session state in `packages/eva/agent/src/memory/tone.ts` with smoothing metadata:
+  - optional `pending` candidate tone (`tone`, `count`, `updated_ts_ms`)
+- Added smoothing controls in `tone.ts`:
+  - `TONE_SMOOTHING_REPEAT_TURNS` default `2`
+  - updated `updateToneForSession(...)` to apply future-turn smoothing rules:
+    - immediate apply when model tone matches current tone
+    - immediate apply when user explicitly requested a tone change
+    - otherwise hold candidate tone until repeated for N turns, then commit
+- Kept smoothing strictly future-turn only:
+  - response text is generated first
+  - tone smoothing only affects what is stored for later turns.
+- Added explicit tone-change detection in `packages/eva/agent/src/server.ts`:
+  - `isExplicitToneChangeRequest(...)` based on direct tone-change phrasing patterns
+  - passed into `updateToneForSession(...)` as `userRequestedToneChange`
+- Updated respond system prompt in `packages/eva/agent/src/prompts/respond.ts`:
+  - added required instruction:
+    - if user asks to change tone, comply and set `meta.tone` accordingly
+  - clarified that `meta.tone` updates stored future tone state.
+- Improved tone history debugging in `tone.ts`:
+  - every update writes bounded history with compact reason strings
+  - reasons include smoothing hold/commit state and explicit-change markers.
+
+### Files changed
+- `packages/eva/agent/src/memory/tone.ts`
+- `packages/eva/agent/src/server.ts`
+- `packages/eva/agent/src/prompts/respond.ts`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/agent && npm run build` passes.
+- `cd packages/eva && npm run build` passes.
+- Tone smoothing smoke harness passes:
+  - first non-explicit tone drift is held (pending set)
+  - repeated drift commits after N turns
+  - explicit tone request commits immediately
+  - history retains reason strings.
+- Real `/respond` check for explicit shift persistence (`session_id=tone-demo-61`):
+  - response 1 tone: `neutral`
+  - response 2 text: “Be more serious in your tone.” -> tone: `serious`
+  - response 3 tone remained `serious`
+  - cache session tone: `serious` (no pending candidate).
+
+### Manual run instructions
+1. Start Agent:
+   - `cd packages/eva/agent`
+   - `npm run dev`
+2. Verify explicit tone shift persists:
+   - `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"Give me a short status update.","session_id":"tone-demo"}'`
+   - `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"Be more serious in your tone.","session_id":"tone-demo"}'`
+   - `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"Continue with the same tone.","session_id":"tone-demo"}'`
+   - `cat packages/eva/memory/cache/personality_tone.json`
+
+### Notes
+- Smoothing now applies only to stored tone state for subsequent turns and does not rewrite already-generated response text.
+
+## Iteration 62 — Add LanceDB dependency + minimal adapter (no runtime behavior change)
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Added pinned LanceDB dependency in `packages/eva/agent/package.json`:
+  - `@lancedb/lancedb: "0.26.2"`
+- Added minimal LanceDB adapter module:
+  - `packages/eva/agent/src/vectorstore/lancedb.ts`
+  - exports:
+    - `deriveLanceDbDir(memoryDir)`
+    - `openDb(lancedbDir)`
+    - `getOrCreateTable(db, name, schema)`
+    - `mergeUpsertById(table, rows)`
+    - `queryTopK(table, queryVector, k)`
+- Implemented required LanceDB conventions in the adapter:
+  - deterministic DB directory derivation:
+    - `path.join(memoryDir, "vector_db", "lancedb")`
+  - `openDb(...)` ensures DB directory exists on first use (`mkdir -p` before connect)
+  - merge upsert uses `mergeInsert(["id"])` with:
+    - `whenMatchedUpdateAll()`
+    - `whenNotMatchedInsertAll()`
+  - vector search path explicitly targets `vector` column.
+
+### Files changed
+- `packages/eva/agent/package.json`
+- `packages/eva/agent/package-lock.json`
+- `packages/eva/agent/src/vectorstore/lancedb.ts`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/agent && npm i && npm run build` passes.
+- `cd packages/eva && npm run build` passes.
+- Local LanceDB adapter smoke harness passes:
+  - create temp LanceDB dir from derived memory path
+  - create/open table via `getOrCreateTable(...)`
+  - merge-upsert one row by `id`
+  - query top-1 by vector and get the inserted row back.
+
+### Manual run instructions
+1. Install and build Agent:
+   - `cd packages/eva/agent`
+   - `npm i`
+   - `npm run build`
+2. Run a tiny local adapter smoke check (create table -> upsert -> query) with Node script importing:
+   - `dist/vectorstore/lancedb.js`
+
+### Notes
+- This iteration adds LanceDB wiring in isolation only; Agent runtime memory behavior remains unchanged.
+- `/jobs/daily` and `/respond` cutover to LanceDB is planned for Iterations 63–64.
+
+## Iteration 63 — Cut over `/jobs/daily` to LanceDB only + docs alignment
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Updated Agent daily worker in `packages/eva/agent/src/server.ts` to persist long-term memory in LanceDB only:
+  - removed JSON index upsert/write path from `/jobs/daily`
+  - `/jobs/daily` now writes to LanceDB tables:
+    - `long_term_experiences`
+    - `long_term_personality`
+  - LanceDB directory now resolved as:
+    - `packages/eva/memory/vector_db/lancedb`
+- Added LanceDB table schema + row normalization helpers in `server.ts` for daily ingestion/cache refresh.
+- Kept cache refresh behavior unchanged:
+  - still updates:
+    - `packages/eva/memory/cache/core_experiences.json`
+    - `packages/eva/memory/cache/core_personality.json`
+- Added observability updates:
+  - `/health` now includes LanceDB directory + table names
+  - `/jobs/daily` response now includes LanceDB dir/table metadata
+  - startup logs now print LanceDB path and table names
+  - daily job log line reports rows written this run (`experience_upsert_count`, `personality_upsert_count`).
+- Updated docs in same iteration:
+  - `packages/eva/agent/README.md` now documents LanceDB tables/directory for `/jobs/daily`
+  - root `README.md` status line updated to Iteration 63.
+
+### Files changed
+- `packages/eva/agent/src/server.ts`
+- `packages/eva/agent/README.md`
+- `README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/agent && npm run build` passes.
+- `cd packages/eva && npm run build` passes.
+- `/jobs/daily` runtime check passes with LanceDB response metadata:
+  - response includes `lancedb.dir` + table names
+  - LanceDB table directories created under:
+    - `packages/eva/memory/vector_db/lancedb/long_term_experiences.lance`
+    - `packages/eva/memory/vector_db/lancedb/long_term_personality.lance`
+- Confirmed JSON index files are no longer written by `/jobs/daily`:
+  - `packages/eva/memory/vector_db/long_term_experiences/index.json` mtime unchanged
+  - `packages/eva/memory/vector_db/long_term_personality/index.json` mtime unchanged.
+
+### Manual run instructions
+1. Start Agent:
+   - `cd packages/eva/agent`
+   - `npm run dev`
+2. Run daily worker:
+   - `curl -sS -X POST http://127.0.0.1:8791/jobs/daily`
+3. Inspect LanceDB artifacts:
+   - `ls -la packages/eva/memory/vector_db/lancedb`
+4. Verify no JSON `index.json` updates occur for long-term stores.
+
+### Notes
+- This iteration performs a hard write-path cutover for daily long-term persistence to LanceDB.
+- `/respond` long-term retrieval still uses legacy JSON read path until Iteration 64 cutover.
+
+## Iteration 64 — Cut over `/respond` long-term retrieval to LanceDB only
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Updated Agent respond retrieval pipeline in `packages/eva/agent/src/server.ts`:
+  - removed JSON long-term read/query usage from `/respond` retrieval context assembly
+  - long-term retrieval now uses LanceDB tables only:
+    - `long_term_experiences`
+    - `long_term_personality`
+- `/respond` retrieval now:
+  - opens LanceDB at `packages/eva/memory/vector_db/lancedb`
+  - gets/creates long-term tables with shared schema
+  - runs vector search top-K per table
+  - normalizes/filter results and injects them into prompt memory context
+- Added graceful LanceDB-empty handling in retrieval context:
+  - injects explicit line: `no relevant long-term memory found`
+  - continues normal response generation without errors/fabrication.
+- Removed legacy JSON long-term read-path exposure from health/log output so runtime behavior reflects LanceDB-only retrieval.
+- Updated docs:
+  - `packages/eva/agent/README.md` respond section now states long-term retrieval comes from LanceDB tables and notes empty-hit behavior.
+  - root `README.md` status line updated to Iteration 64.
+
+### Files changed
+- `packages/eva/agent/src/server.ts`
+- `packages/eva/agent/README.md`
+- `README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/agent && npm run build` passes.
+- `cd packages/eva && npm run build` passes.
+- Empty-LanceDB + corrupted legacy JSON regression check passes:
+  - moved/removing active LanceDB dir for test run (forcing empty tables)
+  - intentionally corrupted legacy JSON index files (`not-valid-json`)
+  - `/respond` still returned `200` valid response payload
+  - confirms `/respond` no longer depends on legacy JSON long-term reads.
+
+### Manual run instructions
+1. Start Agent:
+   - `cd packages/eva/agent`
+   - `npm run dev`
+2. Call respond endpoint:
+   - `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"What should I focus on next?"}'`
+3. (Optional hard check) temporarily corrupt legacy JSON index files and confirm `/respond` still succeeds, proving LanceDB-only long-term retrieval path.
+
+### Notes
+- This iteration completes long-term retrieval cutover to LanceDB for `/respond`.
+- Full dead-code/doc cleanup for legacy JSON vector-store helpers remains Iteration 65.
+
+## Iteration 65 — Cleanup: remove dead JSON vector-store code + final docs sweep
+
+**Status:** ✅ Completed (2026-02-20)
+
+### Completed
+- Removed dead JSON long-term vector-store code paths in `packages/eva/agent/src/server.ts`:
+  - removed legacy JSON read helpers used by old long-term retrieval path
+  - removed remaining legacy JSON read-path references from runtime behavior/logging
+- Kept active long-term behavior fully LanceDB-based for both:
+  - `/jobs/daily` persistence
+  - `/respond` long-term retrieval
+- Final docs sweep:
+  - updated `docs/implementation-plan-44-58.md` memory layout section to stop implying old Chroma/JSON persistence
+  - updated root `README.md` with one-time operational note:
+    - **Hard cutover: long-term memory is now LanceDB. Existing JSON long-term memory is not used.**
+  - kept `packages/eva/agent/README.md` aligned with LanceDB-only long-term retrieval wording.
+
+### Files changed
+- `packages/eva/agent/src/server.ts`
+- `docs/implementation-plan-44-58.md`
+- `README.md`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/agent && npm run build`
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+- Runtime smoke checks pass:
+  - `POST /respond` returns `200` with valid payload
+  - `POST /jobs/daily` returns `200` and includes LanceDB metadata
+- Confirmed no active docs claim JSON/Chroma as current long-term storage behavior.
+
+### Manual run instructions
+1. Start Agent:
+   - `cd packages/eva/agent`
+   - `npm run dev`
+2. Verify respond path:
+   - `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"Any priorities from memory?"}'`
+3. Verify daily job path:
+   - `curl -sS -X POST http://127.0.0.1:8791/jobs/daily`
+4. Confirm root README includes hard-cutover note.
+
+### Notes
+- Iterations 59–65 are now complete.

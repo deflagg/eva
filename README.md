@@ -99,4 +99,6 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 58** (Agent `/respond` now injects bounded memory retrieval context from short-term SQLite summaries, long-term vector stores, and core cache files).
+Implemented through **Iteration 64** (Agent `/respond` long-term retrieval now reads from LanceDB tables only; JSON long-term read fallback removed).
+
+> **Hard cutover note:** Long-term memory is now LanceDB. Existing JSON long-term memory is not used.

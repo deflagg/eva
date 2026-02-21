@@ -170,9 +170,10 @@ packages/eva/memory/
 │   ├── personality_tone.json
 │   ├── core_experiences.json
 │   └── recent_experiences.json
-└── vector_db/                      # gitignored (Chroma persistence)
-    ├── long_term_experiences/
-    └── long_term_personality/
+└── vector_db/                      # gitignored
+    └── lancedb/                    # LanceDB directory
+        ├── long_term_experiences
+        └── long_term_personality
 ```
 
 Retention rules (LOCKED):

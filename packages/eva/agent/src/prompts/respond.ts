@@ -10,10 +10,14 @@ export interface RespondSystemPromptInput {
   memoryContext?: string;
   memoryApproxTokens?: number;
   memoryTokenBudget?: number;
+  currentTone: string;
+  toneSessionKey: string;
+  allowedTones: readonly string[];
 }
 
 export function buildRespondSystemPrompt(input: RespondSystemPromptInput): string {
   const allowedConceptsText = input.allowedConcepts.join(', ');
+  const allowedTonesText = input.allowedTones.join(', ');
 
   const memoryHeader =
     typeof input.memoryApproxTokens === 'number' && typeof input.memoryTokenBudget === 'number'
@@ -28,6 +32,13 @@ export function buildRespondSystemPrompt(input: RespondSystemPromptInput): strin
     'Persona guidance:',
     input.persona,
     '',
+    'Current EVA tone (session-scoped):',
+    `- session_key: ${input.toneSessionKey}`,
+    `- current_tone: ${input.currentTone}`,
+    '- Maintain this tone in your reply unless conversation naturally shifts or the user explicitly requests a tone change.',
+    '- If the user asks you to change your tone, comply and set meta.tone accordingly.',
+    '- Any meta.tone change affects stored tone for future turns, not the already-written reply text.',
+    '',
     'Memory usage guidance:',
     '- Use retrieved memory only when relevant to the user request.',
     '- Prefer recent short-term summaries for recency; use long-term/core memory for stable context.',
@@ -38,7 +49,7 @@ export function buildRespondSystemPrompt(input: RespondSystemPromptInput): strin
     '',
     'Output constraints:',
     '- text: the user-facing reply, concise and practical.',
-    '- meta.tone: a short tone label (for example calm, urgent, informative).',
+    `- meta.tone: one tone label from this allowed list: ${allowedTonesText}`,
     `- meta.concepts: 1-${input.maxConcepts} concept tags, each chosen from the allowed list only.`,
     '- meta.surprise: number between 0 and 1 indicating novelty/surprise.',
     '- meta.note: one short internal note about why this response was chosen.',

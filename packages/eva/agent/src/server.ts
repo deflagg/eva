@@ -6,18 +6,29 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { complete, getModel, validateToolCall } from '@mariozechner/pi-ai';
+import { Field, FixedSizeList, Float32, Float64, List, Schema, Utf8 } from 'apache-arrow';
 import { z } from 'zod';
 
+import {
+  ALLOWED_TONES,
+  DEFAULT_TONE,
+  getSessionKey,
+  getToneForSession,
+  loadToneState,
+  normalizeToneLabel,
+  saveToneStateAtomic,
+  updateToneForSession,
+} from './memory/tone.js';
 import type { AgentConfig, AgentSecrets } from './config.js';
 import { buildInsightSystemPrompt, buildInsightUserPrompt } from './prompts/insight.js';
 import { buildRespondSystemPrompt, buildRespondUserPrompt } from './prompts/respond.js';
 import { INSIGHT_TOOL, INSIGHT_TOOL_NAME, type InsightSummary } from './tools/insight.js';
 import { RESPOND_TOOL, RESPOND_TOOL_NAME, type RespondPayload } from './tools/respond.js';
+import { deriveLanceDbDir, getOrCreateTable, mergeUpsertById, openDb, queryTopK } from './vectorstore/lancedb.js';
 
 const HARD_MAX_FRAMES = 6;
 const WORKING_MEMORY_LOG_FILENAME = 'working_memory.log';
 const SHORT_TERM_MEMORY_DB_FILENAME = 'short_term_memory.db';
-const VECTOR_DB_INDEX_FILENAME = 'index.json';
 const WORKING_MEMORY_WINDOW_MS = 60 * 60 * 1000;
 const DAY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const HOURLY_SUMMARY_MIN_BULLETS = 3;
@@ -68,6 +79,14 @@ const PERSONALITY_TAG_RULES: Array<{ pattern: RegExp; tag: string }> = [
 ];
 
 const PERSONALITY_SIGNAL_PATTERN = /\b(prefer\w*|preference|tone|calm|urgent|decision|follow[-_\s]?up|planning|safety)\b/i;
+
+const EXPLICIT_TONE_CHANGE_PATTERNS: RegExp[] = [
+  /\b(change|switch|adjust)\s+(your\s+)?tone\b/i,
+  /\b(be|sound|talk|write)\s+(more|less)\s+(serious|calm|friendly|playful|technical|empathetic|urgent|formal|casual)\b/i,
+  /\b(use|keep)\s+(a\s+)?(more\s+|less\s+)?(serious|calm|friendly|playful|technical|empathetic|urgent|formal|casual)\s+tone\b/i,
+  /\b(in|with)\s+a\s+(more\s+|less\s+)?(serious|calm|friendly|playful|technical|empathetic|urgent|formal|casual)\s+tone\b/i,
+  /\b(no\s+jokes|stop\s+joking)\b/i,
+];
 
 const SHORT_TERM_MEMORY_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS short_term_summaries (
@@ -153,15 +172,14 @@ const VectorStoreEntrySchema = z.object({
   embedding: z.array(z.number()).length(VECTOR_EMBEDDING_DIMENSIONS),
 });
 
-const VectorStoreFileSchema = z.object({
-  version: z.literal(1),
-  kind: z.union([z.literal(VECTOR_STORE_KINDS.experiences), z.literal(VECTOR_STORE_KINDS.personality)]),
-  dimensions: z.literal(VECTOR_EMBEDDING_DIMENSIONS),
-  entries: z.array(VectorStoreEntrySchema),
-});
-
 type VectorStoreEntry = z.infer<typeof VectorStoreEntrySchema>;
-type VectorStoreFile = z.infer<typeof VectorStoreFileSchema>;
+
+interface VectorStoreFile {
+  version: 1;
+  kind: VectorStoreKind;
+  dimensions: number;
+  entries: VectorStoreEntry[];
+}
 
 interface InsightUsage {
   input_tokens: number;
@@ -251,8 +269,7 @@ interface DailySummaryResult {
 
 interface RespondMemorySources {
   shortTermMemoryDbPath: string;
-  experienceVectorStorePath: string;
-  personalityVectorStorePath: string;
+  lancedbDir: string;
   coreExperiencesCachePath: string;
   corePersonalityCachePath: string;
 }
@@ -439,6 +456,15 @@ function parseRespondRequest(payload: unknown): RespondRequest {
   }
 
   return parsed.data;
+}
+
+function isExplicitToneChangeRequest(text: string): boolean {
+  const candidate = text.trim();
+  if (!candidate) {
+    return false;
+  }
+
+  return EXPLICIT_TONE_CHANGE_PATTERNS.some((pattern) => pattern.test(candidate));
 }
 
 function parseHourlyJobRequest(payload: unknown | undefined): HourlyJobRequest {
@@ -633,10 +659,12 @@ function sanitizeRespondPayload(
     throw new HttpRequestError(502, 'MODEL_INVALID_TOOL_ARGS', 'Model returned empty respond text.');
   }
 
-  const tone = payload.meta.tone.trim();
-  if (!tone) {
+  const rawTone = payload.meta.tone.trim();
+  if (!rawTone) {
     throw new HttpRequestError(502, 'MODEL_INVALID_TOOL_ARGS', 'Model returned empty tone.');
   }
+
+  const tone = normalizeToneLabel(rawTone, 'respond meta.tone');
 
   const note = payload.meta.note.trim();
   if (!note) {
@@ -965,47 +993,6 @@ async function runHourlyMemoryJob(
   };
 }
 
-function createEmptyVectorStore(kind: VectorStoreKind): VectorStoreFile {
-  return {
-    version: 1,
-    kind,
-    dimensions: VECTOR_EMBEDDING_DIMENSIONS,
-    entries: [],
-  };
-}
-
-async function readVectorStore(storePath: string, expectedKind: VectorStoreKind): Promise<VectorStoreFile> {
-  let raw: string;
-  try {
-    raw = await readFile(storePath, 'utf8');
-  } catch (error) {
-    if (error && typeof error === 'object' && 'code' in error && (error as { code?: string }).code === 'ENOENT') {
-      return createEmptyVectorStore(expectedKind);
-    }
-
-    throw error;
-  }
-
-  let parsedJson: unknown;
-  try {
-    parsedJson = JSON.parse(raw) as unknown;
-  } catch {
-    throw new Error(`[agent] invalid JSON in vector store file: ${storePath}`);
-  }
-
-  const parsed = VectorStoreFileSchema.safeParse(parsedJson);
-  if (!parsed.success) {
-    const details = parsed.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`).join('; ');
-    throw new Error(`[agent] invalid vector store payload in ${storePath}: ${details}`);
-  }
-
-  if (parsed.data.kind !== expectedKind) {
-    throw new Error(`[agent] vector store kind mismatch in ${storePath}: expected ${expectedKind}, found ${parsed.data.kind}`);
-  }
-
-  return parsed.data;
-}
-
 function hashToken(token: string): number {
   let hash = 2166136261;
   for (let i = 0; i < token.length; i += 1) {
@@ -1130,35 +1117,121 @@ function buildPersonalityVectorEntry(
   };
 }
 
-function upsertVectorStoreEntries(
-  vectorStore: VectorStoreFile,
-  entries: VectorStoreEntry[],
-): { vectorStore: VectorStoreFile; upsertCount: number } {
-  if (entries.length === 0) {
-    return {
-      vectorStore,
-      upsertCount: 0,
-    };
+function getLanceTableSchema(): Schema {
+  return new Schema([
+    new Field('id', new Utf8(), false),
+    new Field('ts_ms', new Float64(), false),
+    new Field('source_summary_id', new Float64(), false),
+    new Field('source_created_at_ms', new Float64(), false),
+    new Field('updated_at_ms', new Float64(), false),
+    new Field('text', new Utf8(), false),
+    new Field('tags', new List(new Field('item', new Utf8(), true)), false),
+    new Field('vector', new FixedSizeList(VECTOR_EMBEDDING_DIMENSIONS, new Field('item', new Float32(), true)), false),
+  ]);
+}
+
+function vectorEntryToLanceRow(entry: VectorStoreEntry): Record<string, unknown> {
+  return {
+    id: entry.id,
+    ts_ms: entry.source_created_at_ms,
+    source_summary_id: entry.source_summary_id,
+    source_created_at_ms: entry.source_created_at_ms,
+    updated_at_ms: entry.updated_at_ms,
+    text: entry.text,
+    tags: entry.tags,
+    vector: entry.embedding,
+  };
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
   }
 
-  const byId = new Map<string, VectorStoreEntry>(vectorStore.entries.map((entry) => [entry.id, entry]));
-  const uniqueIncomingIds = new Set<string>();
-
-  for (const entry of entries) {
-    byId.set(entry.id, entry);
-    uniqueIncomingIds.add(entry.id);
+  if (typeof value === 'bigint') {
+    const asNumber = Number(value);
+    return Number.isFinite(asNumber) ? asNumber : null;
   }
 
-  const mergedEntries = Array.from(byId.values()).sort(
-    (a, b) => a.source_created_at_ms - b.source_created_at_ms || a.id.localeCompare(b.id),
-  );
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function normalizeVector(value: unknown): number[] | null {
+  if (Array.isArray(value)) {
+    const normalized = value.map((item) => toFiniteNumber(item)).filter((item): item is number => item !== null);
+    return normalized.length === VECTOR_EMBEDDING_DIMENSIONS ? normalized : null;
+  }
+
+  if (ArrayBuffer.isView(value) && 'length' in value) {
+    const normalized = Array.from(value as unknown as ArrayLike<unknown>)
+      .map((item) => toFiniteNumber(item))
+      .filter((item): item is number => item !== null);
+    return normalized.length === VECTOR_EMBEDDING_DIMENSIONS ? normalized : null;
+  }
+
+  return null;
+}
+
+function normalizeTags(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const tags: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') {
+      continue;
+    }
+
+    const normalized = item.trim().toLowerCase();
+    if (normalized.length === 0 || tags.includes(normalized)) {
+      continue;
+    }
+
+    tags.push(normalized);
+  }
+
+  return tags;
+}
+
+function normalizeLanceRow(row: unknown, kind: VectorStoreKind): VectorStoreEntry | null {
+  if (!row || typeof row !== 'object') {
+    return null;
+  }
+
+  const record = row as Record<string, unknown>;
+  const id = typeof record.id === 'string' ? record.id.trim() : '';
+  const text = typeof record.text === 'string' ? record.text.trim() : '';
+  const vector = normalizeVector(record.vector);
+  const tags = normalizeTags(record.tags);
+
+  if (!id || !text || !vector || tags.length === 0) {
+    console.warn(`[agent] skipping invalid LanceDB ${kind} row`);
+    return null;
+  }
+
+  const sourceSummaryId = toFiniteNumber(record.source_summary_id);
+  const sourceCreatedAtMs = toFiniteNumber(record.source_created_at_ms) ?? toFiniteNumber(record.ts_ms);
+  const updatedAtMs = toFiniteNumber(record.updated_at_ms) ?? sourceCreatedAtMs;
+
+  if (sourceSummaryId === null || sourceCreatedAtMs === null || updatedAtMs === null) {
+    console.warn(`[agent] skipping LanceDB ${kind} row with missing numeric metadata`);
+    return null;
+  }
 
   return {
-    vectorStore: {
-      ...vectorStore,
-      entries: mergedEntries,
-    },
-    upsertCount: uniqueIncomingIds.size,
+    id,
+    source_summary_id: Math.max(0, Math.round(sourceSummaryId)),
+    source_created_at_ms: Math.max(0, Math.round(sourceCreatedAtMs)),
+    updated_at_ms: Math.max(0, Math.round(updatedAtMs)),
+    text,
+    tags,
+    embedding: vector,
   };
 }
 
@@ -1277,8 +1350,7 @@ function selectShortTermSummariesForWindow(
 
 async function runDailyMemoryJob(params: {
   shortTermMemoryDbPath: string;
-  experienceVectorStorePath: string;
-  personalityVectorStorePath: string;
+  lancedbDir: string;
   coreExperiencesCachePath: string;
   corePersonalityCachePath: string;
   nowMs: number;
@@ -1294,31 +1366,90 @@ async function runDailyMemoryJob(params: {
     .filter((row) => shouldPromoteToPersonality(row.summary_text))
     .map((row) => buildPersonalityVectorEntry(row, params.nowMs, params.tagWhitelist));
 
-  const [existingExperienceStore, existingPersonalityStore] = await Promise.all([
-    readVectorStore(params.experienceVectorStorePath, VECTOR_STORE_KINDS.experiences),
-    readVectorStore(params.personalityVectorStorePath, VECTOR_STORE_KINDS.personality),
-  ]);
+  const db = await openDb(params.lancedbDir);
+  let experienceTable: Awaited<ReturnType<typeof getOrCreateTable>> | null = null;
+  let personalityTable: Awaited<ReturnType<typeof getOrCreateTable>> | null = null;
 
-  const experienceUpsert = upsertVectorStoreEntries(existingExperienceStore, experienceEntries);
-  const personalityUpsert = upsertVectorStoreEntries(existingPersonalityStore, personalityEntries);
+  try {
+    const tableSchema = getLanceTableSchema();
 
-  await Promise.all([
-    writeJsonAtomic(params.experienceVectorStorePath, experienceUpsert.vectorStore),
-    writeJsonAtomic(params.personalityVectorStorePath, personalityUpsert.vectorStore),
-    writeJsonAtomic(params.coreExperiencesCachePath, buildCoreExperiencesCache(experienceUpsert.vectorStore, params.nowMs)),
-    writeJsonAtomic(params.corePersonalityCachePath, buildCorePersonalityCache(personalityUpsert.vectorStore, params.nowMs)),
-  ]);
+    experienceTable = await getOrCreateTable(db, VECTOR_STORE_KINDS.experiences, tableSchema);
+    personalityTable = await getOrCreateTable(db, VECTOR_STORE_KINDS.personality, tableSchema);
 
-  return {
-    runAtMs: params.nowMs,
-    windowStartMs,
-    windowEndMs,
-    sourceRowCount: dailyRows.length,
-    experienceUpsertCount: experienceUpsert.upsertCount,
-    personalityUpsertCount: personalityUpsert.upsertCount,
-    totalExperienceCount: experienceUpsert.vectorStore.entries.length,
-    totalPersonalityCount: personalityUpsert.vectorStore.entries.length,
-  };
+    const [experienceMergeResult, personalityMergeResult] = await Promise.all([
+      mergeUpsertById(
+        experienceTable,
+        experienceEntries.map((entry) => vectorEntryToLanceRow(entry)),
+      ),
+      mergeUpsertById(
+        personalityTable,
+        personalityEntries.map((entry) => vectorEntryToLanceRow(entry)),
+      ),
+    ]);
+
+    const [experienceRowsRaw, personalityRowsRaw] = await Promise.all([
+      experienceTable.query().toArray(),
+      personalityTable.query().toArray(),
+    ]);
+
+    const experienceEntriesFromLance = experienceRowsRaw
+      .map((row) => normalizeLanceRow(row, VECTOR_STORE_KINDS.experiences))
+      .filter((entry): entry is VectorStoreEntry => entry !== null)
+      .sort((a, b) => a.source_created_at_ms - b.source_created_at_ms || a.id.localeCompare(b.id));
+
+    const personalityEntriesFromLance = personalityRowsRaw
+      .map((row) => normalizeLanceRow(row, VECTOR_STORE_KINDS.personality))
+      .filter((entry): entry is VectorStoreEntry => entry !== null)
+      .sort((a, b) => a.source_created_at_ms - b.source_created_at_ms || a.id.localeCompare(b.id));
+
+    const experienceStoreForCache: VectorStoreFile = {
+      version: 1,
+      kind: VECTOR_STORE_KINDS.experiences,
+      dimensions: VECTOR_EMBEDDING_DIMENSIONS,
+      entries: experienceEntriesFromLance,
+    };
+
+    const personalityStoreForCache: VectorStoreFile = {
+      version: 1,
+      kind: VECTOR_STORE_KINDS.personality,
+      dimensions: VECTOR_EMBEDDING_DIMENSIONS,
+      entries: personalityEntriesFromLance,
+    };
+
+    await Promise.all([
+      writeJsonAtomic(
+        params.coreExperiencesCachePath,
+        buildCoreExperiencesCache(experienceStoreForCache, params.nowMs),
+      ),
+      writeJsonAtomic(
+        params.corePersonalityCachePath,
+        buildCorePersonalityCache(personalityStoreForCache, params.nowMs),
+      ),
+    ]);
+
+    return {
+      runAtMs: params.nowMs,
+      windowStartMs,
+      windowEndMs,
+      sourceRowCount: dailyRows.length,
+      experienceUpsertCount:
+        (experienceMergeResult?.numInsertedRows ?? 0) + (experienceMergeResult?.numUpdatedRows ?? 0),
+      personalityUpsertCount:
+        (personalityMergeResult?.numInsertedRows ?? 0) + (personalityMergeResult?.numUpdatedRows ?? 0),
+      totalExperienceCount: experienceEntriesFromLance.length,
+      totalPersonalityCount: personalityEntriesFromLance.length,
+    };
+  } finally {
+    if (experienceTable) {
+      experienceTable.close();
+    }
+
+    if (personalityTable) {
+      personalityTable.close();
+    }
+
+    db.close();
+  }
 }
 
 function estimateTokens(text: string): number {
@@ -1428,32 +1559,6 @@ function dotProduct(left: number[], right: number[]): number {
   return total;
 }
 
-function rankVectorHits(params: {
-  kind: VectorStoreKind;
-  entries: VectorStoreEntry[];
-  queryEmbedding: number[];
-  queryTags: string[];
-  topK: number;
-}): RetrievedVectorHit[] {
-  const scored: RetrievedVectorHit[] = [];
-
-  for (const entry of params.entries) {
-    if (params.queryTags.length > 0 && !haveTagOverlap(entry.tags, params.queryTags)) {
-      continue;
-    }
-
-    scored.push({
-      kind: params.kind,
-      entry,
-      score: dotProduct(entry.embedding, params.queryEmbedding),
-    });
-  }
-
-  return scored
-    .sort((a, b) => b.score - a.score || b.entry.source_created_at_ms - a.entry.source_created_at_ms)
-    .slice(0, params.topK);
-}
-
 async function readJsonObjectIfExists(filePath: string): Promise<Record<string, unknown> | null> {
   let raw: string;
   try {
@@ -1551,31 +1656,65 @@ async function buildRespondMemoryContext(params: {
   }
 
   const queryEmbedding = buildHashedEmbedding(`${request.text}\n${queryTags.join(' ')}`);
-  const [experienceStore, personalityStore] = await Promise.all([
-    readVectorStore(memorySources.experienceVectorStorePath, VECTOR_STORE_KINDS.experiences),
-    readVectorStore(memorySources.personalityVectorStorePath, VECTOR_STORE_KINDS.personality),
-  ]);
 
-  const longTermHits = [
-    ...rankVectorHits({
-      kind: VECTOR_STORE_KINDS.experiences,
-      entries: experienceStore.entries,
-      queryEmbedding,
-      queryTags,
-      topK: RESPOND_LONG_TERM_TOP_K,
-    }),
-    ...rankVectorHits({
-      kind: VECTOR_STORE_KINDS.personality,
-      entries: personalityStore.entries,
-      queryEmbedding,
-      queryTags,
-      topK: Math.max(1, Math.floor(RESPOND_LONG_TERM_TOP_K / 2)),
-    }),
-  ]
-    .sort((a, b) => b.score - a.score || b.entry.source_created_at_ms - a.entry.source_created_at_ms)
-    .slice(0, RESPOND_LONG_TERM_TOP_K);
+  let longTermHits: RetrievedVectorHit[] = [];
+  const lancedb = await openDb(memorySources.lancedbDir);
+  let experiencesTable: Awaited<ReturnType<typeof getOrCreateTable>> | null = null;
+  let personalityTable: Awaited<ReturnType<typeof getOrCreateTable>> | null = null;
 
-  appendLineWithinBudget(lines, 'Long-term retrieval hits (top-K):', budget);
+  try {
+    const tableSchema = getLanceTableSchema();
+    experiencesTable = await getOrCreateTable(lancedb, VECTOR_STORE_KINDS.experiences, tableSchema);
+    personalityTable = await getOrCreateTable(lancedb, VECTOR_STORE_KINDS.personality, tableSchema);
+
+    const [experienceRowsRaw, personalityRowsRaw] = await Promise.all([
+      queryTopK(experiencesTable, queryEmbedding, RESPOND_LONG_TERM_TOP_K),
+      queryTopK(personalityTable, queryEmbedding, Math.max(1, Math.floor(RESPOND_LONG_TERM_TOP_K / 2))),
+    ]);
+
+    const experienceEntries = experienceRowsRaw
+      .map((row) => normalizeLanceRow(row, VECTOR_STORE_KINDS.experiences))
+      .filter((entry): entry is VectorStoreEntry => entry !== null);
+
+    const personalityEntries = personalityRowsRaw
+      .map((row) => normalizeLanceRow(row, VECTOR_STORE_KINDS.personality))
+      .filter((entry): entry is VectorStoreEntry => entry !== null);
+
+    longTermHits = [
+      ...experienceEntries
+        .filter((entry) => queryTags.length === 0 || haveTagOverlap(entry.tags, queryTags))
+        .map((entry) => ({
+          kind: VECTOR_STORE_KINDS.experiences,
+          entry,
+          score: dotProduct(entry.embedding, queryEmbedding),
+        })),
+      ...personalityEntries
+        .filter((entry) => queryTags.length === 0 || haveTagOverlap(entry.tags, queryTags))
+        .map((entry) => ({
+          kind: VECTOR_STORE_KINDS.personality,
+          entry,
+          score: dotProduct(entry.embedding, queryEmbedding),
+        })),
+    ]
+      .sort((a, b) => b.score - a.score || b.entry.source_created_at_ms - a.entry.source_created_at_ms)
+      .slice(0, RESPOND_LONG_TERM_TOP_K);
+  } finally {
+    if (experiencesTable) {
+      experiencesTable.close();
+    }
+
+    if (personalityTable) {
+      personalityTable.close();
+    }
+
+    lancedb.close();
+  }
+
+  appendLineWithinBudget(lines, 'Long-term retrieval hits (top-K from LanceDB):', budget);
+  if (longTermHits.length === 0) {
+    appendLineWithinBudget(lines, '- no relevant long-term memory found', budget);
+  }
+
   for (const hit of longTermHits) {
     const tagsText = hit.entry.tags.join(',');
     const line = `- ${hit.kind}#${hit.entry.source_summary_id} score=${hit.score.toFixed(3)} tags=[${tagsText}] ${truncateText(hit.entry.text, 180)}`;
@@ -1733,6 +1872,10 @@ async function generateRespond(
   tagWhitelist: ExperienceTagWhitelist,
   personaPrompt: PersonaPrompt,
   memorySources: RespondMemorySources,
+  toneContext: {
+    sessionKey: string;
+    currentTone: string;
+  },
 ): Promise<{ text: string; meta: RespondMeta }> {
   const model = getModel(config.model.provider as never, config.model.id as never);
 
@@ -1750,6 +1893,9 @@ async function generateRespond(
       memoryContext: memoryContext.text,
       memoryApproxTokens: memoryContext.approxTokens,
       memoryTokenBudget: memoryContext.tokenBudget,
+      currentTone: toneContext.currentTone,
+      toneSessionKey: toneContext.sessionKey,
+      allowedTones: ALLOWED_TONES,
     }),
     messages: [
       {
@@ -1815,18 +1961,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
   const personalityToneCachePath = path.resolve(config.memoryDirPath, 'cache', 'personality_tone.json');
   const coreExperiencesCachePath = path.resolve(config.memoryDirPath, 'cache', 'core_experiences.json');
   const corePersonalityCachePath = path.resolve(config.memoryDirPath, 'cache', 'core_personality.json');
-  const experienceVectorStorePath = path.resolve(
-    config.memoryDirPath,
-    'vector_db',
-    VECTOR_STORE_KINDS.experiences,
-    VECTOR_DB_INDEX_FILENAME,
-  );
-  const personalityVectorStorePath = path.resolve(
-    config.memoryDirPath,
-    'vector_db',
-    VECTOR_STORE_KINDS.personality,
-    VECTOR_DB_INDEX_FILENAME,
-  );
+  const lancedbDir = deriveLanceDbDir(config.memoryDirPath);
   const workingMemoryWriteQueue = new SerialTaskQueue();
 
   mkdirSync(config.memoryDirPath, { recursive: true });
@@ -1862,8 +1997,8 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
             personalityToneCachePath,
             coreExperiencesCachePath,
             corePersonalityCachePath,
-            experienceVectorStorePath,
-            personalityVectorStorePath,
+            lancedbDir,
+            lancedbTables: [VECTOR_STORE_KINDS.experiences, VECTOR_STORE_KINDS.personality],
           },
         });
         return;
@@ -1960,8 +2095,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
           result = await workingMemoryWriteQueue.run(async () =>
             runDailyMemoryJob({
               shortTermMemoryDbPath,
-              experienceVectorStorePath,
-              personalityVectorStorePath,
+              lancedbDir,
               coreExperiencesCachePath,
               corePersonalityCachePath,
               nowMs: runAtMs,
@@ -1974,6 +2108,10 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
           return;
         }
 
+        console.log(
+          `[agent] daily job wrote long-term rows: experiences=${result.experienceUpsertCount}, personality=${result.personalityUpsertCount}, lancedb=${lancedbDir}`,
+        );
+
         sendJson(res, 200, {
           job: 'daily',
           run_at_ms: result.runAtMs,
@@ -1985,9 +2123,12 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
           total_experience_count: result.totalExperienceCount,
           total_personality_count: result.totalPersonalityCount,
           short_term_memory_db: shortTermMemoryDbPath,
-          vector_db: {
-            experiences: experienceVectorStorePath,
-            personality: personalityVectorStorePath,
+          lancedb: {
+            dir: lancedbDir,
+            tables: {
+              experiences: VECTOR_STORE_KINDS.experiences,
+              personality: VECTOR_STORE_KINDS.personality,
+            },
           },
           cache: {
             core_experiences: coreExperiencesCachePath,
@@ -2033,16 +2174,37 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
         }
 
         const requestId = randomUUID();
+        const toneSessionKey = getSessionKey(respondRequest.session_id);
+        const userRequestedToneChange = isExplicitToneChangeRequest(respondRequest.text);
+
+        let currentTone = DEFAULT_TONE;
+        try {
+          const toneState = await loadToneState(config.memoryDirPath);
+          currentTone = getToneForSession(toneState, toneSessionKey, Date.now()).tone;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(`[agent] failed to load tone cache at request start: ${message}`);
+        }
 
         let generatedResponse: { text: string; meta: RespondMeta };
         try {
-          generatedResponse = await generateRespond(respondRequest, config, secrets, tagWhitelist, personaPrompt, {
-            shortTermMemoryDbPath,
-            experienceVectorStorePath,
-            personalityVectorStorePath,
-            coreExperiencesCachePath,
-            corePersonalityCachePath,
-          });
+          generatedResponse = await generateRespond(
+            respondRequest,
+            config,
+            secrets,
+            tagWhitelist,
+            personaPrompt,
+            {
+              shortTermMemoryDbPath,
+              lancedbDir,
+              coreExperiencesCachePath,
+              corePersonalityCachePath,
+            },
+            {
+              sessionKey: toneSessionKey,
+              currentTone,
+            },
+          );
         } catch (error) {
           if (error instanceof HttpRequestError) {
             sendError(res, error.statusCode, error.code, error.message, error.extra);
@@ -2080,20 +2242,16 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
           meta: respondResult.meta,
         };
 
-        const toneCachePayload = {
-          updated_at_ms: Date.now(),
-          request_id: requestId,
-          ...(respondRequest.session_id ? { session_id: respondRequest.session_id } : {}),
-          tone: respondResult.meta.tone,
-          concepts: respondResult.meta.concepts,
-          surprise: respondResult.meta.surprise,
-          note: respondResult.meta.note,
-        };
-
         try {
           await workingMemoryWriteQueue.run(async () => {
             await appendWorkingMemoryEntries(workingMemoryLogPath, [inputEntry, outputEntry]);
-            await writeJsonAtomic(personalityToneCachePath, toneCachePayload);
+
+            const toneState = await loadToneState(config.memoryDirPath);
+            updateToneForSession(toneState, toneSessionKey, respondResult.meta.tone, Date.now(), {
+              reason: respondResult.meta.note,
+              userRequestedToneChange,
+            });
+            await saveToneStateAtomic(config.memoryDirPath, toneState);
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -2198,7 +2356,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
     console.log(`[agent] listening on http://localhost:${config.server.port}`);
     console.log('[agent] health endpoint GET /health');
     console.log('[agent] jobs endpoint POST /jobs/hourly (working→sqlite rollup + trim)');
-    console.log('[agent] jobs endpoint POST /jobs/daily (sqlite→vector upsert + core cache refresh)');
+    console.log('[agent] jobs endpoint POST /jobs/daily (sqlite→lancedb upsert + core cache refresh)');
     console.log('[agent] respond endpoint POST /respond (model tool-call + memory writes)');
     console.log('[agent] insight endpoint POST /insight');
     console.log(`[agent] model: ${config.model.provider}/${config.model.id}`);
@@ -2209,8 +2367,9 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
     console.log(`[agent] personality tone cache: ${personalityToneCachePath}`);
     console.log(`[agent] core experiences cache: ${coreExperiencesCachePath}`);
     console.log(`[agent] core personality cache: ${corePersonalityCachePath}`);
-    console.log(`[agent] experiences vector store: ${experienceVectorStorePath}`);
-    console.log(`[agent] personality vector store: ${personalityVectorStorePath}`);
+    console.log(`[agent] lancedb dir: ${lancedbDir}`);
+    console.log(`[agent] lancedb table (experiences): ${VECTOR_STORE_KINDS.experiences}`);
+    console.log(`[agent] lancedb table (personality): ${VECTOR_STORE_KINDS.personality}`);
     console.log(`[agent] experience tags: ${tagWhitelist.allowedTags.length} (${tagWhitelist.sourcePath})`);
   });
 

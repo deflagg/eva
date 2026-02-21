@@ -2,7 +2,7 @@
 
 Node/TypeScript service for EVA text + insight generation.
 
-## Current behavior (Iteration 58)
+## Current behavior (Iteration 65)
 
 - Loads config via `cosmiconfig` + `zod`.
 - Resolves `memory.dir` relative to the loaded config file path.
@@ -17,9 +17,10 @@ Node/TypeScript service for EVA text + insight generation.
   - atomically rewrites working memory log to keep only the last 60 minutes
 - Exposes `POST /jobs/daily`:
   - reads yesterday's rows from `packages/eva/memory/short_term_memory.db`
-  - upserts long-term vectors into:
-    - `packages/eva/memory/vector_db/long_term_experiences/index.json`
-    - `packages/eva/memory/vector_db/long_term_personality/index.json`
+  - upserts long-term vectors into LanceDB tables:
+    - `long_term_experiences`
+    - `long_term_personality`
+    - LanceDB dir: `packages/eva/memory/vector_db/lancedb`
   - updates stable cache artifacts:
     - `packages/eva/memory/cache/core_experiences.json`
     - `packages/eva/memory/cache/core_personality.json`
@@ -27,8 +28,9 @@ Node/TypeScript service for EVA text + insight generation.
   - accepts `{ "text": "...", "session_id": "optional" }`
   - builds retrieval context before the model call from:
     - recent short-term SQLite summaries (tag-filtered)
-    - top-K long-term vector hits (`long_term_experiences` + `long_term_personality`)
+    - top-K long-term vector hits from LanceDB tables (`long_term_experiences` + `long_term_personality`)
     - core cache files (`core_experiences.json`, `core_personality.json`)
+  - if LanceDB is empty (or no relevant hits), retrieval context includes an explicit “no relevant long-term memory found” note
   - injects retrieval context into the respond prompt with a hard budget cap (approx token-aware)
   - calls model through `@mariozechner/pi-ai` tool loop (`commit_text_response`)
   - enforces concept whitelist from `packages/eva/memory/experience_tags.json`
@@ -132,6 +134,12 @@ Optional deterministic run timestamp for testing:
 curl -sS -X POST http://127.0.0.1:8791/jobs/daily \
   -H 'content-type: application/json' \
   -d '{"now_ms":1700000000000}'
+```
+
+Inspect LanceDB artifacts after a run:
+
+```bash
+ls -la packages/eva/memory/vector_db/lancedb
 ```
 
 ## Respond check
