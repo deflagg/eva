@@ -4451,3 +4451,49 @@
 
 ### Notes
 - This iteration is wording-only for Eva logs; no protocol or routing behavior was changed.
+
+## Iteration 90 — Cleanup: remove legacy `"quickvision"` role support + docs sweep
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Removed legacy `quickvision` role from UI protocol types:
+  - `packages/ui/src/types.ts`
+  - `HelloMessage.role` now allows only: `"ui" | "eva" | "vision"`
+- Removed legacy `quickvision` role from Eva protocol hello schema:
+  - `packages/eva/src/protocol.ts`
+  - `HelloMessageSchema.role` now allows only: `ui | eva | vision`
+- Removed legacy `quickvision` role from Vision Python protocol type alias:
+  - `packages/eva/vision/app/protocol.py`
+  - `RoleType = Literal["ui", "eva", "vision"]`
+- Updated protocol docs/schema to align with runtime role cleanup:
+  - `packages/protocol/schema.json` hello role enum now uses `vision`
+  - `packages/protocol/README.md` directional wording updated to `Vision`.
+- Docs sweep:
+  - `packages/eva/vision/README.md` now documents hello role as `"vision"`
+  - root `README.md` includes a single historical breadcrumb (`formerly QuickVision`) and updates status through Iteration 90.
+
+### Files changed
+- `packages/ui/src/types.ts`
+- `packages/eva/src/protocol.ts`
+- `packages/eva/vision/app/protocol.py`
+- `packages/protocol/schema.json`
+- `packages/protocol/README.md`
+- `packages/eva/vision/README.md`
+- `README.md`
+- `progress.md`
+
+### Verification
+- Build/compile checks pass:
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+
+### Manual run instructions
+1. Start Vision, Eva, and UI.
+2. Verify Vision `/health` returns `"service":"vision"`.
+3. Connect UI and confirm hello role is `"vision"` (no `"quickvision"` role in runtime protocol flow).
+4. Confirm no consumer path requires `"quickvision"` role support.
+
+### Notes
+- Legacy quickvision-role compatibility is now removed from active runtime protocol types/schemas.

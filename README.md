@@ -3,7 +3,7 @@
 This repository hosts four components:
 
 - `packages/eva` — TypeScript daemon (HTTP/WebSocket gateway)
-- `packages/eva/vision` — Python FastAPI daemon (vision inference service)
+- `packages/eva/vision` — Python FastAPI daemon (vision inference service; formerly QuickVision)
 - `packages/eva/executive` — Node daemon (insight/text model service)
 - `packages/ui` — Vite + React web client
 
@@ -105,7 +105,7 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 86**.
+Implemented through **Iteration 90**.
 
 Key current behavior:
 - Insight protocol/UI is **silent + factual** (`one_liner`, `what_changed`, `tags`, severity/ids/usage).

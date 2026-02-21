@@ -1,10 +1,10 @@
 # Eva Protocol (v1)
 
-Detections/control messages are JSON over WebSocket. Frame transport (UI -> Eva -> QuickVision) uses a binary envelope.
+Detections/control messages are JSON over WebSocket. Frame transport (UI -> Eva -> Vision) uses a binary envelope.
 
 ## Message Types
 
-### 1) `frame_binary` envelope (UI -> Eva -> QuickVision)
+### 1) `frame_binary` envelope (UI -> Eva -> Vision)
 
 Each frame is sent as one **binary WebSocket message** with this layout:
 
@@ -31,7 +31,7 @@ Rules:
 - `image_bytes` must exactly match the binary JPEG payload size.
 - `mime` is currently fixed to `image/jpeg`.
 
-### 2) `detections` (QuickVision -> Eva -> UI) JSON
+### 2) `detections` (Vision -> Eva -> UI) JSON
 
 ```json
 {
@@ -71,7 +71,7 @@ Notes:
 - `detections.events` is optional.
 - `events[].severity` is one of `low | medium | high`.
 
-### 3) `insight` (QuickVision -> Eva -> UI) JSON
+### 3) `insight` (Vision -> Eva -> UI) JSON
 
 > Important: insight messages do **not** include `frame_id`.
 
@@ -99,7 +99,7 @@ Notes:
 }
 ```
 
-### 4) `command` (UI -> Eva -> QuickVision, debug) JSON
+### 4) `command` (UI -> Eva -> Vision, debug) JSON
 
 > Temporary debug command introduced in Iteration 13.
 

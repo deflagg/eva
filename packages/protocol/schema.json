@@ -349,7 +349,7 @@
           "enum": [
             "ui",
             "eva",
-            "quickvision"
+            "vision"
           ]
         },
         "ts_ms": {

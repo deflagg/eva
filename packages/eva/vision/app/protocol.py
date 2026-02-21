@@ -8,7 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, ValidationError
 
 PROTOCOL_VERSION: Literal[1] = 1
-RoleType = Literal["ui", "eva", "quickvision", "vision"]
+RoleType = Literal["ui", "eva", "vision"]
 InsightSeverity = Literal["low", "medium", "high"]
 
 BINARY_META_LENGTH_BYTES = 4

@@ -2,11 +2,11 @@
 
 Python daemon that hosts YOLO inference and (optional) insight triggering.
 
-## Current behavior (Iteration 82)
+## Current behavior (Iteration 90)
 
 - HTTP health endpoint at `/health`
 - WebSocket endpoint at `/infer`
-  - sends `hello` on connect (`role: "quickvision"` for protocol compatibility)
+  - sends `hello` on connect (`role: "vision"`)
   - expects binary frame envelopes for frame payloads
   - runs YOLO inference and returns `detections`
   - supports tracking + event detectors + insight triggering
