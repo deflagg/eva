@@ -900,21 +900,21 @@ export function startServer(options: StartServerOptions): Server {
     url: quickvisionWsUrl,
     handlers: {
       onOpen: () => {
-        console.log(`[eva] connected to QuickVision at ${quickvisionWsUrl}`);
+        console.log(`[eva] connected to Vision at ${quickvisionWsUrl}`);
       },
       onClose: () => {
-        console.warn('[eva] QuickVision connection closed');
+        console.warn('[eva] Vision connection closed');
       },
       onReconnectScheduled: (delayMs) => {
-        console.warn(`[eva] scheduling QuickVision reconnect in ${delayMs}ms`);
+        console.warn(`[eva] scheduling Vision reconnect in ${delayMs}ms`);
       },
       onError: (error) => {
-        console.error(`[eva] QuickVision connection error: ${error.message}`);
+        console.error(`[eva] Vision connection error: ${error.message}`);
       },
       onMessage: (payload) => {
         const parsedMessage = QuickVisionInboundMessageSchema.safeParse(payload);
         if (!parsedMessage.success) {
-          console.warn('[eva] QuickVision message failed schema validation; dropping payload');
+          console.warn('[eva] Vision message failed schema validation; dropping payload');
           return;
         }
 
@@ -941,7 +941,7 @@ export function startServer(options: StartServerOptions): Server {
           const targetClient = frameRouter.take(message.frame_id);
 
           if (!targetClient) {
-            console.warn(`[eva] no route for frame_id ${message.frame_id}; dropping QuickVision response`);
+            console.warn(`[eva] no route for frame_id ${message.frame_id}; dropping Vision response`);
             return;
           }
 
@@ -953,7 +953,7 @@ export function startServer(options: StartServerOptions): Server {
           const targetClient = frameRouter.take(message.frame_id);
 
           if (!targetClient) {
-            console.warn(`[eva] no route for frame_id ${message.frame_id}; dropping QuickVision response`);
+            console.warn(`[eva] no route for frame_id ${message.frame_id}; dropping Vision response`);
             return;
           }
 
@@ -976,7 +976,7 @@ export function startServer(options: StartServerOptions): Server {
         sendJson(activeUiClient, message);
       },
       onInvalidMessage: (raw) => {
-        console.warn(`[eva] received non-JSON payload from QuickVision: ${raw}`);
+        console.warn(`[eva] received non-JSON payload from Vision: ${raw}`);
       },
     },
   });
@@ -1117,7 +1117,7 @@ export function startServer(options: StartServerOptions): Server {
   server.listen(port, () => {
     console.log(`[eva] listening on http://localhost:${port}`);
     console.log(`[eva] websocket endpoint ws://localhost:${port}${eyePath}`);
-    console.log(`[eva] QuickVision target ${quickvisionClient.getUrl()}`);
+    console.log(`[eva] Vision target ${quickvisionClient.getUrl()}`);
     console.log(
       `[eva] insight relay enabled=${insightRelay.enabled} cooldownMs=${insightRelay.cooldownMs} dedupeWindowMs=${insightRelay.dedupeWindowMs}`,
     );

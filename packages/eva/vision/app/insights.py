@@ -268,7 +268,7 @@ class InsightBuffer:
 
     def _ensure_enabled(self) -> None:
         if not self.config.enabled:
-            raise InsightError("INSIGHTS_DISABLED", "Insights are disabled in QuickVision settings.")
+            raise InsightError("INSIGHTS_DISABLED", "Insights are disabled in Vision settings.")
 
     def _latest_trigger_frame(self) -> BufferedFrame:
         if not self._frames:
@@ -339,17 +339,17 @@ def _as_non_negative_int(value: Any, *, key: str, default: int) -> int:
         return default
 
     if isinstance(value, bool):
-        raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+        raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
 
     if isinstance(value, int):
         if value < 0:
-            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+            raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
         return value
 
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
 
-    raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+    raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
 
 
 def _as_non_negative_float(value: Any, *, key: str, default: float) -> float:
@@ -357,26 +357,26 @@ def _as_non_negative_float(value: Any, *, key: str, default: float) -> float:
         return default
 
     if isinstance(value, bool):
-        raise RuntimeError(f"QuickVision config error: surprise.{key} must be a non-negative number")
+        raise RuntimeError(f"Vision config error: surprise.{key} must be a non-negative number")
 
     if isinstance(value, (int, float)):
         parsed = float(value)
         if parsed < 0:
-            raise RuntimeError(f"QuickVision config error: surprise.{key} must be a non-negative number")
+            raise RuntimeError(f"Vision config error: surprise.{key} must be a non-negative number")
         return parsed
 
     if isinstance(value, str):
         try:
             parsed = float(value.strip())
         except ValueError as exc:
-            raise RuntimeError(f"QuickVision config error: surprise.{key} must be a non-negative number") from exc
+            raise RuntimeError(f"Vision config error: surprise.{key} must be a non-negative number") from exc
 
         if parsed < 0:
-            raise RuntimeError(f"QuickVision config error: surprise.{key} must be a non-negative number")
+            raise RuntimeError(f"Vision config error: surprise.{key} must be a non-negative number")
 
         return parsed
 
-    raise RuntimeError(f"QuickVision config error: surprise.{key} must be a non-negative number")
+    raise RuntimeError(f"Vision config error: surprise.{key} must be a non-negative number")
 
 
 def _as_surprise_weights(value: Any) -> dict[str, float]:
@@ -384,13 +384,13 @@ def _as_surprise_weights(value: Any) -> dict[str, float]:
         return dict(DEFAULT_SURPRISE_WEIGHTS)
 
     if not isinstance(value, Mapping):
-        raise RuntimeError("QuickVision config error: surprise.weights must be a mapping/object")
+        raise RuntimeError("Vision config error: surprise.weights must be a mapping/object")
 
     weights = dict(DEFAULT_SURPRISE_WEIGHTS)
 
     for raw_name, raw_weight in value.items():
         if not isinstance(raw_name, str) or not raw_name.strip():
-            raise RuntimeError("QuickVision config error: surprise.weights keys must be non-empty strings")
+            raise RuntimeError("Vision config error: surprise.weights keys must be non-empty strings")
 
         event_name = raw_name.strip().lower()
         weight = _as_non_negative_float(raw_weight, key=f"weights.{event_name}", default=0.0)
@@ -402,7 +402,7 @@ def _as_surprise_weights(value: Any) -> dict[str, float]:
 def _validate_url(url: str, *, key: str) -> str:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise RuntimeError(f"QuickVision config error: {key} must be a valid http(s) URL")
+        raise RuntimeError(f"Vision config error: {key} must be a valid http(s) URL")
 
     return url
 
@@ -411,14 +411,14 @@ def _resolve_insight_service_url() -> tuple[str, str]:
     raw_agent_url = settings.get("insights.agent_url", default=None)
     if raw_agent_url is not None:
         if not isinstance(raw_agent_url, str) or not raw_agent_url.strip():
-            raise RuntimeError("QuickVision config error: insights.agent_url must be a non-empty string")
+            raise RuntimeError("Vision config error: insights.agent_url must be a non-empty string")
         return raw_agent_url.strip(), "insights.agent_url"
 
     raw_legacy_url = settings.get("insights.vision_agent_url", default=None)
     if raw_legacy_url is not None:
         if not isinstance(raw_legacy_url, str) or not raw_legacy_url.strip():
-            raise RuntimeError("QuickVision config error: insights.vision_agent_url must be a non-empty string")
-        print("[quickvision] insights.vision_agent_url is deprecated; use insights.agent_url")
+            raise RuntimeError("Vision config error: insights.vision_agent_url must be a non-empty string")
+        print("[vision] insights.vision_agent_url is deprecated; use insights.agent_url")
         return raw_legacy_url.strip(), "insights.vision_agent_url"
 
     return "http://127.0.0.1:8791/insight", "insights.agent_url"
@@ -467,10 +467,10 @@ def load_insight_settings() -> InsightSettings:
     )
 
     if downsample_max_dim <= 0:
-        raise RuntimeError("QuickVision config error: insights.downsample.max_dim must be >= 1")
+        raise RuntimeError("Vision config error: insights.downsample.max_dim must be >= 1")
 
     if downsample_jpeg_quality < 1 or downsample_jpeg_quality > 100:
-        raise RuntimeError("QuickVision config error: insights.downsample.jpeg_quality must be between 1 and 100")
+        raise RuntimeError("Vision config error: insights.downsample.jpeg_quality must be between 1 and 100")
 
     surprise_enabled = _as_bool(settings.get("surprise.enabled", default=True), default=True)
     surprise_threshold = _as_non_negative_float(

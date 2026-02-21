@@ -24,7 +24,7 @@ from .yolo import (
     run_inference,
 )
 
-app = FastAPI(title="quickvision", version="0.1.0")
+app = FastAPI(title="vision", version="0.1.0")
 
 _insight_settings: InsightSettings | None = None
 _tracking_settings: TrackingSettings | None = None
@@ -42,41 +42,41 @@ async def on_startup() -> None:
     try:
         load_model()
     except Exception as exc:
-        raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
+        raise RuntimeError(f"Vision startup failed: {exc}") from exc
 
     try:
         _insight_settings = load_insight_settings()
     except Exception as exc:
-        raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
+        raise RuntimeError(f"Vision startup failed: {exc}") from exc
 
     try:
         _tracking_settings = load_tracking_settings()
     except Exception as exc:
-        raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
+        raise RuntimeError(f"Vision startup failed: {exc}") from exc
 
     try:
         _roi_settings = load_roi_settings()
     except Exception as exc:
-        raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
+        raise RuntimeError(f"Vision startup failed: {exc}") from exc
 
     try:
         _motion_settings = load_motion_settings()
     except Exception as exc:
-        raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
+        raise RuntimeError(f"Vision startup failed: {exc}") from exc
 
     try:
         _collision_settings = load_collision_settings()
     except Exception as exc:
-        raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
+        raise RuntimeError(f"Vision startup failed: {exc}") from exc
 
     try:
         _abandoned_settings = load_abandoned_settings()
     except Exception as exc:
-        raise RuntimeError(f"QuickVision startup failed: {exc}") from exc
+        raise RuntimeError(f"Vision startup failed: {exc}") from exc
 
-    print(f"[quickvision] model loaded: {get_model_summary()}")
+    print(f"[vision] model loaded: {get_model_summary()}")
     print(
-        "[quickvision] insights config: "
+        "[vision] insights config: "
         f"enabled={_insight_settings.enabled} "
         f"agent_url={_insight_settings.agent_url} "
         f"max_frames={_insight_settings.max_frames} "
@@ -88,21 +88,21 @@ async def on_startup() -> None:
         f"downsample_jpeg_quality={_insight_settings.downsample.jpeg_quality}"
     )
     print(
-        "[quickvision] surprise config: "
+        "[vision] surprise config: "
         f"enabled={_insight_settings.surprise.enabled} "
         f"threshold={_insight_settings.surprise.threshold} "
         f"cooldown_ms={_insight_settings.surprise.cooldown_ms} "
         f"weights={len(_insight_settings.surprise.weights)}"
     )
     print(
-        "[quickvision] tracking config: "
+        "[vision] tracking config: "
         f"enabled={_tracking_settings.enabled} "
         f"persist={_tracking_settings.persist} "
         f"tracker={_tracking_settings.tracker} "
         f"busy_policy={_tracking_settings.busy_policy}"
     )
     print(
-        "[quickvision] roi config: "
+        "[vision] roi config: "
         f"enabled={_roi_settings.enabled} "
         f"representative_point={_roi_settings.representative_point} "
         f"regions={len(_roi_settings.regions)} "
@@ -111,7 +111,7 @@ async def on_startup() -> None:
         f"dwell_region_overrides={len(_roi_settings.dwell_region_threshold_ms)}"
     )
     print(
-        "[quickvision] motion config: "
+        "[vision] motion config: "
         f"enabled={_motion_settings.enabled} "
         f"history_frames={_motion_settings.history_frames} "
         f"sudden_motion_speed_px_s={_motion_settings.sudden_motion_speed_px_s} "
@@ -120,7 +120,7 @@ async def on_startup() -> None:
         f"event_cooldown_ms={_motion_settings.event_cooldown_ms}"
     )
     print(
-        "[quickvision] collision config: "
+        "[vision] collision config: "
         f"enabled={_collision_settings.enabled} "
         f"pairs={len(_collision_settings.pairs)} "
         f"distance_px={_collision_settings.distance_px} "
@@ -128,7 +128,7 @@ async def on_startup() -> None:
         f"pair_cooldown_ms={_collision_settings.pair_cooldown_ms}"
     )
     print(
-        "[quickvision] abandoned config: "
+        "[vision] abandoned config: "
         f"enabled={_abandoned_settings.enabled} "
         f"object_classes={len(_abandoned_settings.object_classes)} "
         f"associate_max_distance_px={_abandoned_settings.associate_max_distance_px} "
@@ -143,7 +143,7 @@ async def on_startup() -> None:
 @app.get("/health")
 async def health() -> dict[str, object]:
     return {
-        "service": "quickvision",
+        "service": "vision",
         "status": "ok",
         "model_loaded": is_model_loaded(),
         "insights_enabled": _insight_settings.enabled if _insight_settings is not None else False,
@@ -209,7 +209,7 @@ async def infer_socket(websocket: WebSocket) -> None:
             except Exception:
                 return False
 
-    await send_payload(make_hello("quickvision"))
+    await send_payload(make_hello("vision"))
 
     pending_frame: InferenceFrame | None = None
     pending_frame_event = asyncio.Event()
@@ -262,9 +262,9 @@ async def infer_socket(websocket: WebSocket) -> None:
 
             await send_payload(insight_message.model_dump(exclude_none=True))
         except InsightError as exc:
-            print(f"[quickvision] auto insight skipped: {exc.code} {exc}")
+            print(f"[vision] auto insight skipped: {exc.code} {exc}")
         except Exception as exc:
-            print(f"[quickvision] auto insight failed: {exc}")
+            print(f"[vision] auto insight failed: {exc}")
 
     async def inference_worker() -> None:
         nonlocal inference_running, pending_frame
@@ -340,7 +340,7 @@ async def infer_socket(websocket: WebSocket) -> None:
                 await send_payload(
                     make_error(
                         "FRAME_BINARY_REQUIRED",
-                        "QuickVision expects binary frame payloads on /infer.",
+                        "Vision expects binary frame payloads on /infer.",
                         frame_id=frame_id,
                     )
                 )

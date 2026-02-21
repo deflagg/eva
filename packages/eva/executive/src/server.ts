@@ -20,6 +20,7 @@ import {
   updateToneForSession,
 } from './memcontext/tone.js';
 import { buildEnvironmentSnapshot, readRecentWmEvents } from './memcontext/live_events.js';
+import { logLlmTrace } from './llm_log.js';
 import type { AgentConfig, AgentSecrets } from './config.js';
 import { buildInsightSystemPrompt, buildInsightUserPrompt } from './prompts/insight.js';
 import { buildRespondSystemPrompt, buildRespondUserPrompt } from './prompts/respond.js';
@@ -2045,13 +2046,57 @@ async function generateInsight(
     tools: [INSIGHT_TOOL],
   };
 
+  const traceId = `insight-${randomUUID()}`;
+  const traceModel = {
+    provider: config.model.provider,
+    id: config.model.id,
+  };
+
+  await logLlmTrace({
+    memoryDirPath: config.memoryDirPath,
+    kind: 'insight',
+    phase: 'request',
+    traceId,
+    model: traceModel,
+    payload: {
+      request: {
+        clip_id: request.clip_id,
+        trigger_frame_id: request.trigger_frame_id,
+        frame_count: request.frames.length,
+      },
+      context,
+    },
+  });
+
   let assistantMessage: any;
   try {
     assistantMessage = await complete(model as never, context as never, { apiKey: secrets.openaiApiKey });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    await logLlmTrace({
+      memoryDirPath: config.memoryDirPath,
+      kind: 'insight',
+      phase: 'error',
+      traceId,
+      model: traceModel,
+      payload: {
+        message,
+        error,
+      },
+    });
     throw new HttpRequestError(502, 'MODEL_CALL_FAILED', `Insight model request failed: ${message}`);
   }
+
+  await logLlmTrace({
+    memoryDirPath: config.memoryDirPath,
+    kind: 'insight',
+    phase: 'response',
+    traceId,
+    model: traceModel,
+    payload: {
+      assistantMessage,
+    },
+  });
 
   if (assistantMessage?.stopReason === 'error' || assistantMessage?.stopReason === 'aborted') {
     const message =
@@ -2137,13 +2182,56 @@ async function generateRespond(
     tools: [RESPOND_TOOL],
   };
 
+  const traceId = `respond-${randomUUID()}`;
+  const traceModel = {
+    provider: config.model.provider,
+    id: config.model.id,
+  };
+
+  await logLlmTrace({
+    memoryDirPath: config.memoryDirPath,
+    kind: 'respond',
+    phase: 'request',
+    traceId,
+    model: traceModel,
+    payload: {
+      request: {
+        user_text: request.text,
+        session_id: request.session_id,
+      },
+      context,
+    },
+  });
+
   let assistantMessage: any;
   try {
     assistantMessage = await complete(model as never, context as never, { apiKey: secrets.openaiApiKey });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    await logLlmTrace({
+      memoryDirPath: config.memoryDirPath,
+      kind: 'respond',
+      phase: 'error',
+      traceId,
+      model: traceModel,
+      payload: {
+        message,
+        error,
+      },
+    });
     throw new HttpRequestError(502, 'MODEL_CALL_FAILED', `Respond model request failed: ${message}`);
   }
+
+  await logLlmTrace({
+    memoryDirPath: config.memoryDirPath,
+    kind: 'respond',
+    phase: 'response',
+    traceId,
+    model: traceModel,
+    payload: {
+      assistantMessage,
+    },
+  });
 
   if (assistantMessage?.stopReason === 'error' || assistantMessage?.stopReason === 'aborted') {
     const message =

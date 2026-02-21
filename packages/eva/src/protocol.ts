@@ -18,7 +18,7 @@ function getOptionalFrameId(payload: unknown): string | undefined {
 export const HelloMessageSchema = z.object({
   type: z.literal('hello'),
   v: z.literal(PROTOCOL_VERSION),
-  role: z.enum(['ui', 'eva', 'quickvision']),
+  role: z.enum(['ui', 'eva', 'quickvision', 'vision']),
   ts_ms: z.number().int().nonnegative(),
 });
 

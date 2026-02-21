@@ -4111,3 +4111,343 @@
 
 ### Notes
 - Runtime behavior and active docs are now aligned on: **silent insights, spoken chat**.
+
+## Iteration 83 — Add `packages/eva/llm_logs/` scaffold + gitignore + example config
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Added LLM trace log scaffold directory and committed example config:
+  - `packages/eva/llm_logs/config.example.json`
+  - shape matches the Iteration 83–86 plan defaults with `enabled: false`.
+- Updated root `.gitignore` to ignore all runtime log artifacts under `packages/eva/llm_logs/**` while allowlisting:
+  - `!packages/eva/llm_logs/config.example.json`
+- Updated `packages/eva/executive/README.md` with an LLM logging scaffold blurb:
+  - how to copy `config.example.json` to `config.json`
+  - how to flip `enabled` on/off for live toggling workflow
+  - warning that logs can contain sensitive user text/memory.
+
+### Files changed
+- `.gitignore`
+- `packages/eva/executive/README.md`
+- `packages/eva/llm_logs/config.example.json`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+- Git artifact check:
+  - `git status --short` shows no generated `llm_logs` runtime artifacts (for example, no `openai-requests.log` or `config.json` tracked).
+
+### Manual run instructions
+1. Create local runtime config (gitignored):
+   - `cp packages/eva/llm_logs/config.example.json packages/eva/llm_logs/config.json`
+2. Edit `packages/eva/llm_logs/config.json` and toggle:
+   - `"enabled": true` to enable
+   - `"enabled": false` to disable
+3. Proceed to Iterations 84–85 for actual logger implementation + call-site wiring.
+
+### Notes
+- This iteration is scaffold/docs/gitignore only; no logger module or OpenAI call-site integration was added yet.
+
+## Iteration 84 — Implement hot-reload LLM log config + safe logger module (no wiring yet)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Added standalone Executive LLM trace logger module:
+  - `packages/eva/executive/src/llm_log.ts`
+- Implemented default config-path resolution from Executive memory dir:
+  - `configPath = path.resolve(memoryDirPath, '..', 'llm_logs', 'config.json')`
+- Implemented hot config reload on every log attempt:
+  - `stat(configPath)` each call
+  - cache key = config path with `mtimeMs`
+  - reload JSON when mtime changes
+  - missing/invalid config is treated as `enabled: false`
+  - logger never throws to caller
+- Implemented sanitization guardrails:
+  - redacts API-key fields (`apiKey`/`api_key` variants)
+  - redacts `secrets` object payloads
+  - replaces base64 image payload fields with placeholders including size, for example:
+    - `[omitted base64 image: 123456 chars]`
+  - supports `omit_image_b64` toggle
+  - applies string truncation via `truncate_chars`
+  - handles circular/unserializable values safely
+- Implemented best-effort JSONL writer:
+  - ensures log directory exists
+  - appends one JSON record per line
+  - write failures are swallowed to preserve runtime behavior
+- Implemented optional file rotation:
+  - checks `max_file_bytes` before append
+  - rotates `log -> log.1 -> log.2 ...` up to `rotate_count`
+  - starts a fresh log file after rotation.
+
+### Files changed
+- `packages/eva/executive/src/llm_log.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+
+### Manual smoke check (no OpenAI call)
+1. Created runtime config:
+   - `packages/eva/llm_logs/config.json` with `"enabled": true`.
+2. Ran a tiny script that imports and calls `logLlmTrace(...)` directly (using `npx tsx --eval ...`).
+3. Verified file creation + append:
+   - `packages/eva/llm_logs/openai-requests.log`
+4. Verified sanitization in output line:
+   - image block `data` replaced with `[omitted base64 image: ... chars]`
+   - `requestOptions.apiKey` replaced with `[omitted api key]`
+   - `secrets` replaced with `[omitted secrets]`
+5. Hot-reload sanity check:
+   - flipped config `enabled` true -> false while process remained running
+   - subsequent logger call did not append a new line.
+
+### Manual run instructions
+1. Copy example config:
+   - `cp packages/eva/llm_logs/config.example.json packages/eva/llm_logs/config.json`
+2. Set `"enabled": true` in `packages/eva/llm_logs/config.json`.
+3. Call `logLlmTrace(...)` from any Executive code path with:
+   - `memoryDirPath`
+   - `kind`, `phase`, `traceId`, `model`, and `payload`.
+4. Inspect JSONL output in:
+   - `packages/eva/llm_logs/openai-requests.log`
+
+### Notes
+- This iteration intentionally does **not** wire logger calls into `generateInsight(...)` / `generateRespond(...)` yet; that is Iteration 85.
+
+## Iteration 85 — Wire logger into `generateInsight()` and `generateRespond()` around `complete(...)`
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Wired LLM trace logging into Executive model-call boundaries in:
+  - `packages/eva/executive/src/server.ts`
+- Added logger import:
+  - `import { logLlmTrace } from './llm_log.js';`
+- Updated `generateInsight(...)` tracing around `complete(...)`:
+  - creates `trace_id` as `insight-${randomUUID()}`
+  - logs `phase: "request"` immediately before the model call with:
+    - model provider/id
+    - request metadata (`clip_id`, `trigger_frame_id`, `frame_count`)
+    - full `context` object passed to `complete(...)`
+  - logs `phase: "response"` immediately after `complete(...)` returns with raw `assistantMessage`
+  - on model-call throw, logs `phase: "error"` then rethrows existing `HttpRequestError` pattern (`MODEL_CALL_FAILED`)
+- Updated `generateRespond(...)` tracing around `complete(...)`:
+  - creates `trace_id` as `respond-${randomUUID()}`
+  - logs `phase: "request"` immediately before the model call with:
+    - model provider/id
+    - request summary (`user_text`, `session_id`)
+    - full `context` object passed to `complete(...)`
+  - logs `phase: "response"` immediately after `complete(...)` returns with raw `assistantMessage`
+  - on model-call throw, logs `phase: "error"` then rethrows existing `HttpRequestError` pattern (`MODEL_CALL_FAILED`)
+- Confirmed logging path does not pass request options/secrets (`apiKey`) into logger payloads.
+- Preserved runtime behavior safety:
+  - logger remains best-effort and does not alter request success/failure semantics if logging fails.
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+
+### Runtime verification
+1. Enabled logging in local runtime config:
+   - `packages/eva/llm_logs/config.json` -> `"enabled": true`
+2. Started Executive and called:
+   - `POST /respond` (success)
+   - `POST /insight` (intentional invalid image payload to exercise model response error path)
+3. Verified JSONL output at:
+   - `packages/eva/llm_logs/openai-requests.log`
+4. Verified records include request+response traces for both calls:
+   - `respond` request + response
+   - `insight` request + response (with model stopReason/error message payload)
+5. Verified sanitization:
+   - no raw base64 image blobs in logs (`image` blocks show placeholder text)
+   - no API keys/secrets in trace payload.
+
+### Hot toggle test (no restart)
+- While Executive remained running:
+  1. flipped `enabled: true -> false` in `packages/eva/llm_logs/config.json`
+  2. sent another `POST /respond`
+  3. confirmed log line count did not change
+  4. flipped `enabled: false -> true`
+  5. sent another `POST /respond`
+  6. confirmed new lines appended again.
+
+### Notes
+- Insight test used an intentionally invalid JPEG payload to validate boundary logging even when upstream model returns an error response; trace output still captures the exact request context and raw model response envelope.
+
+## Iteration 86 — Docs + safety sweep
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated Executive docs for finalized LLM trace logging behavior in:
+  - `packages/eva/executive/README.md`
+- Replaced scaffold wording with operational docs covering:
+  - config location (`packages/eva/llm_logs/config.json`)
+  - hot reload behavior (mtime reload, no restart required)
+  - logged phases (`request`, `response`, `error`) at `complete(...)` boundaries
+  - JSONL default output path
+  - sanitization guarantees:
+    - base64 image payload replacement placeholders
+    - `secrets` redaction
+    - API-key field redaction
+    - string truncation (`truncate_chars`)
+  - explicit warning that logs may still contain sensitive text context.
+- Updated root `README.md` with a short LLM trace note:
+  - added local config + log file paths under configuration files
+  - updated status marker to Iteration 86
+  - added one-line summary of hot-toggle logging + safeguards.
+
+### Safety sweep
+- Performed repository sweep (source/docs scope, excluding `node_modules` and build output) to verify no source code path logs `secrets.openaiApiKey`.
+- Confirmed `openaiApiKey` usage remains limited to:
+  - secrets schema validation
+  - `complete(...)` request options at call sites.
+- Verified gitignore coverage for LLM log artifacts:
+  - `packages/eva/llm_logs/**`
+  - allowlist only `!packages/eva/llm_logs/config.example.json`
+- Verified runtime artifacts are untracked:
+  - `packages/eva/llm_logs/config.json` -> ignored
+  - `packages/eva/llm_logs/openai-requests.log` -> ignored.
+
+### Files changed
+- `README.md`
+- `packages/eva/executive/README.md`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+- Git ignore verification:
+  - `git status --short --ignored -- packages/eva/llm_logs` shows runtime artifacts as ignored (`!!`) and only scaffold directory as untracked due committed example file.
+
+### Notes
+- Iterations 83–86 are now complete: scaffold + hot logger module + model-call wiring + docs/safety sweep.
+
+## Iteration 87 — Protocol compatibility: allow `hello.role = "vision"` (while keeping `quickvision`)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated UI protocol type union to accept both legacy and new vision runtime hello roles:
+  - `packages/ui/src/types.ts`
+  - `HelloMessage.role` now allows: `"ui" | "eva" | "quickvision" | "vision"`
+- Updated Eva protocol hello validator to accept both role strings:
+  - `packages/eva/src/protocol.ts`
+  - `HelloMessageSchema.role` enum now includes `"vision"` in addition to `"quickvision"`.
+
+### Files changed
+- `packages/ui/src/types.ts`
+- `packages/eva/src/protocol.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva && npm run build`
+
+### Manual run instructions
+1. Start the stack with current services/config (producer may still emit `"quickvision"` at this stage).
+2. Confirm startup and stream flow are unchanged.
+3. Confirm no consumer-side regression from role compatibility widening.
+
+### Notes
+- This iteration is consumer-tolerance only; producer identity emission remains unchanged until Iteration 88.
+
+## Iteration 88 — Vision service emits `vision` identity (health + hello + log prefixes)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated Vision service runtime identity in `packages/eva/vision/app/main.py`:
+  - `FastAPI(title="quickvision")` -> `FastAPI(title="vision")`
+  - `/health` service field now returns `"service": "vision"`
+  - WebSocket hello now emits `make_hello("vision")`
+  - startup/config log prefixes changed from `[quickvision]` -> `[vision]`
+  - auto-insight log lines changed from `[quickvision] auto insight ...` -> `[vision] ...`
+- Updated Vision insight module naming/log text in `packages/eva/vision/app/insights.py`:
+  - log prefix `[quickvision]` -> `[vision]`
+  - config error prefix `"QuickVision config error: ..."` -> `"Vision config error: ..."`
+  - disabled-message text now references `Vision settings`.
+- Updated Vision run launcher config errors in `packages/eva/vision/app/run.py`:
+  - `"QuickVision config error: ..."` -> `"Vision config error: ..."`
+- Updated Vision protocol role literal in `packages/eva/vision/app/protocol.py` to allow the new hello role:
+  - `RoleType = Literal["ui", "eva", "quickvision", "vision"]`
+  - keeps transitional compatibility while producer now emits `"vision"`.
+
+### Files changed
+- `packages/eva/vision/app/main.py`
+- `packages/eva/vision/app/insights.py`
+- `packages/eva/vision/app/run.py`
+- `packages/eva/vision/app/protocol.py`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/vision && python3 -m compileall app`
+- Runtime startup attempt on this host failed due missing dependency in local venv:
+  - `ModuleNotFoundError: No module named 'uvicorn'`
+
+### Manual run instructions
+1. Ensure Vision venv deps are installed:
+   - `cd packages/eva/vision`
+   - `source .venv/bin/activate`
+   - `pip install -r requirements.txt`
+2. Start Vision:
+   - `python -m app.run`
+3. Verify health identity:
+   - `curl http://127.0.0.1:8000/health`
+   - confirm payload includes `"service":"vision"`
+4. Verify WS hello identity:
+   - connect to `ws://127.0.0.1:8000/infer`
+   - confirm first message includes `"type":"hello"` and `"role":"vision"`.
+
+### Notes
+- This iteration flips producer identity to `vision` while retaining temporary compatibility for legacy `quickvision` role values.
+
+## Iteration 89 — Eva gateway wording: rename “QuickVision” log strings to “Vision” (no behavior change)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated Eva gateway log wording in `packages/eva/src/server.ts` from "QuickVision" to "Vision" (log strings only), including:
+  - connection established log
+  - connection closed log
+  - reconnect scheduled log
+  - connection error log
+  - invalid schema payload log
+  - unmatched route drop logs
+  - non-JSON inbound payload log
+  - startup target URL log (`Vision target ...`)
+- Kept internal identifiers/variables unchanged (`quickvisionClient`, `QuickVisionInboundMessageSchema`, etc.) to keep diff scoped and behavior unchanged.
+- Kept runtime protocol/error payload behavior unchanged (for example `QV_UNAVAILABLE` payload text remains unchanged in this iteration).
+
+### Files changed
+- `packages/eva/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva && npm run build`
+
+### Manual run instructions
+1. Start Vision, Eva, and UI.
+2. Observe Eva logs during startup and reconnect scenarios.
+3. Confirm operator-facing logs now say “Vision” (not “QuickVision”) while message flow and behavior remain unchanged.
+
+### Notes
+- This iteration is wording-only for Eva logs; no protocol or routing behavior was changed.

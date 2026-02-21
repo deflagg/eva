@@ -3,7 +3,7 @@ export type InsightSeverity = 'low' | 'medium' | 'high';
 export interface HelloMessage {
   type: 'hello';
   v: 1;
-  role: 'ui' | 'eva' | 'quickvision';
+  role: 'ui' | 'eva' | 'quickvision' | 'vision';
   ts_ms: number;
 }
 

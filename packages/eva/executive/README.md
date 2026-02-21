@@ -93,6 +93,50 @@ Required shape:
 }
 ```
 
+## LLM trace logging (hot toggle)
+
+Executive can emit OpenAI boundary traces to local JSONL files under `packages/eva/llm_logs/`.
+
+### Config location
+
+1. Copy the committed example once:
+
+```bash
+cp packages/eva/llm_logs/config.example.json packages/eva/llm_logs/config.json
+```
+
+2. Edit `packages/eva/llm_logs/config.json` and toggle:
+
+```json
+{ "enabled": true }
+```
+
+Set `enabled` back to `false` to disable.
+
+### Hot reload behavior
+
+No restart is required. On each trace write attempt, Executive checks `config.json` mtime and reloads it when changed.
+
+### What gets logged
+
+Default log file: `packages/eva/llm_logs/openai-requests.log` (JSONL, one object per line).
+
+For each model call path (`/respond` and `/insight`):
+- `phase: "request"` right before `complete(...)`
+- `phase: "response"` right after `complete(...)` returns
+- `phase: "error"` when `complete(...)` throws
+
+### Sanitization and safety
+
+- Base64 image payloads are replaced with placeholders (for example `[omitted base64 image: 123456 chars]`).
+- `secrets` objects are redacted.
+- API key-like fields (`apiKey` / `api_key`) are redacted.
+- Large strings are truncated according to `truncate_chars`.
+
+`config.json` and all runtime log files in `packages/eva/llm_logs/` are gitignored (only `config.example.json` is committed).
+
+⚠️ Logs can still contain sensitive user text and memory context. Keep them local and handle carefully.
+
 ## Run
 
 ```bash

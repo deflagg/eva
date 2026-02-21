@@ -1,0 +1,12 @@
+{
+  "enabled": false,
+  "log_dir": "packages/eva/llm_logs",
+  "log_file": "openai-requests.log",
+  "include_request": true,
+  "include_response": true,
+  "include_errors": true,
+  "omit_image_b64": true,
+  "truncate_chars": 20000,
+  "max_file_bytes": 20000000,
+  "rotate_count": 3
+}

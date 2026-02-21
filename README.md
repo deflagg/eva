@@ -34,6 +34,12 @@ Protocol docs/schema are in `packages/protocol`.
 - `packages/eva/executive/agent.config.local.json` (optional local override, gitignored)
 - `packages/eva/executive/agent.secrets.local.json` (required local secrets file, gitignored)
 
+### Executive LLM trace logging (hot-toggle local config)
+
+- `packages/eva/llm_logs/config.example.json` (committed template)
+- `packages/eva/llm_logs/config.json` (local runtime toggle, gitignored)
+- default output: `packages/eva/llm_logs/openai-requests.log` (gitignored JSONL)
+
 ### UI runtime config
 
 - `packages/ui/public/config.json` (committed)
@@ -99,11 +105,12 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 82**.
+Implemented through **Iteration 86**.
 
 Key current behavior:
 - Insight protocol/UI is **silent + factual** (`one_liner`, `what_changed`, `tags`, severity/ids/usage).
 - Narration text is internal-only working memory (`wm_insight.narration`, executive single-writer path).
 - UI auto-speaks **chat replies** (`text_output.text`) via `/speech`.
+- Executive supports hot-toggleable local LLM trace logging (`packages/eva/llm_logs/config.json`) with redaction/truncation safeguards.
 
 > **Hard cutover note:** Long-term memory is now LanceDB. Existing JSON long-term memory is not used.
