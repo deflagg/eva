@@ -82,7 +82,7 @@ const TextConfigSchema = z.object({
 
 const AgentSubprocessConfigSchema = z.object({
   enabled: z.boolean().default(true),
-  cwd: z.string().trim().min(1).default('packages/eva/agent'),
+  cwd: z.string().trim().min(1).default('packages/eva/executive'),
   command: CommandSchema.default(['npm', 'run', 'dev']),
   healthUrl: HttpUrlSchema.default('http://127.0.0.1:8791/health'),
   readyTimeoutMs: PositiveTimeoutMsSchema.default(30_000),
@@ -102,7 +102,7 @@ const SubprocessesConfigSchema = z.object({
   enabled: z.boolean().default(false),
   agent: AgentSubprocessConfigSchema.default({
     enabled: true,
-    cwd: 'packages/eva/agent',
+    cwd: 'packages/eva/executive',
     command: ['npm', 'run', 'dev'],
     healthUrl: 'http://127.0.0.1:8791/health',
     readyTimeoutMs: 30_000,
@@ -161,7 +161,7 @@ const EvaConfigSchema = z.object({
     enabled: false,
     agent: {
       enabled: true,
-      cwd: 'packages/eva/agent',
+      cwd: 'packages/eva/executive',
       command: ['npm', 'run', 'dev'],
       healthUrl: 'http://127.0.0.1:8791/health',
       readyTimeoutMs: 30_000,

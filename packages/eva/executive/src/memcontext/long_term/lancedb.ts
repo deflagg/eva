@@ -9,7 +9,7 @@ import type {
   Table,
 } from '@lancedb/lancedb';
 
-const LANCEDB_RELATIVE_DIR = path.join('vector_db', 'lancedb');
+const LANCEDB_RELATIVE_DIR = path.join('long_term_memory_db', 'lancedb');
 const VECTOR_COLUMN_NAME = 'vector';
 
 export function deriveLanceDbDir(memoryDir: string): string {

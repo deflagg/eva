@@ -4,7 +4,7 @@ This repository hosts four components:
 
 - `packages/eva` — TypeScript daemon (HTTP/WebSocket gateway)
 - `packages/eva/vision` — Python FastAPI daemon (vision inference service)
-- `packages/eva/agent` — Node daemon (insight/text model service)
+- `packages/eva/executive` — Node daemon (insight/text model service)
 - `packages/ui` — Vite + React web client
 
 Protocol docs/schema are in `packages/protocol`.
@@ -30,9 +30,9 @@ Protocol docs/schema are in `packages/protocol`.
 
 ### Agent (cosmiconfig + zod)
 
-- `packages/eva/agent/agent.config.json` (committed)
-- `packages/eva/agent/agent.config.local.json` (optional local override, gitignored)
-- `packages/eva/agent/agent.secrets.local.json` (required local secrets file, gitignored)
+- `packages/eva/executive/agent.config.json` (committed)
+- `packages/eva/executive/agent.config.local.json` (optional local override, gitignored)
+- `packages/eva/executive/agent.secrets.local.json` (required local secrets file, gitignored)
 
 ### UI runtime config
 
@@ -56,7 +56,7 @@ If Vision fails to start because `python` is not the venv interpreter, set `subp
 ### 1) Agent (TypeScript + pi-ai)
 
 ```bash
-cd packages/eva/agent
+cd packages/eva/executive
 nvm install node
 nvm use node
 npm install

@@ -22,6 +22,7 @@ TypeScript daemon for UI/WebSocket orchestration.
   - sends a `hello` message on connect
   - accepts binary frame envelopes (`frame_binary`) for camera frames
   - forwards frames to Vision and routes detections/errors/insights back to UI
+  - when `detections.events[]` is present, forwards events to Executive `POST /events` (fire-and-forget)
   - forwards JSON `command` messages from UI (`insight_test`)
   - returns `QV_UNAVAILABLE` when Vision is not connected
 
@@ -76,7 +77,7 @@ Current schema (abridged):
     "enabled": false,
     "agent": {
       "enabled": true,
-      "cwd": "packages/eva/agent",
+      "cwd": "packages/eva/executive",
       "command": ["npm", "run", "dev"],
       "healthUrl": "http://127.0.0.1:8791/health"
     },
@@ -99,7 +100,7 @@ Notes:
 ### Agent
 
 ```bash
-cd packages/eva/agent
+cd packages/eva/executive
 nvm install node
 nvm use node
 npm install
@@ -129,7 +130,7 @@ npm install
 1. Start Agent:
 
 ```bash
-cd packages/eva/agent
+cd packages/eva/executive
 npm run dev
 ```
 

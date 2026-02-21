@@ -86,7 +86,7 @@ export function resolveMemoryPathsOrThrow() {
     shortTermDbPath: path.join(memoryDir, 'short_term_memory.db'),
     cacheDir: path.join(memoryDir, 'cache'),
     toneCachePath: path.join(memoryDir, 'cache', 'personality_tone.json'),
-    vectorDbDir: path.join(memoryDir, 'vector_db'),
+    longTermMemoryDbDir: path.join(memoryDir, 'long_term_memory_db'),
   };
 }
 

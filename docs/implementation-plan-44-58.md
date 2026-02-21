@@ -13,7 +13,7 @@ Implement the system below in SMALL ITERATIONS so diffs stay small and reviewabl
 # GOAL
 
 1. **Remove VisionAgent** entirely (no `packages/vision-agent` service).
-2. Add a new **`packages/eva/agent`** service (Node/TS) that is the **only** place that:
+2. Add a new **`packages/eva/executive`** service (Node/TS) that is the **only** place that:
 
    * calls OpenAI (pi tool-loop)
    * writes EVA memory artifacts (working/short/long + caches)
@@ -29,7 +29,7 @@ Implement the system below in SMALL ITERATIONS so diffs stay small and reviewabl
 
 # DECISIONS (LOCKED)
 
-* **OpenAI calls live only in `packages/eva/agent`.** No other package contains an OpenAI key.
+* **OpenAI calls live only in `packages/eva/executive`.** No other package contains an OpenAI key.
 * Vision insight transport v1: **Vision → Agent via HTTP POST** (no WS tool-loop).
 * Eva text transport v1:
 
@@ -52,7 +52,7 @@ Implement the system below in SMALL ITERATIONS so diffs stay small and reviewabl
 
   * keep **Agent** and **Vision** as independent subprocess services
   * place service folders under Eva package:
-    * `packages/eva/agent`
+    * `packages/eva/executive`
     * `packages/eva/vision`
 
 ---
@@ -249,7 +249,7 @@ Stop; update progress.md.
 
 ---
 
-## Iteration 45 — Add `packages/eva/agent` skeleton + `/health` (no OpenAI yet)
+## Iteration 45 — Add `packages/eva/executive` skeleton + `/health` (no OpenAI yet)
 
 Goal:
 
@@ -257,7 +257,7 @@ Goal:
 
 Deliverables:
 
-* Create `packages/eva/agent` package with:
+* Create `packages/eva/executive` package with:
 
   * `.nvmrc`, `package.json`, `tsconfig.json`, `README.md`
   * `agent.config.json` committed defaults
@@ -275,7 +275,7 @@ Deliverables:
 
 Acceptance:
 
-* `cd packages/eva/agent && npm i && npm run build` passes
+* `cd packages/eva/executive && npm i && npm run build` passes
 * `curl http://127.0.0.1:8791/health` returns 200
 
 Stop; update progress.md.
@@ -304,7 +304,7 @@ Deliverables:
 
 Acceptance:
 
-* `cd packages/eva/agent && npm run build`
+* `cd packages/eva/executive && npm run build`
 * `curl -sS -X POST http://127.0.0.1:8791/insight -H 'content-type: application/json' -d '<payload>'` returns 200 and expected shape
 
 Stop; update progress.md.
@@ -382,7 +382,7 @@ Goal:
 
 Deliverables:
 
-* Port the core logic from `packages/vision-agent/src/server.ts` into `packages/eva/agent`:
+* Port the core logic from `packages/vision-agent/src/server.ts` into `packages/eva/executive`:
 
   * request parsing with maxBodyBytes
   * maxFrames enforcement (keep HARD_MAX_FRAMES=6 to match current clip builder)
@@ -399,12 +399,12 @@ Deliverables:
     * **drop unknown tags** and log warning (v1)
 * Add minimal prompt files:
 
-  * `packages/eva/agent/src/prompts/insight.ts`
-  * `packages/eva/agent/src/tools/insight.ts`
+  * `packages/eva/executive/src/prompts/insight.ts`
+  * `packages/eva/executive/src/tools/insight.ts`
 
 Acceptance:
 
-* `cd packages/eva/agent && npm run build`
+* `cd packages/eva/executive && npm run build`
 * Manual: start stack, trigger insight, confirm `tts_response` looks correct and UI auto-speaks it
 
 Stop; update progress.md.
@@ -488,7 +488,7 @@ Deliverables:
 
 Acceptance:
 
-* `cd packages/eva/agent && npm run build`
+* `cd packages/eva/executive && npm run build`
 * `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"hello"}'` works
 
 Stop; update progress.md.

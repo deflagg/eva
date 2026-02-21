@@ -17,6 +17,8 @@ import { FrameRouter } from './router.js';
 import { synthesize } from './speech/edgeTts.js';
 
 const FRAME_ROUTE_TTL_MS = 5_000;
+const AGENT_EVENTS_INGEST_TIMEOUT_MS = 400;
+const AGENT_EVENTS_INGEST_WARN_COOLDOWN_MS = 10_000;
 
 class RequestBodyTooLargeError extends Error {
   constructor(maxBodyBytes: number) {
@@ -158,7 +160,33 @@ const AgentRespondResponseSchema = z
   })
   .passthrough();
 
+const AgentEventsIngestEventSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    ts_ms: z.number().int().nonnegative(),
+    severity: z.enum(['low', 'medium', 'high']),
+    track_id: z.number().int().optional(),
+    data: z.record(z.unknown()),
+  })
+  .strict();
+
+const AgentEventsIngestRequestSchema = z
+  .object({
+    v: z.literal(PROTOCOL_VERSION),
+    source: z.string().trim().min(1),
+    events: z.array(AgentEventsIngestEventSchema).min(1),
+    meta: z
+      .object({
+        frame_id: z.string().trim().min(1).optional(),
+        model: z.string().trim().min(1).optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .strict();
+
 type AgentRespondResponse = z.infer<typeof AgentRespondResponseSchema>;
+type AgentEventsIngestRequest = z.infer<typeof AgentEventsIngestRequestSchema>;
 
 interface TextOutputMessage {
   type: 'text_output';
@@ -428,6 +456,11 @@ function resolveAgentRespondUrl(baseUrl: string): string {
   return new URL('respond', normalizedBaseUrl).toString();
 }
 
+function resolveAgentEventsIngestUrl(baseUrl: string): string {
+  const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  return new URL('events', normalizedBaseUrl).toString();
+}
+
 async function callAgentRespond(
   agentConfig: StartServerOptions['agent'],
   request: ParsedTextRequest,
@@ -480,14 +513,66 @@ async function callAgentRespond(
   return parsedResponse.data;
 }
 
+async function callAgentEventsIngest(agentBaseUrl: string, payload: AgentEventsIngestRequest): Promise<void> {
+  const parsedPayload = AgentEventsIngestRequestSchema.safeParse(payload);
+  if (!parsedPayload.success) {
+    throw new AgentRequestError('Agent /events request payload shape is invalid.');
+  }
+
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => {
+    timeoutController.abort();
+  }, AGENT_EVENTS_INGEST_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch(resolveAgentEventsIngestUrl(agentBaseUrl), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(parsedPayload.data),
+      signal: timeoutController.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new AgentRequestTimeoutError(AGENT_EVENTS_INGEST_TIMEOUT_MS);
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    throw new AgentRequestError(`Agent /events request failed: ${message}`);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!response.ok) {
+    throw new AgentRequestError(`Agent /events returned HTTP ${response.status}.`);
+  }
+}
+
 export function startServer(options: StartServerOptions): Server {
   const { port, eyePath, quickvisionWsUrl, insightRelay, agent, text, speech } = options;
 
   let lastSpeechRequestStartedAtMs: number | null = null;
   let activeUiClient: WebSocket | null = null;
+  let lastAgentEventsIngestWarningAtMs: number | null = null;
 
   const speechCache = new Map<string, SpeechCacheEntry>();
   const inFlightSpeechSynthesis = new Map<string, Promise<Buffer>>();
+
+  const warnAgentEventsIngestFailure = (reason: string): void => {
+    const nowMs = Date.now();
+
+    if (
+      lastAgentEventsIngestWarningAtMs !== null &&
+      nowMs - lastAgentEventsIngestWarningAtMs < AGENT_EVENTS_INGEST_WARN_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    lastAgentEventsIngestWarningAtMs = nowMs;
+    console.warn(`[eva] failed to forward events to agent /events: ${reason}`);
+  };
 
   const evictExpiredSpeechCacheEntries = (nowMs: number): void => {
     if (!speech.cache.enabled || speech.cache.ttlMs <= 0) {
@@ -836,6 +921,23 @@ export function startServer(options: StartServerOptions): Server {
         const message = parsedMessage.data;
 
         if (message.type === 'detections') {
+          if (Array.isArray(message.events) && message.events.length > 0) {
+            const eventsPayload: AgentEventsIngestRequest = {
+              v: PROTOCOL_VERSION,
+              source: 'vision',
+              events: message.events,
+              meta: {
+                frame_id: message.frame_id,
+                model: message.model,
+              },
+            };
+
+            void callAgentEventsIngest(agent.baseUrl, eventsPayload).catch((error) => {
+              const reason = error instanceof Error ? error.message : String(error);
+              warnAgentEventsIngestFailure(reason);
+            });
+          }
+
           const targetClient = frameRouter.take(message.frame_id);
 
           if (!targetClient) {
@@ -1020,6 +1122,9 @@ export function startServer(options: StartServerOptions): Server {
       `[eva] insight relay enabled=${insightRelay.enabled} cooldownMs=${insightRelay.cooldownMs} dedupeWindowMs=${insightRelay.dedupeWindowMs}`,
     );
     console.log(`[eva] agent respond target ${resolveAgentRespondUrl(agent.baseUrl)} timeoutMs=${agent.timeoutMs}`);
+    console.log(
+      `[eva] agent events ingest target ${resolveAgentEventsIngestUrl(agent.baseUrl)} timeoutMs=${AGENT_EVENTS_INGEST_TIMEOUT_MS}`,
+    );
     console.log(
       `[eva] text endpoint enabled=${text.enabled} path=${text.path} maxBodyBytes=${text.maxBodyBytes} maxTextChars=${text.maxTextChars}`,
     );

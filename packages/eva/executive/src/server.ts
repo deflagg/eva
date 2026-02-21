@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import path from 'node:path';
@@ -18,17 +18,20 @@ import {
   normalizeToneLabel,
   saveToneStateAtomic,
   updateToneForSession,
-} from './memory/tone.js';
+} from './memcontext/tone.js';
+import { readRecentWmEvents } from './memcontext/live_events.js';
 import type { AgentConfig, AgentSecrets } from './config.js';
 import { buildInsightSystemPrompt, buildInsightUserPrompt } from './prompts/insight.js';
 import { buildRespondSystemPrompt, buildRespondUserPrompt } from './prompts/respond.js';
 import { INSIGHT_TOOL, INSIGHT_TOOL_NAME, type InsightSummary } from './tools/insight.js';
 import { RESPOND_TOOL, RESPOND_TOOL_NAME, type RespondPayload } from './tools/respond.js';
-import { deriveLanceDbDir, getOrCreateTable, mergeUpsertById, openDb, queryTopK } from './vectorstore/lancedb.js';
+import { deriveLanceDbDir, getOrCreateTable, mergeUpsertById, openDb, queryTopK } from './memcontext/long_term/lancedb.js';
 
 const HARD_MAX_FRAMES = 6;
 const WORKING_MEMORY_LOG_FILENAME = 'working_memory.log';
 const SHORT_TERM_MEMORY_DB_FILENAME = 'short_term_memory.db';
+const LEGACY_LONG_TERM_MEMORY_DIRNAME = ['vector', 'db'].join('_');
+const LONG_TERM_MEMORY_DB_DIRNAME = 'long_term_memory_db';
 const WORKING_MEMORY_WINDOW_MS = 60 * 60 * 1000;
 const DAY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const HOURLY_SUMMARY_MIN_BULLETS = 3;
@@ -40,6 +43,12 @@ const RESPOND_MEMORY_MAX_TOKENS = 900;
 const RESPOND_SHORT_TERM_MAX_ROWS = 8;
 const RESPOND_LONG_TERM_TOP_K = 6;
 const RESPOND_CORE_CACHE_ITEMS = 4;
+const LIVE_EVENT_WINDOW_MS = 2 * 60 * 1000;
+const LIVE_EVENT_MAX_ITEMS = 20;
+const LIVE_EVENT_MAX_LINE_CHARS = 180;
+const WM_EVENT_SUMMARY_MAX_CHARS = 180;
+const WM_EVENT_SUMMARY_MAX_DATA_FIELDS = 4;
+const WM_EVENT_SUMMARY_MAX_VALUE_CHARS = 48;
 
 const VECTOR_STORE_KINDS = {
   experiences: 'long_term_experiences',
@@ -137,6 +146,27 @@ const DailyJobRequestSchema = z
   })
   .strict();
 
+const WmEventSeveritySchema = z.enum(['low', 'medium', 'high']);
+
+const EventsIngestItemSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    ts_ms: z.number().int().nonnegative(),
+    severity: WmEventSeveritySchema,
+    track_id: z.number().int().optional(),
+    data: z.record(z.unknown()),
+  })
+  .strict();
+
+const EventsIngestRequestSchema = z
+  .object({
+    v: z.literal(1),
+    source: z.string().trim().min(1),
+    events: z.array(EventsIngestItemSchema).min(1),
+    meta: z.record(z.unknown()).optional(),
+  })
+  .strict();
+
 const WorkingMemoryRecordSchema = z
   .object({
     type: z.string().trim().min(1),
@@ -159,6 +189,8 @@ type InsightRequest = z.infer<typeof InsightRequestSchema>;
 type RespondRequest = z.infer<typeof RespondRequestSchema>;
 type HourlyJobRequest = z.infer<typeof HourlyJobRequestSchema>;
 type DailyJobRequest = z.infer<typeof DailyJobRequestSchema>;
+type EventsIngestRequest = z.infer<typeof EventsIngestRequestSchema>;
+type WmEventSeverity = z.infer<typeof WmEventSeveritySchema>;
 
 type VectorStoreKind = (typeof VECTOR_STORE_KINDS)[keyof typeof VECTOR_STORE_KINDS];
 
@@ -231,7 +263,18 @@ interface WorkingMemoryTextOutputEntry {
   meta: RespondMeta;
 }
 
-type WorkingMemoryEntry = WorkingMemoryTextInputEntry | WorkingMemoryTextOutputEntry;
+interface WorkingMemoryWmEventEntry {
+  type: 'wm_event';
+  ts_ms: number;
+  source: string;
+  name: string;
+  severity: WmEventSeverity;
+  track_id?: number;
+  summary: string;
+  data: Record<string, unknown>;
+}
+
+type WorkingMemoryEntry = WorkingMemoryTextInputEntry | WorkingMemoryTextOutputEntry | WorkingMemoryWmEventEntry;
 
 type WorkingMemoryRecord = {
   type: string;
@@ -268,6 +311,7 @@ interface DailySummaryResult {
 }
 
 interface RespondMemorySources {
+  workingMemoryLogPath: string;
   shortTermMemoryDbPath: string;
   lancedbDir: string;
   coreExperiencesCachePath: string;
@@ -493,6 +537,33 @@ function parseDailyJobRequest(payload: unknown | undefined): DailyJobRequest {
   }
 
   return parsed.data;
+}
+
+function parseEventsIngestRequest(payload: unknown): EventsIngestRequest {
+  const parsed = EventsIngestRequestSchema.safeParse(payload);
+  if (!parsed.success) {
+    const details = parsed.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`).join('; ');
+    throw new HttpRequestError(400, 'INVALID_REQUEST', `Invalid events ingest payload: ${details}`);
+  }
+
+  return parsed.data;
+}
+
+function migrateLegacyLongTermMemoryDir(memoryDirPath: string): void {
+  const legacyLongTermMemoryDir = path.resolve(memoryDirPath, LEGACY_LONG_TERM_MEMORY_DIRNAME);
+  const longTermMemoryDbDir = path.resolve(memoryDirPath, LONG_TERM_MEMORY_DB_DIRNAME);
+
+  if (!existsSync(legacyLongTermMemoryDir) || existsSync(longTermMemoryDbDir)) {
+    return;
+  }
+
+  try {
+    renameSync(legacyLongTermMemoryDir, longTermMemoryDbDir);
+    console.log('[agent] migrated legacy long-term memory dir -> long_term_memory_db');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[agent] failed to migrate legacy long-term memory dir -> long_term_memory_db: ${message}`);
+  }
 }
 
 function toNonNegativeNumber(value: unknown): number {
@@ -770,6 +841,76 @@ function truncateText(value: string, maxLength = 160): string {
   }
 
   return `${trimmed.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function formatTimeHms(tsMs: number): string {
+  const date = new Date(tsMs);
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+
+  return `${hours}:${minutes}:${seconds}`;
+}
+
+function formatWmEventSummaryValue(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const normalized = value.replace(/\s+/g, ' ').trim();
+    if (!normalized) {
+      return null;
+    }
+
+    return truncateText(normalized, WM_EVENT_SUMMARY_MAX_VALUE_CHARS);
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(4)));
+  }
+
+  if (typeof value === 'boolean') {
+    return value ? 'true' : 'false';
+  }
+
+  return null;
+}
+
+function buildWmEventSummary(event: EventsIngestRequest['events'][number]): string {
+  const parts = [event.name];
+
+  if (typeof event.track_id === 'number') {
+    parts.push(`track_id=${event.track_id}`);
+  }
+
+  const keys = Object.keys(event.data).sort();
+  let dataFieldCount = 0;
+
+  for (const key of keys) {
+    if (dataFieldCount >= WM_EVENT_SUMMARY_MAX_DATA_FIELDS) {
+      break;
+    }
+
+    const valueText = formatWmEventSummaryValue(event.data[key]);
+    if (valueText === null) {
+      continue;
+    }
+
+    parts.push(`${key}=${valueText}`);
+    dataFieldCount += 1;
+  }
+
+  return truncateText(parts.join(' '), WM_EVENT_SUMMARY_MAX_CHARS);
+}
+
+function buildWorkingMemoryEventEntries(payload: EventsIngestRequest): WorkingMemoryWmEventEntry[] {
+  return payload.events.map((event) => ({
+    type: 'wm_event',
+    ts_ms: event.ts_ms,
+    source: payload.source,
+    name: event.name,
+    severity: event.severity,
+    ...(typeof event.track_id === 'number' ? { track_id: event.track_id } : {}),
+    summary: buildWmEventSummary(event),
+    data: event.data,
+  }));
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -1635,6 +1776,29 @@ async function buildRespondMemoryContext(params: {
     budget,
   );
 
+  const recentLiveEvents = await readRecentWmEvents({
+    logPath: memorySources.workingMemoryLogPath,
+    nowMs: Date.now(),
+    windowMs: LIVE_EVENT_WINDOW_MS,
+    maxItems: LIVE_EVENT_MAX_ITEMS,
+  });
+
+  appendLineWithinBudget(lines, 'Live events (last ~2 minutes):', budget);
+  if (recentLiveEvents.length === 0) {
+    appendLineWithinBudget(lines, '- none', budget);
+  }
+
+  for (const event of recentLiveEvents) {
+    const line = truncateText(
+      `- [${formatTimeHms(event.ts_ms)}] ${event.source} ${event.severity} ${event.summary}`,
+      LIVE_EVENT_MAX_LINE_CHARS,
+    );
+
+    if (!appendLineWithinBudget(lines, line, budget)) {
+      break;
+    }
+  }
+
   const recentRows = selectRecentShortTermSummaries(memorySources.shortTermMemoryDbPath, RESPOND_SHORT_TERM_MAX_ROWS);
   const recentRowsWithTags = recentRows.map((row) => ({
     row,
@@ -1965,6 +2129,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
   const workingMemoryWriteQueue = new SerialTaskQueue();
 
   mkdirSync(config.memoryDirPath, { recursive: true });
+  migrateLegacyLongTermMemoryDir(config.memoryDirPath);
   initializeShortTermMemoryDb(shortTermMemoryDbPath);
 
   let lastInsightRequestAt: number | null = null;
@@ -2000,6 +2165,60 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
             lancedbDir,
             lancedbTables: [VECTOR_STORE_KINDS.experiences, VECTOR_STORE_KINDS.personality],
           },
+        });
+        return;
+      }
+
+      if (method === 'POST' && requestUrl.pathname === '/events') {
+        const contentType = String(req.headers['content-type'] ?? '').toLowerCase();
+        if (!contentType.includes('application/json')) {
+          sendError(res, 415, 'UNSUPPORTED_CONTENT_TYPE', 'Content-Type must be application/json.');
+          return;
+        }
+
+        let body: unknown;
+        try {
+          body = await readJsonBody(req, config.insight.maxBodyBytes);
+        } catch (error) {
+          if (error instanceof HttpRequestError) {
+            sendError(res, error.statusCode, error.code, error.message, error.extra);
+            return;
+          }
+
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(res, 400, 'INVALID_BODY', message);
+          return;
+        }
+
+        let ingestRequest: EventsIngestRequest;
+        try {
+          ingestRequest = parseEventsIngestRequest(body);
+        } catch (error) {
+          if (error instanceof HttpRequestError) {
+            sendError(res, error.statusCode, error.code, error.message, error.extra);
+            return;
+          }
+
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(res, 400, 'INVALID_REQUEST', message);
+          return;
+        }
+
+        const wmEventEntries = buildWorkingMemoryEventEntries(ingestRequest);
+
+        try {
+          await workingMemoryWriteQueue.run(async () => {
+            await appendWorkingMemoryEntries(workingMemoryLogPath, wmEventEntries);
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(res, 500, 'MEMORY_WRITE_FAILED', `Failed to persist wm_event entries: ${message}`);
+          return;
+        }
+
+        sendJson(res, 200, {
+          accepted: wmEventEntries.length,
+          ts_ms: Date.now(),
         });
         return;
       }
@@ -2195,6 +2414,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
             tagWhitelist,
             personaPrompt,
             {
+              workingMemoryLogPath,
               shortTermMemoryDbPath,
               lancedbDir,
               coreExperiencesCachePath,
@@ -2355,6 +2575,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
   server.listen(config.server.port, () => {
     console.log(`[agent] listening on http://localhost:${config.server.port}`);
     console.log('[agent] health endpoint GET /health');
+    console.log('[agent] events endpoint POST /events (wm_event ingest via serial write queue)');
     console.log('[agent] jobs endpoint POST /jobs/hourly (working→sqlite rollup + trim)');
     console.log('[agent] jobs endpoint POST /jobs/daily (sqlite→lancedb upsert + core cache refresh)');
     console.log('[agent] respond endpoint POST /respond (model tool-call + memory writes)');

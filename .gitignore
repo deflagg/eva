@@ -25,7 +25,7 @@ packages/ui/public/config.local.json
 packages/eva/memory/working_memory.log
 packages/eva/memory/short_term_memory.db
 packages/eva/memory/cache/**
-packages/eva/memory/vector_db/**
+packages/eva/memory/long_term_memory_db/**
 
 # OS/editor
 .DS_Store

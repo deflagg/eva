@@ -38,7 +38,7 @@
     "enabled": true,
     "agent": {
       "enabled": true,
-      "cwd": "packages/eva/agent",
+      "cwd": "packages/eva/executive",
       "command": ["npm", "run", "dev"],
       "healthUrl": "http://127.0.0.1:8791/health",
       "readyTimeoutMs": 30000,

@@ -147,7 +147,7 @@ Important operational note (LOCKED):
 
 Deliverables:
 
-* Add `packages/eva/agent/scripts/`:
+* Add `packages/eva/executive/scripts/`:
 
   * `reset-working.mjs`
 
@@ -165,7 +165,7 @@ Deliverables:
     * deletes everything above
     * deletes `vector_db/**` (this nukes LanceDB tables too)
     * ensures `cache/` and `vector_db/` exist after run
-* Add `packages/eva/agent/package.json` scripts:
+* Add `packages/eva/executive/package.json` scripts:
 
   * `mem:reset:working`
   * `mem:reset:session`
@@ -181,7 +181,7 @@ Deliverables:
 
 Acceptance:
 
-* `cd packages/eva/agent && npm run build`
+* `cd packages/eva/executive && npm run build`
 * Create dummy runtime files and verify each script deletes only its scope and recreates needed dirs.
 
 Stop; update progress.md.
@@ -196,7 +196,7 @@ Goal:
 
 Deliverables:
 
-* Add `packages/eva/agent/src/memory/tone.ts`:
+* Add `packages/eva/executive/src/memory/tone.ts`:
 
   * `loadToneState(memoryDir)`
   * `getSessionKey(sessionId?: string): string` → returns `sessionId ?? "default"`
@@ -261,10 +261,10 @@ Goal:
 
 Deliverables:
 
-* Add dependency to `packages/eva/agent/package.json`:
+* Add dependency to `packages/eva/executive/package.json`:
 
   * `@lancedb/lancedb` (pin version)
-* Add `packages/eva/agent/src/vectorstore/lancedb.ts`:
+* Add `packages/eva/executive/src/vectorstore/lancedb.ts`:
 
   * `openDb(lancedbDir)`
   * `getOrCreateTable(name, schema)`
@@ -277,7 +277,7 @@ Deliverables:
 
 Acceptance:
 
-* `cd packages/eva/agent && npm i && npm run build`
+* `cd packages/eva/executive && npm i && npm run build`
 * A tiny local dev harness can create table → insert 1 row → query it back.
 
 Stop; update progress.md.
@@ -306,7 +306,7 @@ Deliverables:
   * counts written this run
 * **Docs alignment in this same iteration (required):**
 
-  * update `packages/eva/agent/README.md` to replace JSON index paths with LanceDB tables + directory
+  * update `packages/eva/executive/README.md` to replace JSON index paths with LanceDB tables + directory
   * update any “vector db is JSON index” wording that is now incorrect
 
 Acceptance:

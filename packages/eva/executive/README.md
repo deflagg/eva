@@ -9,6 +9,11 @@ Node/TypeScript service for EVA text + insight generation.
 - Loads OpenAI API key from local secrets JSON.
 - Loads persona guidance from `packages/eva/memory/persona.md` for chat response prompting.
 - Exposes `GET /health`.
+- Exposes `POST /events`:
+  - accepts versioned event ingest payloads (`v:1`) from EVA modules (for example, vision)
+  - validates event envelopes (`name`, `ts_ms`, `severity`, optional `track_id`, `data`)
+  - transforms events into `wm_event` JSONL entries and appends them through the same serial write queue used by `/respond`
+  - returns `{ accepted, ts_ms }`
 - Exposes `POST /jobs/hourly`:
   - reads `packages/eva/memory/working_memory.log` under the same write queue used by `/respond`
   - selects entries older than 60 minutes
@@ -20,13 +25,14 @@ Node/TypeScript service for EVA text + insight generation.
   - upserts long-term vectors into LanceDB tables:
     - `long_term_experiences`
     - `long_term_personality`
-    - LanceDB dir: `packages/eva/memory/vector_db/lancedb`
+    - LanceDB dir: `packages/eva/memory/long_term_memory_db/lancedb`
   - updates stable cache artifacts:
     - `packages/eva/memory/cache/core_experiences.json`
     - `packages/eva/memory/cache/core_personality.json`
 - Exposes real model-backed `POST /respond`:
   - accepts `{ "text": "...", "session_id": "optional" }`
   - builds retrieval context before the model call from:
+    - live `wm_event` entries from the last ~2 minutes (all non-chat event sources)
     - recent short-term SQLite summaries (tag-filtered)
     - top-K long-term vector hits from LanceDB tables (`long_term_experiences` + `long_term_personality`)
     - core cache files (`core_experiences.json`, `core_personality.json`)
@@ -108,6 +114,26 @@ npm run build
 curl -s http://127.0.0.1:8791/health
 ```
 
+## Events ingest check
+
+```bash
+curl -sS -X POST http://127.0.0.1:8791/events \
+  -H 'content-type: application/json' \
+  -d '{
+    "v": 1,
+    "source": "vision",
+    "events": [
+      {
+        "name": "roi_dwell",
+        "ts_ms": 1730000000000,
+        "severity": "medium",
+        "track_id": 3,
+        "data": { "roi": "front_door", "dwell_ms": 1200, "conf": 0.92 }
+      }
+    ]
+  }'
+```
+
 ## Hourly worker check
 
 ```bash
@@ -139,7 +165,7 @@ curl -sS -X POST http://127.0.0.1:8791/jobs/daily \
 Inspect LanceDB artifacts after a run:
 
 ```bash
-ls -la packages/eva/memory/vector_db/lancedb
+ls -la packages/eva/memory/long_term_memory_db/lancedb
 ```
 
 ## Respond check

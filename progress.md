@@ -3420,3 +3420,374 @@
 
 ### Notes
 - Iterations 59–65 are now complete.
+
+## Iteration 66 — Rename package folder `agent` → `executive` (mechanical rename)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Renamed package folder via git move:
+  - `packages/eva/agent/` → `packages/eva/executive/`
+- Updated Eva subprocess path references from the old folder to the new folder:
+  - `packages/eva/src/config.ts` defaults (`subprocesses.agent.cwd`)
+  - `packages/eva/eva.config.local.example.json` (`subprocesses.agent.cwd`)
+- Updated docs path references to the new folder in:
+  - `README.md`
+  - `packages/eva/README.md`
+  - `docs/implementation-plan-44-58.md`
+  - `docs/implementation-plan-59-65.md`
+- Kept config filename/namespace behavior unchanged (per locked decisions):
+  - `agent.config.json` / `agent.config.local.json` / `agent.secrets.local.json` names unchanged
+  - cosmiconfig namespace remains `agent`
+
+### Files changed
+- `packages/eva/agent/**` → `packages/eva/executive/**` (folder rename, code unchanged)
+- `packages/eva/src/config.ts`
+- `packages/eva/eva.config.local.example.json`
+- `packages/eva/README.md`
+- `README.md`
+- `docs/implementation-plan-44-58.md`
+- `docs/implementation-plan-59-65.md`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/executive && npm run build` passes.
+- Runtime check passes:
+  - start executive: `cd packages/eva/executive && npm run dev`
+  - `GET /health` returns `200` and `"service":"agent"`.
+- `cd packages/eva && npm run build` passes.
+
+### Manual run instructions
+1. Start executive service:
+   - `cd packages/eva/executive`
+   - `npm run dev`
+2. Verify health:
+   - `curl -sS http://127.0.0.1:8791/health`
+3. Build Eva gateway:
+   - `cd packages/eva`
+   - `npm run build`
+
+### Notes
+- This iteration is a mechanical rename only; no runtime behavior changes were introduced.
+- Iteration 67 (memcontext namespace move) is next.
+
+## Iteration 67 — Clarify “memory code” naming: introduce `src/memcontext/` and move tone + lancedb adapters
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Created clearer executive code namespaces:
+  - `packages/eva/executive/src/memcontext/`
+  - `packages/eva/executive/src/memcontext/long_term/`
+- Moved tone helper code:
+  - `packages/eva/executive/src/memory/tone.ts`
+  - -> `packages/eva/executive/src/memcontext/tone.ts`
+- Moved LanceDB adapter code:
+  - `packages/eva/executive/src/vectorstore/lancedb.ts`
+  - -> `packages/eva/executive/src/memcontext/long_term/lancedb.ts`
+- Updated executive imports in `packages/eva/executive/src/server.ts`:
+  - `./memory/tone.js` -> `./memcontext/tone.js`
+  - `./vectorstore/lancedb.js` -> `./memcontext/long_term/lancedb.js`
+- Kept behavior unchanged:
+  - persisted memory data remains under `packages/eva/memory/`
+  - tone logic and LanceDB logic unchanged
+
+### Files changed
+- `packages/eva/executive/src/memory/tone.ts` -> `packages/eva/executive/src/memcontext/tone.ts`
+- `packages/eva/executive/src/vectorstore/lancedb.ts` -> `packages/eva/executive/src/memcontext/long_term/lancedb.ts`
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/executive && npm run build` passes.
+- Runtime sanity check passes:
+  - start executive: `cd packages/eva/executive && npm run dev`
+  - `GET /health` returns `200` and memory paths remain under `packages/eva/memory/...`
+  - verified health payload still reports:
+    - tone cache: `.../cache/personality_tone.json`
+    - lancedb dir: `.../vector_db/lancedb`
+- `cd packages/eva && npm run build` passes.
+
+### Manual run instructions
+1. Start executive:
+   - `cd packages/eva/executive`
+   - `npm run dev`
+2. Verify health + memory paths:
+   - `curl -sS http://127.0.0.1:8791/health`
+3. Build Eva gateway:
+   - `cd packages/eva`
+   - `npm run build`
+
+### Notes
+- This iteration is naming/structure cleanup for code modules only; no runtime behavior or persisted data layout changes.
+
+## Iteration 70 — Rename on-disk long-term folder: `vector_db` → `long_term_memory_db` (with safe migration)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated LanceDB directory derivation in executive runtime:
+  - `packages/eva/executive/src/memcontext/long_term/lancedb.ts`
+  - relative path now resolves to `long_term_memory_db/lancedb` (was `vector_db/lancedb`).
+- Updated executive memory reset scripts to use the renamed long-term directory:
+  - `packages/eva/executive/scripts/reset-common.mjs`
+    - renamed resolved path field: `vectorDbDir` -> `longTermMemoryDbDir`
+    - path now points to `memory/long_term_memory_db`
+  - `packages/eva/executive/scripts/reset-all.mjs`
+    - remove/recreate now targets `long_term_memory_db/**`
+    - updated log strings accordingly.
+- Updated repo ignore rules:
+  - `.gitignore` now ignores `packages/eva/memory/long_term_memory_db/**`.
+- Updated executive docs path references:
+  - `packages/eva/executive/README.md`
+    - LanceDB dir examples now reference `packages/eva/memory/long_term_memory_db/lancedb`.
+- Added one-time startup migration in executive:
+  - `packages/eva/executive/src/server.ts`
+  - on startup, if `packages/eva/memory/vector_db` exists and `packages/eva/memory/long_term_memory_db` does not, executive renames the legacy directory once.
+  - success log: `migrated legacy vector_db -> long_term_memory_db`
+  - failure path logs a warning and continues (no crash).
+
+### Files changed
+- `.gitignore`
+- `packages/eva/executive/src/memcontext/long_term/lancedb.ts`
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/scripts/reset-common.mjs`
+- `packages/eva/executive/scripts/reset-all.mjs`
+- `packages/eva/executive/README.md`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+- One-time migration behavior verified locally:
+  - before startup: `packages/eva/memory/vector_db/` existed and `packages/eva/memory/long_term_memory_db/` did not
+  - after starting executive once: `vector_db/` was renamed to `long_term_memory_db/`.
+- Reset script behavior verified:
+  - `cd packages/eva/executive && npm run mem:reset:all`
+  - confirmed it recreates:
+    - `packages/eva/memory/cache/`
+    - `packages/eva/memory/long_term_memory_db/`.
+
+### Manual run instructions
+1. Build executive and gateway:
+   - `cd packages/eva/executive && npm run build`
+   - `cd packages/eva && npm run build`
+2. Verify one-time migration behavior (if you still have legacy data):
+   - ensure `packages/eva/memory/vector_db/` exists and `packages/eva/memory/long_term_memory_db/` does not
+   - start executive once: `cd packages/eva/executive && npm run dev`
+   - confirm directory is renamed on disk.
+3. Verify reset behavior:
+   - `cd packages/eva/executive && npm run mem:reset:all`
+   - check `packages/eva/memory/cache/` and `packages/eva/memory/long_term_memory_db/` exist.
+
+### Notes
+- Config filenames and cosmiconfig namespace remain unchanged (`agent.config*.json`, `cosmiconfigSync('agent', ...)`) per locked decisions.
+- Runtime now reads/writes LanceDB under `packages/eva/memory/long_term_memory_db/lancedb`.
+
+## Iteration 71 — Single writer: add Executive `/events` ingest endpoint that appends `wm_event` entries
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Added versioned events ingest schema + validation in executive (`packages/eva/executive/src/server.ts`):
+  - request shape:
+    - `v: 1`
+    - `source: string (non-empty)`
+    - `events: non-empty[]`
+    - optional `meta: object`
+  - each event validates:
+    - `name: string (non-empty)`
+    - `ts_ms: non-negative int`
+    - `severity: low|medium|high`
+    - optional `track_id: int`
+    - `data: object`
+- Added `POST /events` endpoint in executive.
+- Added event->working-memory transform into JSONL envelope:
+  - `type: "wm_event"`
+  - `ts_ms`, `source`, `name`, `severity`, optional `track_id`, `data`
+  - `summary` generated by executive from event name + compact key fields.
+- Ensured single-writer behavior:
+  - `/events` appends through the **same** `workingMemoryWriteQueue` used by `/respond` writes.
+  - no direct working-memory writes outside the queue.
+- Added startup log line for new endpoint:
+  - `events endpoint POST /events (wm_event ingest via serial write queue)`.
+- Updated executive README with `/events` behavior + curl example.
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/README.md`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+- Manual endpoint check passes:
+  - `POST /events` returns `200` with `{ accepted, ts_ms }`.
+  - verified `packages/eva/memory/working_memory.log` includes JSONL line with:
+    - `"type":"wm_event"`
+    - expected event fields + executive-generated summary.
+  - verified JSON parse of log line succeeds.
+
+### Manual run instructions
+1. Start executive:
+   - `cd packages/eva/executive`
+   - `npm run dev`
+2. Send a test ingest payload:
+   - `curl -sS -X POST http://127.0.0.1:8791/events -H 'content-type: application/json' -d '{"v":1,"source":"vision","events":[{"name":"roi_dwell","ts_ms":1730000000000,"severity":"medium","track_id":3,"data":{"roi":"front_door","dwell_ms":1200}}]}'`
+3. Verify working memory log append:
+   - `tail -n 5 packages/eva/memory/working_memory.log`
+   - confirm a `wm_event` JSON object is present.
+
+### Notes
+- This iteration only adds executive-side ingest + persistence.
+- EVA gateway forwarding into `/events` remains next (Iteration 72).
+
+## Iteration 72 — EVA gateway forwards `detections.events[]` to Executive `/events` (no file writes in EVA)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Added Executive events-ingest forwarder helper in EVA (`packages/eva/src/server.ts`):
+  - `resolveAgentEventsIngestUrl(baseUrl)`
+  - `callAgentEventsIngest(agentBaseUrl, payload)`
+    - posts to `POST /events`
+    - uses short timeout (`400ms`) via `AbortController`
+    - validates request payload shape before send (`v:1`, source, events[], optional meta)
+    - throws non-fatal errors for HTTP/network/timeout failures.
+- Added fire-and-forget forwarding path in QuickVision inbound handler:
+  - when `message.type === "detections"` and `message.events?.length > 0`:
+    - sends `{ v:1, source:"vision", events: message.events, meta:{ frame_id, model } }` to Executive `/events`
+    - does **not** block frame routing or WebSocket message handling.
+- Added warning throttling for ingest failures:
+  - warning log for `/events` forwarding failures is rate-limited (`10s` cooldown).
+- Added startup observability log:
+  - `agent events ingest target ... timeoutMs=400`.
+- Updated EVA README to document event forwarding behavior.
+
+### Files changed
+- `packages/eva/src/server.ts`
+- `packages/eva/README.md`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/eva/executive && npm run build`
+- End-to-end forwarding smoke test passes (local scripted harness):
+  - started Executive (`startAgentServer`) + EVA (`startServer`) + mock QuickVision WebSocket server
+  - mock QuickVision sent a `detections` payload containing `events[]`
+  - EVA forwarded events to Executive `/events` without waiting on frame routing
+  - verified `packages/eva/memory/working_memory.log` contains appended `wm_event` with:
+    - `source: "vision"`
+    - `name: <test event name>`
+    - valid JSONL entry parse.
+
+### Manual run instructions
+1. Start Executive:
+   - `cd packages/eva/executive`
+   - `npm run dev`
+2. Start Vision + EVA stack (external or subprocess mode), then stream frames that trigger detector events.
+3. Confirm event forwarding persistence:
+   - `tail -n 20 packages/eva/memory/working_memory.log`
+   - verify `wm_event` lines with `source:"vision"` appear while events are being generated.
+
+### Notes
+- EVA still performs **no direct file writes** for event persistence; Executive remains the single writer for `working_memory.log`.
+- `/events` forwarding is intentionally fire-and-forget; routing/relay path remains responsive even if Executive ingest is temporarily unavailable.
+
+## Iteration 73 — Executive /respond injects last N minutes of ALL `wm_event` entries into memory context
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Added live-events memory-context helper:
+  - new file `packages/eva/executive/src/memcontext/live_events.ts`
+  - reads `working_memory.log` JSONL safely (skips invalid lines)
+  - filters only `type: "wm_event"`
+  - filters by time window (`ts_ms >= nowMs - windowMs`)
+  - sorts ascending by `ts_ms`
+  - returns last N items (max cap).
+- Added required live-event constants in executive runtime (`packages/eva/executive/src/server.ts`):
+  - `LIVE_EVENT_WINDOW_MS = 2 * 60 * 1000`
+  - `LIVE_EVENT_MAX_ITEMS = 20`
+  - `LIVE_EVENT_MAX_LINE_CHARS = 180`
+- Updated respond memory-context build path to inject live events near the top:
+  - section header: `Live events (last ~2 minutes):`
+  - per-line format:
+    - `- [HH:MM:SS] <source> <severity> <summary>`
+  - each line truncated to `LIVE_EVENT_MAX_LINE_CHARS`
+  - line addition remains bounded by existing memory-context token budget logic.
+- Updated respond memory-source wiring:
+  - `RespondMemorySources` now includes `workingMemoryLogPath`
+  - `/respond` call path passes log path into context builder.
+- Updated executive README to reflect live `wm_event` context inclusion in `/respond` retrieval context.
+
+### Files changed
+- `packages/eva/executive/src/memcontext/live_events.ts`
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/README.md`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+- Helper behavior check passes:
+  - posted one old (`>2m`) and one recent `wm_event` via `POST /events`
+  - `readRecentWmEvents(...)` returned recent event and excluded old event.
+- `/respond` runtime check passes:
+  - after posting a recent `wm_event`, `POST /respond` with “what are the recent events right now?” returned a concrete event-based answer (instead of generic no-info response).
+
+### Manual run instructions
+1. Start executive:
+   - `cd packages/eva/executive`
+   - `npm run dev`
+2. Ingest a recent event (or trigger through EVA/Vision):
+   - `curl -sS -X POST http://127.0.0.1:8791/events -H 'content-type: application/json' -d '{"v":1,"source":"vision","events":[{"name":"roi_dwell","ts_ms":1730000000000,"severity":"medium","track_id":3,"data":{"roi":"front_door","dwell_ms":1200}}]}'`
+3. Ask through respond endpoint:
+   - `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"what were the recent events"}'`
+4. Confirm response references recent event details.
+
+### Notes
+- Live-events context is source-agnostic for `wm_event` entries (future-proof beyond vision).
+- Token-budget enforcement remains unchanged; live-event lines are capped and may truncate/stop when budget is full.
+
+## Iteration 74 — Final cleanup: remove remaining `vector_db` references
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Finalized runtime cleanup for old long-term directory naming.
+- Updated remaining executive migration runtime strings in `packages/eva/executive/src/server.ts`:
+  - migration log text now references generic legacy long-term directory wording and target `long_term_memory_db`.
+  - warning log text updated similarly.
+- Kept migration behavior intact while removing explicit old-folder-name references from active runtime/docs/scripts paths.
+- Verified active docs/scripts/runtime paths now consistently reference:
+  - `packages/eva/memory/long_term_memory_db/lancedb`.
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+- Repo search cleanup check passes:
+  - searching for `vector_db` outside historical plan/progress docs returns no relevant runtime/docs/scripts matches.
+
+### Manual run instructions
+1. Build executive + eva:
+   - `cd packages/eva/executive && npm run build`
+   - `cd packages/eva && npm run build`
+2. Optional sanity search for residual references:
+   - `grep -R --line-number --exclude-dir=node_modules --exclude-dir=dist --exclude='progress.md' --exclude='implementation-plan-*.md' "vector_db" /path/to/repo`
+3. Start executive and verify health:
+   - `cd packages/eva/executive && npm run dev`
+   - `curl -sS http://127.0.0.1:8791/health`
+
+### Notes
+- Remaining `vector_db` mentions are intentionally historical in prior implementation-plan docs and progress history.
+- Runtime long-term store path and operational docs are now aligned on `long_term_memory_db`.

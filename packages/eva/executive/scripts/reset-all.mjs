@@ -7,9 +7,9 @@ logResolvedPaths('all', paths);
 removePathIfExists(paths.workingLogPath);
 removePathIfExists(paths.shortTermDbPath);
 removePathIfExists(paths.cacheDir);
-removePathIfExists(paths.vectorDbDir);
+removePathIfExists(paths.longTermMemoryDbDir);
 ensureDir(paths.cacheDir);
-ensureDir(paths.vectorDbDir);
+ensureDir(paths.longTermMemoryDbDir);
 
-console.log('[mem-reset:all] removed working/session runtime files and vector_db/**');
-console.log('[mem-reset:all] ensured cache/ and vector_db/ exist');
+console.log('[mem-reset:all] removed working/session runtime files and long_term_memory_db/**');
+console.log('[mem-reset:all] ensured cache/ and long_term_memory_db/ exist');
