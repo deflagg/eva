@@ -2,7 +2,7 @@
 
 TypeScript daemon for UI/WebSocket orchestration.
 
-## Current behavior (Iteration 53)
+## Current behavior (Iteration 102)
 
 - HTTP server on configured `server.port` (default `8787`)
 - Optional text endpoint (when `text.enabled=true`):
@@ -24,6 +24,36 @@ TypeScript daemon for UI/WebSocket orchestration.
   - when `detections.events[]` is present, forwards events to Executive `POST /events` (fire-and-forget)
   - forwards JSON `command` messages from UI (`insight_test`)
   - returns `QV_UNAVAILABLE` when Vision is not connected
+
+## Push alerts (high-severity)
+
+Eva now emits push-mode alerts to the connected UI when high-severity signals arrive from Vision.
+
+### What triggers push-mode alerts
+
+- High insight:
+  - incoming `insight` where `summary.severity === "high"`
+  - Eva pushes `text_output` immediately and then `speech_output` (when speech is enabled).
+- High detector event:
+  - incoming `detections.events[]` entries where `event.severity === "high"`
+  - Eva pushes `text_output` immediately and then `speech_output` (when speech is enabled).
+
+### Guardrails (anti-spam)
+
+Push alerts are independent from raw insight relay suppression.
+
+- Cooldown: `HIGH_ALERT_COOLDOWN_MS = 10000`
+- Dedupe window: `HIGH_ALERT_DEDUPE_WINDOW_MS = 60000`
+- Dedupe keys:
+  - insight: `insight:<clip_id>`
+  - event: `event:<event_name>:<track_id|na>`
+
+### Audio unlock in UI
+
+Browsers can block autoplay audio until a user gesture occurs.
+
+- In the UI, click **Enable Audio** once per tab/session.
+- After unlock, incoming `speech_output` push alerts play immediately.
 
 ## Runtime modes
 

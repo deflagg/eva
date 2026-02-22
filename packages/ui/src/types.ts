@@ -101,10 +101,32 @@ export interface TextOutputMessage {
   meta: TextOutputMeta;
 }
 
+export interface SpeechOutputMeta {
+  trigger_kind: 'insight' | 'wm_event';
+  trigger_id: string;
+  severity: 'high';
+  [key: string]: unknown;
+}
+
+export interface SpeechOutputMessage {
+  type: 'speech_output';
+  v: 1;
+  request_id: string;
+  session_id: string;
+  ts_ms: number;
+  mime: 'audio/mpeg';
+  voice: string;
+  rate: number;
+  text: string;
+  audio_b64: string;
+  meta: SpeechOutputMeta;
+}
+
 export type ProtocolMessage =
   | HelloMessage
   | DetectionsMessage
   | ErrorMessage
   | InsightMessage
   | TextOutputMessage
+  | SpeechOutputMessage
   | CommandMessage;

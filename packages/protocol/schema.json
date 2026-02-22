@@ -22,6 +22,12 @@
     },
     {
       "$ref": "#/$defs/insight"
+    },
+    {
+      "$ref": "#/$defs/text_output"
+    },
+    {
+      "$ref": "#/$defs/speech_output"
     }
   ],
   "$defs": {
@@ -295,6 +301,160 @@
         },
         "usage": {
           "$ref": "#/$defs/insight_usage"
+        }
+      }
+    },
+    "text_output_meta": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "tone",
+        "concepts",
+        "surprise",
+        "note"
+      ],
+      "properties": {
+        "tone": {
+          "type": "string",
+          "minLength": 1
+        },
+        "concepts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "surprise": {
+          "type": "number"
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "text_output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "v",
+        "request_id",
+        "ts_ms",
+        "text",
+        "meta"
+      ],
+      "properties": {
+        "type": {
+          "const": "text_output"
+        },
+        "v": {
+          "$ref": "#/$defs/version"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "meta": {
+          "$ref": "#/$defs/text_output_meta"
+        }
+      }
+    },
+    "speech_output_meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trigger_kind",
+        "trigger_id",
+        "severity"
+      ],
+      "properties": {
+        "trigger_kind": {
+          "type": "string",
+          "enum": [
+            "insight",
+            "wm_event"
+          ]
+        },
+        "trigger_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "const": "high"
+        }
+      }
+    },
+    "speech_output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "v",
+        "request_id",
+        "session_id",
+        "ts_ms",
+        "mime",
+        "voice",
+        "rate",
+        "text",
+        "audio_b64",
+        "meta"
+      ],
+      "properties": {
+        "type": {
+          "const": "speech_output"
+        },
+        "v": {
+          "$ref": "#/$defs/version"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mime": {
+          "const": "audio/mpeg"
+        },
+        "voice": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rate": {
+          "type": "number",
+          "minimum": 0.25,
+          "maximum": 4
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "audio_b64": {
+          "type": "string",
+          "minLength": 1
+        },
+        "meta": {
+          "$ref": "#/$defs/speech_output_meta"
         }
       }
     },

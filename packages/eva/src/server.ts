@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import WebSocket, { WebSocketServer, type RawData } from 'ws';
 import { z } from 'zod';
@@ -19,6 +19,8 @@ import { synthesize } from './speech/edgeTts.js';
 const FRAME_ROUTE_TTL_MS = 5_000;
 const AGENT_EVENTS_INGEST_TIMEOUT_MS = 400;
 const AGENT_EVENTS_INGEST_WARN_COOLDOWN_MS = 10_000;
+const HIGH_ALERT_COOLDOWN_MS = 10_000;
+const HIGH_ALERT_DEDUPE_WINDOW_MS = 60_000;
 
 class RequestBodyTooLargeError extends Error {
   constructor(maxBodyBytes: number) {
@@ -196,6 +198,33 @@ interface TextOutputMessage {
   ts_ms: number;
   text: string;
   meta: z.infer<typeof TextOutputMetaSchema>;
+}
+
+interface HighSeverityAlertPayload {
+  dedupeKey: string;
+  triggerKind: 'insight' | 'wm_event';
+  triggerId: string;
+  alertText: string;
+}
+
+interface SpeechOutputMeta {
+  trigger_kind: 'insight' | 'wm_event';
+  trigger_id: string;
+  severity: 'high';
+}
+
+interface SpeechOutputMessage {
+  type: 'speech_output';
+  v: number;
+  request_id: string;
+  session_id: string;
+  ts_ms: number;
+  mime: 'audio/mpeg';
+  voice: string;
+  rate: number;
+  text: string;
+  audio_b64: string;
+  meta: SpeechOutputMeta;
 }
 
 function setSpeechCorsHeaders(res: ServerResponse): void {
@@ -556,9 +585,11 @@ export function startServer(options: StartServerOptions): Server {
   let lastSpeechRequestStartedAtMs: number | null = null;
   let activeUiClient: WebSocket | null = null;
   let lastAgentEventsIngestWarningAtMs: number | null = null;
+  let lastHighAlertAtMs: number | null = null;
 
   const speechCache = new Map<string, SpeechCacheEntry>();
   const inFlightSpeechSynthesis = new Map<string, Promise<Buffer>>();
+  const highAlertSeenKeys = new Map<string, number>();
 
   const warnAgentEventsIngestFailure = (reason: string): void => {
     const nowMs = Date.now();
@@ -572,6 +603,119 @@ export function startServer(options: StartServerOptions): Server {
 
     lastAgentEventsIngestWarningAtMs = nowMs;
     console.warn(`[eva] failed to forward events to agent /events: ${reason}`);
+  };
+
+  const evictExpiredHighAlertKeys = (nowMs: number): void => {
+    if (HIGH_ALERT_DEDUPE_WINDOW_MS <= 0) {
+      highAlertSeenKeys.clear();
+      return;
+    }
+
+    for (const [key, seenAtMs] of highAlertSeenKeys.entries()) {
+      if (nowMs - seenAtMs >= HIGH_ALERT_DEDUPE_WINDOW_MS) {
+        highAlertSeenKeys.delete(key);
+      }
+    }
+  };
+
+  const shouldEmitHighAlert = (key: string, nowMs: number): boolean => {
+    evictExpiredHighAlertKeys(nowMs);
+
+    const seenAtMs = highAlertSeenKeys.get(key);
+    if (seenAtMs !== undefined && nowMs - seenAtMs < HIGH_ALERT_DEDUPE_WINDOW_MS) {
+      return false;
+    }
+
+    if (lastHighAlertAtMs !== null && HIGH_ALERT_COOLDOWN_MS > 0) {
+      const elapsedMs = nowMs - lastHighAlertAtMs;
+      if (elapsedMs < HIGH_ALERT_COOLDOWN_MS) {
+        return false;
+      }
+    }
+
+    highAlertSeenKeys.set(key, nowMs);
+    lastHighAlertAtMs = nowMs;
+    return true;
+  };
+
+  const pushHighSeverityAlertToClient = (
+    client: WebSocket | null,
+    payload: HighSeverityAlertPayload,
+  ): void => {
+    if (!client || client.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const nowMs = Date.now();
+    if (!shouldEmitHighAlert(payload.dedupeKey, nowMs)) {
+      return;
+    }
+
+    const requestId = randomUUID();
+    const sessionId = 'system-alerts';
+    const alertMeta: TextOutputMessage['meta'] & SpeechOutputMeta = {
+      tone: 'urgent',
+      concepts: ['high_severity', 'alert'],
+      surprise: 1,
+      note: 'Auto alert (push mode).',
+      trigger_kind: payload.triggerKind,
+      trigger_id: payload.triggerId,
+      severity: 'high',
+    };
+
+    const textOutputMessage: TextOutputMessage = {
+      type: 'text_output',
+      v: PROTOCOL_VERSION,
+      request_id: requestId,
+      session_id: sessionId,
+      ts_ms: nowMs,
+      text: payload.alertText,
+      meta: alertMeta,
+    };
+
+    sendJson(client, textOutputMessage);
+
+    if (!speech.enabled) {
+      return;
+    }
+
+    const speechVoice = speech.defaultVoice;
+    const speechRate = 1.0;
+
+    void resolveSpeechAudio({
+      text: payload.alertText,
+      voice: speechVoice,
+      rate: speechRate,
+    })
+      .then(({ audioBytes }) => {
+        if (client.readyState !== WebSocket.OPEN) {
+          return;
+        }
+
+        const speechOutputMessage: SpeechOutputMessage = {
+          type: 'speech_output',
+          v: PROTOCOL_VERSION,
+          request_id: requestId,
+          session_id: sessionId,
+          ts_ms: Date.now(),
+          mime: 'audio/mpeg',
+          voice: speechVoice,
+          rate: speechRate,
+          text: payload.alertText,
+          audio_b64: audioBytes.toString('base64'),
+          meta: {
+            trigger_kind: alertMeta.trigger_kind,
+            trigger_id: alertMeta.trigger_id,
+            severity: alertMeta.severity,
+          },
+        };
+
+        sendJson(client, speechOutputMessage);
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[eva] push alert speech synthesis failed: ${message}`);
+      });
   };
 
   const evictExpiredSpeechCacheEntries = (nowMs: number): void => {
@@ -936,6 +1080,20 @@ export function startServer(options: StartServerOptions): Server {
               const reason = error instanceof Error ? error.message : String(error);
               warnAgentEventsIngestFailure(reason);
             });
+
+            for (const event of message.events) {
+              if (event.severity !== 'high') {
+                continue;
+              }
+
+              const trackDetail = event.track_id !== undefined ? ` Track ${event.track_id}.` : '';
+              pushHighSeverityAlertToClient(activeUiClient, {
+                dedupeKey: `event:${event.name}:${event.track_id ?? 'na'}`,
+                triggerKind: 'wm_event',
+                triggerId: `${event.name}:${event.ts_ms}`,
+                alertText: `Alert: ${event.name.replaceAll('_', ' ')}.${trackDetail}`,
+              });
+            }
           }
 
           const targetClient = frameRouter.take(message.frame_id);
@@ -962,6 +1120,15 @@ export function startServer(options: StartServerOptions): Server {
         }
 
         if (message.type === 'insight') {
+          if (message.summary.severity === 'high') {
+            pushHighSeverityAlertToClient(activeUiClient, {
+              dedupeKey: `insight:${message.clip_id}`,
+              triggerKind: 'insight',
+              triggerId: message.clip_id,
+              alertText: message.summary.one_liner,
+            });
+          }
+
           const shouldRelay = shouldRelayInsight(message.clip_id);
           if (!shouldRelay) {
             console.warn(`[eva] insight relay suppressed for clip_id ${message.clip_id}`);
@@ -1139,6 +1306,7 @@ export function startServer(options: StartServerOptions): Server {
   server.on('close', () => {
     frameRouter.clear();
     seenInsightClipIds.clear();
+    highAlertSeenKeys.clear();
     speechCache.clear();
     inFlightSpeechSynthesis.clear();
     visionClient.disconnect();

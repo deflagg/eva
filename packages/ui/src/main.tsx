@@ -17,6 +17,7 @@ import type {
   FrameBinaryMeta,
   InsightMessage,
   InsightSeverity,
+  SpeechOutputMessage,
   TextOutputMessage,
 } from './types';
 import { createEvaWsClient, type EvaWsClient, type WsConnectionStatus } from './ws';
@@ -97,6 +98,16 @@ function shouldSampleFrameLog(count: number): boolean {
 
 function summarizeMessage(message: unknown): string {
   try {
+    if (message && typeof message === 'object') {
+      const candidate = message as Record<string, unknown>;
+      if (candidate.type === 'speech_output' && typeof candidate.audio_b64 === 'string') {
+        return JSON.stringify({
+          ...candidate,
+          audio_b64: `<base64:${candidate.audio_b64.length} chars>`,
+        });
+      }
+    }
+
     return JSON.stringify(message);
   } catch {
     return String(message);
@@ -190,6 +201,55 @@ function isTextOutputMessage(message: unknown): message is TextOutputMessage {
   );
 }
 
+function isSpeechOutputMessage(message: unknown): message is SpeechOutputMessage {
+  if (!message || typeof message !== 'object') {
+    return false;
+  }
+
+  const candidate = message as Record<string, unknown>;
+  if (candidate.type !== 'speech_output' || candidate.v !== 1) {
+    return false;
+  }
+
+  if (
+    typeof candidate.request_id !== 'string' ||
+    typeof candidate.session_id !== 'string' ||
+    typeof candidate.ts_ms !== 'number' ||
+    candidate.mime !== 'audio/mpeg' ||
+    typeof candidate.voice !== 'string' ||
+    typeof candidate.rate !== 'number' ||
+    typeof candidate.text !== 'string' ||
+    typeof candidate.audio_b64 !== 'string'
+  ) {
+    return false;
+  }
+
+  const meta = candidate.meta;
+  if (!meta || typeof meta !== 'object') {
+    return false;
+  }
+
+  const metaRecord = meta as Record<string, unknown>;
+  return (
+    (metaRecord.trigger_kind === 'insight' || metaRecord.trigger_kind === 'wm_event') &&
+    typeof metaRecord.trigger_id === 'string' &&
+    metaRecord.severity === 'high'
+  );
+}
+
+function decodeBase64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binary = window.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  const arrayBuffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(arrayBuffer).set(bytes);
+  return arrayBuffer;
+}
+
 function formatTime(tsMs: number): string {
   return new Date(tsMs).toLocaleTimeString();
 }
@@ -243,6 +303,10 @@ function isAbortError(error: unknown): boolean {
   return error.name === 'AbortError';
 }
 
+function isAutoplayBlockedError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'NotAllowedError';
+}
+
 function normalizeSpeechText(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
@@ -292,6 +356,8 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
   const clientRef = React.useRef<EvaWsClient | null>(null);
   const speechClientRef = React.useRef<SpeechClient | null>(null);
+  const alertAudioRef = React.useRef<HTMLAudioElement>(new Audio());
+  const alertAudioObjectUrlRef = React.useRef<string | null>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
   const captureCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
@@ -466,6 +532,67 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     setAutoSpeakEnabled(speechConfig.autoSpeak.enabled);
   }, [speechConfig.autoSpeak.enabled]);
 
+  const revokeAlertAudioObjectUrl = React.useCallback(() => {
+    const objectUrl = alertAudioObjectUrlRef.current;
+    if (!objectUrl) {
+      return;
+    }
+
+    URL.revokeObjectURL(objectUrl);
+    alertAudioObjectUrlRef.current = null;
+  }, []);
+
+  const playSpeechOutputAlert = React.useCallback(
+    async (message: SpeechOutputMessage): Promise<void> => {
+      let audioBuffer: ArrayBuffer;
+      try {
+        audioBuffer = decodeBase64ToArrayBuffer(message.audio_b64);
+      } catch {
+        appendLog('system', `Push alert audio decode failed (${message.request_id}).`);
+        return;
+      }
+
+      const audio = alertAudioRef.current;
+      audio.pause();
+      audio.currentTime = 0;
+      revokeAlertAudioObjectUrl();
+
+      const objectUrl = URL.createObjectURL(new Blob([audioBuffer], { type: message.mime }));
+      alertAudioObjectUrlRef.current = objectUrl;
+      audio.src = objectUrl;
+      audio.currentTime = 0;
+
+      try {
+        await audio.play();
+        setAudioLocked(false);
+        appendLog('system', `Push alert audio played (${message.request_id}).`);
+      } catch (error) {
+        if (isAutoplayBlockedError(error)) {
+          setAudioLocked(true);
+          appendLog(
+            'system',
+            'Push alert audio blocked by browser autoplay policy. Click Enable Audio once to allow alert playback.',
+          );
+          return;
+        }
+
+        appendLog('system', `Push alert audio failed: ${toErrorMessage(error)}`);
+      }
+    },
+    [appendLog, revokeAlertAudioObjectUrl],
+  );
+
+  React.useEffect(() => {
+    return () => {
+      const audio = alertAudioRef.current;
+      audio.pause();
+      audio.currentTime = 0;
+      revokeAlertAudioObjectUrl();
+      audio.removeAttribute('src');
+      audio.load();
+    };
+  }, [revokeAlertAudioObjectUrl]);
+
   const runSpeechRequest = React.useCallback(
     async ({ text, voice, source }: { text: string; voice: string; source: 'auto-chat' | 'manual' }): Promise<boolean> => {
       const speechClient = speechClientRef.current;
@@ -578,6 +705,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         const detectionsMessage = isDetectionsMessage(message) ? message : null;
         const insightMessage = isInsightMessage(message) ? message : null;
         const textOutputMessage = isTextOutputMessage(message) ? message : null;
+        const speechOutputMessage = isSpeechOutputMessage(message) ? message : null;
 
         if (detectionsMessage) {
           renderDetections(detectionsMessage);
@@ -594,6 +722,10 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         if (textOutputMessage) {
           appendTextOutputMessage(textOutputMessage, 'ws');
           maybeAutoSpeakTextOutput(textOutputMessage);
+        }
+
+        if (speechOutputMessage) {
+          void playSpeechOutputAlert(speechOutputMessage);
         }
 
         if (detectionsMessage && inFlight && detectionsMessage.frame_id === inFlight.frameId) {
@@ -644,6 +776,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     dropInFlight,
     evaWsUrl,
     maybeAutoSpeakTextOutput,
+    playSpeechOutputAlert,
     renderDetections,
   ]);
 

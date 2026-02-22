@@ -99,7 +99,54 @@ Notes:
 }
 ```
 
-### 4) `command` (UI -> Eva -> Vision, debug) JSON
+### 4) `text_output` (Eva -> UI) JSON
+
+Used for immediate server-originated text replies/alerts.
+
+```json
+{
+  "type": "text_output",
+  "v": 1,
+  "request_id": "f53ef67c-70af-4b78-a2cb-5f49551de061",
+  "session_id": "system-alerts",
+  "ts_ms": 1700000001200,
+  "text": "Alert: near collision.",
+  "meta": {
+    "tone": "urgent",
+    "concepts": ["high_severity", "alert"],
+    "surprise": 1,
+    "note": "Auto alert (push mode)."
+  }
+}
+```
+
+### 5) `speech_output` (Eva -> UI) JSON
+
+> Additive protocol extension for server-originated spoken output.
+>
+> Browser autoplay policy still applies: clients may need a one-time user gesture (for example, an **Enable Audio** button) before automatic playback is allowed.
+
+```json
+{
+  "type": "speech_output",
+  "v": 1,
+  "request_id": "f53ef67c-70af-4b78-a2cb-5f49551de061",
+  "session_id": "system-alerts",
+  "ts_ms": 1700000001234,
+  "mime": "audio/mpeg",
+  "voice": "alloy",
+  "rate": 1,
+  "text": "Alert: near collision.",
+  "audio_b64": "<base64 mp3 bytes>",
+  "meta": {
+    "trigger_kind": "insight",
+    "trigger_id": "2b84b71b-2db6-4781-bdc5-f2b35e643b1f",
+    "severity": "high"
+  }
+}
+```
+
+### 6) `command` (UI -> Eva -> Vision, debug) JSON
 
 > Temporary debug command introduced in Iteration 13.
 
@@ -111,7 +158,7 @@ Notes:
 }
 ```
 
-### 5) `error` (any direction) JSON
+### 7) `error` (any direction) JSON
 
 ```json
 {
@@ -123,7 +170,7 @@ Notes:
 }
 ```
 
-### 6) Optional `hello` (debug) JSON
+### 8) Optional `hello` (debug) JSON
 
 ```json
 {

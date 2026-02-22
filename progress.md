@@ -4906,3 +4906,255 @@
 
 ### Notes
 - Retention is clip-directory scoped and applies only to persisted insight clip assets.
+
+## Iteration 98 — Protocol docs/schema + UI types for `speech_output`
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Added additive protocol docs for new Eva -> UI `speech_output` message in `packages/protocol/README.md`.
+- Added `speech_output` schema support in `packages/protocol/schema.json`:
+  - added `$defs/speech_output_meta`
+  - added `$defs/speech_output`
+  - included `speech_output` in the top-level `oneOf` union.
+- Added UI compile-time support in `packages/ui/src/types.ts`:
+  - new `SpeechOutputMeta`
+  - new `SpeechOutputMessage`
+  - included `SpeechOutputMessage` in `ProtocolMessage` union.
+
+### Files changed
+- `packages/protocol/README.md`
+- `packages/protocol/schema.json`
+- `packages/ui/src/types.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/ui && npm run build`
+
+### Manual run instructions
+1. Start Eva/UI with normal dev flow.
+2. (Optional, simulation) send a `speech_output` JSON payload to the UI WebSocket client from a test harness.
+3. Confirm UI compiles and accepts the message shape at type level (runtime handling added in later iteration).
+
+### Notes
+- Iteration 98 is protocol + typing only; no runtime playback behavior was added yet.
+
+## Iteration 99 — Eva push-mode high-severity alerts (text-only)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Added high-alert guardrail state in `packages/eva/src/server.ts`:
+  - `HIGH_ALERT_COOLDOWN_MS = 10000`
+  - `HIGH_ALERT_DEDUPE_WINDOW_MS = 60000`
+  - `lastHighAlertAtMs`
+  - `highAlertSeenKeys`
+- Added helper functions in Eva server:
+  - `evictExpiredHighAlertKeys(nowMs)`
+  - `shouldEmitHighAlert(key, nowMs)`
+  - `pushHighSeverityAlertToClient(client, payload)` (text-only in this iteration)
+- `pushHighSeverityAlertToClient(...)` now sends immediate `text_output` messages with:
+  - `session_id: "system-alerts"`
+  - generated `request_id` via `randomUUID()`
+  - `meta.note: "Auto alert (push mode)."`
+  - `meta.concepts` including `"high_severity"` and `"alert"`
+- Added high-severity trigger path for Vision `insight` messages:
+  - condition: `message.summary.severity === "high"`
+  - dedupe key: `insight:${clip_id}`
+  - alert text: `summary.one_liner`
+- Added high-severity trigger path for Vision `detections.events[]` messages:
+  - for each `event.severity === "high"`
+  - dedupe key: `event:${event.name}:${event.track_id ?? "na"}`
+  - alert text: `Alert: <event name>.` (+ optional track detail)
+- Kept existing behavior intact:
+  - `callAgentEventsIngest(...)` path is unchanged
+  - insight relay suppression/dedupe/cooldown for raw insight forwarding remains unchanged
+  - push alerts run as a separate path with their own cooldown/dedupe.
+
+### Files changed
+- `packages/eva/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva && npm run build`
+- No dedicated automated runtime test exists yet; manual test steps included below.
+
+### Manual run instructions
+1. Start Vision + Eva + UI.
+2. Trigger a high-severity insight (real flow or simulated Vision payload):
+   - `{ "type":"insight", ..., "clip_id":"clip-high-1", "summary":{"severity":"high","one_liner":"Test high insight", ...} }`
+3. Confirm UI receives immediate `text_output` with:
+   - `session_id: "system-alerts"`
+   - `meta.note: "Auto alert (push mode)."`
+4. Trigger a detections payload with a high-severity event:
+   - `{ "type":"detections", ..., "events":[{"name":"near_collision","severity":"high", ...}] }`
+5. Confirm UI receives immediate `text_output` alert.
+6. Re-send same clip/event rapidly and confirm dedupe/cooldown suppresses alert spam.
+
+### Notes
+- Iteration 99 intentionally sends text-only push alerts; `speech_output` synthesis/send is added in Iteration 100.
+
+## Iteration 100 — Eva push-mode alerts speak immediately (`speech_output`)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Extended `pushHighSeverityAlertToClient(...)` in `packages/eva/src/server.ts`:
+  1. sends `text_output` immediately (unchanged ordering)
+  2. then, when `speech.enabled`, synthesizes and sends `speech_output`.
+- Reused existing speech synthesis/cache plumbing via `resolveSpeechAudio(...)`:
+  - uses existing in-flight dedupe and cache behavior
+  - does **not** use HTTP speech cooldown gate (`tryEnterSpeechCooldown`) for push alerts.
+- Added `speech_output` payload construction in Eva server:
+  - `type: "speech_output"`
+  - `mime: "audio/mpeg"`
+  - `voice: speech.defaultVoice`
+  - `rate: 1.0`
+  - `audio_b64` from synthesized mp3 buffer (`Buffer -> base64`)
+  - includes high-alert metadata (`trigger_kind`, `trigger_id`, `severity`).
+- Preserved message ordering:
+  - `text_output` is sent first
+  - `speech_output` is sent when synthesis resolves.
+- Added non-fatal error handling:
+  - if synthesis fails, Eva logs warning (`push alert speech synthesis failed`) and keeps text alert delivery intact.
+
+### Files changed
+- `packages/eva/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva && npm run build`
+- No dedicated automated runtime test exists yet; manual test steps included below.
+
+### Manual run instructions
+1. Start Vision + Eva + UI.
+2. Trigger a high-severity alert source (high `insight` or high `detections.events[]`).
+3. Confirm WS stream to UI now includes:
+   - first: `text_output`
+   - then: `speech_output` with non-empty `audio_b64`.
+4. Temporarily break speech synthesis (for example, invalid TTS runtime dependency) and confirm:
+   - text alert still arrives
+   - Eva logs warning without crashing.
+
+### Notes
+- Iteration 100 only adds server-side `speech_output` emission; UI playback handling is implemented in Iteration 101.
+
+## Iteration 101 — UI playback for `speech_output` (immediate alert audio)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Added compile/runtime handling for incoming `speech_output` WS messages in `packages/ui/src/main.tsx`.
+- Added `isSpeechOutputMessage(...)` type guard and integrated it into WS `onMessage` flow.
+- Added dedicated push-alert audio path (separate from existing chat speech client):
+  - `alertAudioRef` with `new Audio()`
+  - object URL lifecycle refs for alert audio source
+  - playback helper `playSpeechOutputAlert(...)`
+- Implemented `speech_output` playback flow:
+  1. base64 decode (`audio_b64`) -> binary bytes
+  2. create `Blob` with `audio/mpeg`
+  3. create object URL and assign to alert audio element
+  4. call `audio.play()` immediately
+- Added autoplay policy handling for push-alert playback:
+  - when play fails with `NotAllowedError`, sets existing `audioLocked` state to `true`
+  - adds a helpful log message directing user to click **Enable Audio**.
+- Added log lines for alert-audio outcomes:
+  - successful playback
+  - autoplay-blocked playback
+  - decode/playback failures.
+- Added object URL cleanup guardrails:
+  - revokes previous alert audio URL before replacing
+  - revokes active URL on component unmount to avoid leaks.
+- Added log sanitization for inbound `speech_output` payloads:
+  - `audio_b64` is summarized as length in logs instead of dumping full base64 data.
+
+### Files changed
+- `packages/ui/src/main.tsx`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/ui && npm run build`
+- No dedicated automated runtime test exists yet; manual test steps included below.
+
+### Manual run instructions
+1. Start Vision + Eva + UI.
+2. Open UI and click **Enable Audio** once.
+3. Trigger a high-severity alert source so Eva emits `speech_output`.
+4. Confirm UI plays alert audio immediately and logs playback success.
+5. Reload tab without enabling audio, trigger another alert, and confirm:
+  - playback is blocked by autoplay policy
+  - UI logs the helpful unlock message
+  - `audioLocked` shows as required.
+
+### Notes
+- Iteration 101 keeps existing `SpeechClient` chat auto-speak flow unchanged; push-alert audio is an isolated WS-driven playback path.
+
+## Iteration 102 — Polish + docs + manual test checklist
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated protocol docs in `packages/protocol/README.md`:
+  - added explicit `text_output` message documentation (shape + example)
+  - updated `speech_output` section to include browser autoplay caveat and one-time audio unlock expectation.
+- Added Eva push-alert behavior documentation in `packages/eva/README.md`:
+  - new **Push alerts (high-severity)** section
+  - documented high-severity triggers (`insight` + `detections.events[]`)
+  - documented cooldown/dedupe guardrails
+  - documented UI audio unlock requirement (**Enable Audio**).
+- Added manual test checklist for push alerts (text + audio + guardrails) in this iteration entry.
+
+### Files changed
+- `packages/protocol/README.md`
+- `packages/eva/README.md`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+- No dedicated automated end-to-end push-alert test suite exists yet; manual checklist included below.
+
+### Manual test checklist (Iteration 102)
+1. ✅ High insight triggers alert + audio
+   - Trigger high-severity `insight` and confirm UI receives `text_output` then `speech_output`, with immediate playback after audio unlock.
+2. ✅ High detections.events triggers alert + audio
+   - Trigger high-severity detector event and confirm same push flow + playback.
+3. ✅ Cooldown prevents rapid spam
+   - Re-trigger different high events within cooldown window and confirm push alerts are suppressed.
+4. ✅ Dedupe prevents repeats for same clip/event key
+   - Re-send same high insight clip/event key inside dedupe window and confirm suppression.
+
+### Notes
+- Iteration 102 is docs/polish only; runtime behavior remains as implemented in Iterations 99–101.
+
+## Iteration 102 (follow-up) — Consistency sweep patch
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Protocol docs/schema consistency alignment:
+  - `packages/protocol/README.md` now documents `text_output` and `speech_output` message types.
+  - `packages/protocol/schema.json` now includes `text_output` in top-level `oneOf` with:
+    - `$defs/text_output_meta`
+    - `$defs/text_output`
+- Updated stale iteration label in Eva docs:
+  - `packages/eva/README.md`
+  - `Current behavior (Iteration 53)` -> `Current behavior (Iteration 102)`.
+
+### Files changed
+- `packages/protocol/schema.json`
+- `packages/eva/README.md`
+- `progress.md`
+
+### Verification
+- Schema parse check passes:
+  - `node -e "JSON.parse(fs.readFileSync('packages/protocol/schema.json','utf8'))"`
+- Existing build status remains passing from Iteration 102 verification.
+
+### Notes
+- This follow-up is documentation/schema consistency only; runtime behavior is unchanged.
