@@ -74,7 +74,7 @@ insights:
   insight_cooldown_ms: 10000
   downsample:
     enabled: true
-    max_dim: 640
+    max_dim: 160
     jpeg_quality: 75
 
 surprise:

@@ -19,7 +19,7 @@ import {
   saveToneStateAtomic,
   updateToneForSession,
 } from './memcontext/tone.js';
-import { buildEnvironmentSnapshot, readRecentWmEvents } from './memcontext/live_events.js';
+import { formatInsightsForPrompt, retrieveRecentInsights } from './memcontext/retrieve_recent_insights.js';
 import { logLlmTrace } from './llm_log.js';
 import type { AgentConfig, AgentSecrets } from './config.js';
 import { buildInsightSystemPrompt, buildInsightUserPrompt } from './prompts/insight.js';
@@ -45,9 +45,8 @@ const RESPOND_MEMORY_MAX_TOKENS = 900;
 const RESPOND_SHORT_TERM_MAX_ROWS = 8;
 const RESPOND_LONG_TERM_TOP_K = 6;
 const RESPOND_CORE_CACHE_ITEMS = 4;
-const LIVE_EVENT_WINDOW_MS = 2 * 60 * 1000;
-const LIVE_EVENT_MAX_ITEMS = 20;
-const LIVE_EVENT_MAX_LINE_CHARS = 180;
+const RESPOND_RECENT_INSIGHTS_WINDOW_MS = 2 * 60 * 1000;
+const RESPOND_RECENT_INSIGHTS_MAX_ITEMS = 10;
 const WM_EVENT_SUMMARY_MAX_CHARS = 180;
 const WM_EVENT_SUMMARY_MAX_DATA_FIELDS = 4;
 const WM_EVENT_SUMMARY_MAX_VALUE_CHARS = 48;
@@ -938,15 +937,6 @@ function truncateText(value: string, maxLength = 160): string {
   }
 
   return `${trimmed.slice(0, Math.max(0, maxLength - 1))}…`;
-}
-
-function formatTimeHms(tsMs: number): string {
-  const date = new Date(tsMs);
-  const hours = String(date.getHours()).padStart(2, '0');
-  const minutes = String(date.getMinutes()).padStart(2, '0');
-  const seconds = String(date.getSeconds()).padStart(2, '0');
-
-  return `${hours}:${minutes}:${seconds}`;
 }
 
 function formatWmEventSummaryValue(value: unknown): string | null {
@@ -1908,38 +1898,28 @@ async function buildRespondMemoryContext(params: {
     budget,
   );
 
-  const recentLiveEvents = await readRecentWmEvents({
+  const nowTsMs = Date.now();
+  const recentInsights = await retrieveRecentInsights({
     logPath: memorySources.workingMemoryLogPath,
-    nowMs: Date.now(),
-    windowMs: LIVE_EVENT_WINDOW_MS,
-    maxItems: LIVE_EVENT_MAX_ITEMS,
+    sinceTsMs: nowTsMs - RESPOND_RECENT_INSIGHTS_WINDOW_MS,
+    untilTsMs: nowTsMs,
+    limit: RESPOND_RECENT_INSIGHTS_MAX_ITEMS,
   });
 
-  const environmentSnapshot = buildEnvironmentSnapshot(recentLiveEvents);
+  appendLineWithinBudget(lines, 'Recent insights (last ~2 minutes):', budget);
+  if (recentInsights.length === 0) {
+    appendLineWithinBudget(lines, '- No insights were generated in the last ~2 minutes.', budget);
+  } else {
+    const formattedInsights = formatInsightsForPrompt(recentInsights, {
+      maxItems: RESPOND_RECENT_INSIGHTS_MAX_ITEMS,
+      maxWhatChangedItems: 2,
+      maxLineChars: 180,
+    });
 
-  appendLineWithinBudget(lines, 'Environment snapshot (derived from live events in the last ~2 minutes):', budget);
-  appendLineWithinBudget(lines, environmentSnapshot.paragraph, budget);
-
-  for (const bullet of environmentSnapshot.bullets) {
-    const line = truncateText(`- ${bullet}`, LIVE_EVENT_MAX_LINE_CHARS);
-    if (!appendLineWithinBudget(lines, line, budget)) {
-      break;
-    }
-  }
-
-  appendLineWithinBudget(lines, 'Live event raw lines (debug fallback):', budget);
-  if (recentLiveEvents.length === 0) {
-    appendLineWithinBudget(lines, '- none', budget);
-  }
-
-  for (const event of recentLiveEvents) {
-    const line = truncateText(
-      `- [${formatTimeHms(event.ts_ms)}] ${event.source} ${event.severity} ${event.summary}`,
-      LIVE_EVENT_MAX_LINE_CHARS,
-    );
-
-    if (!appendLineWithinBudget(lines, line, budget)) {
-      break;
+    for (const line of formattedInsights.split('\n')) {
+      if (!appendLineWithinBudget(lines, line, budget)) {
+        break;
+      }
     }
   }
 

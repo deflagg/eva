@@ -5158,3 +5158,155 @@
 
 ### Notes
 - This follow-up is documentation/schema consistency only; runtime behavior is unchanged.
+
+## Iteration 105 — Add Executive recent-insights retrieval utility
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Added new Executive memory-context utility module:
+  - `packages/eva/executive/src/memcontext/retrieve_recent_insights.ts`
+- Implemented `retrieveRecentInsights(...)`:
+  - reads `working_memory.log` safely
+  - filters to `type: "wm_insight"`
+  - filters by inclusive time window (`sinceTsMs..untilTsMs`)
+  - sorts chronologically (`ts_ms` ascending)
+  - applies hard cap via `limit` (returns newest `limit` entries)
+  - normalizes output into insight-oriented shape with:
+    - `ts_ms`
+    - `clip_id`
+    - `trigger_frame_id`
+    - `summary.{ one_liner, what_changed, severity, tags }`
+    - optional `assets[]` when present
+- Implemented `formatInsightsForPrompt(...)`:
+  - compact, stable line formatting:
+    - `[HH:MM:SS] (severity) one_liner`
+    - `- what_changed ...`
+  - supports hard caps for:
+    - max insight items (`maxItems`, default 10)
+    - max `what_changed` bullets per insight (`maxWhatChangedItems`, default 2)
+    - max line length (`maxLineChars`, default 180)
+  - adds `(+N more)` when extra `what_changed` items are truncated.
+
+### Files changed
+- `packages/eva/executive/src/memcontext/retrieve_recent_insights.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Manual utility smoke-check passes:
+  - invoked `retrieveRecentInsights(...)` via `npx tsx --eval ...`
+  - confirmed it returned recent `wm_insight` entries from `packages/eva/memory/working_memory.log`.
+
+### Manual run instructions
+1. Build Executive:
+   - `cd packages/eva/executive`
+   - `npm run build`
+2. Run utility smoke-check:
+   - `npx tsx --eval "import { retrieveRecentInsights, formatInsightsForPrompt } from './src/memcontext/retrieve_recent_insights.ts'; (async()=>{ const now=Date.now(); const insights=await retrieveRecentInsights({ logPath:'../memory/working_memory.log', sinceTsMs: now - 2*60*1000, untilTsMs: now, limit: 10 }); console.log('count', insights.length); console.log(formatInsightsForPrompt(insights)); })();"`
+
+### Notes
+- This iteration only adds insight retrieval/formatting utilities.
+- `/respond` context wiring remains unchanged and is planned for Iteration 106.
+
+## Iteration 106 — Switch `/respond` memory context builder to insights-only
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated Executive `/respond` memory-context assembly in:
+  - `packages/eva/executive/src/server.ts`
+- Removed live-event context injection from `/respond` memory block:
+  - removed live `wm_event` query path (`readRecentWmEvents(...)`)
+  - removed environment snapshot section
+  - removed raw live-event fallback lines section
+- Added insights-only context injection for `/respond`:
+  - computes time window: `sinceTsMs = nowTsMs - 2 * 60 * 1000`
+  - calls `retrieveRecentInsights({ sinceTsMs, untilTsMs: nowTsMs, limit: 10 })`
+  - injects section header:
+    - `Recent insights (last ~2 minutes):`
+  - when no insights:
+    - `- No insights were generated in the last ~2 minutes.`
+  - when insights exist:
+    - injects compact formatted lines from `formatInsightsForPrompt(...)`.
+- Added respond constants in server:
+  - `RESPOND_RECENT_INSIGHTS_WINDOW_MS`
+  - `RESPOND_RECENT_INSIGHTS_MAX_ITEMS`
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Manual smoke checks pass:
+  1. `/respond` request context now contains `Recent insights (last ~2 minutes):`.
+  2. legacy sections are absent from request context:
+     - no `Environment snapshot (derived from live events in the last ~2 minutes):`
+     - no `Live event raw lines (debug fallback):`
+  3. seeded a fresh `wm_insight` entry and called `/respond "what did you see"`:
+     - request context included the seeded insight one-liner + what-changed bullets
+     - assistant reply referenced that insight content.
+
+### Manual run instructions
+1. Build Executive:
+   - `cd packages/eva/executive`
+   - `npm run build`
+2. Start Executive:
+   - `npm run dev`
+3. Trigger or seed a recent `wm_insight` in `packages/eva/memory/working_memory.log`.
+4. Send chat request:
+   - `curl -sS -X POST http://127.0.0.1:8791/respond -H 'content-type: application/json' -d '{"text":"what did you see"}'`
+5. Confirm (via LLM trace request context/logs) the memory block is insight-only and contains no event snapshot/raw lines.
+
+### Notes
+- Other memory layers (short-term, long-term, core caches) remain unchanged in this iteration.
+- Prompt nudge for insight-first phrasing is next in Iteration 107.
+
+## Iteration 107 — Insight-first respond nudge + manual checklist
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated respond system prompt guidance in:
+  - `packages/eva/executive/src/prompts/respond.ts`
+- Added explicit insight-first instruction near memory-usage guidance:
+  - when recent insights are present and user asks about recent activity (for example “what did you see” / “what happened”), summarize insights first.
+- Added explicit detector-events omission rule:
+  - in this mode, raw detector events are omitted and should not be summarized.
+- Added manual test checklist to Executive docs:
+  - `packages/eva/executive/README.md`
+  - includes Test A/B/C for no-insight, single-insight, and multi-insight scenarios.
+- Updated README `/respond` behavior bullet to reflect insight-first recent context source (`wm_insight` last ~2 minutes).
+
+### Files changed
+- `packages/eva/executive/src/prompts/respond.ts`
+- `packages/eva/executive/README.md`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Manual tests executed:
+  1. **Test A (no recent insights):** `/respond "what did you see"` returned a no-new-activity style answer with no fabricated activity.
+  2. **Test B (one recent insight):** seeded one fresh `wm_insight`; `/respond "what did you see"` referenced that one-liner and key change details.
+  3. **Test C (multiple recent insights):** seeded multiple fresh `wm_insight` entries; `/respond "what happened"` summarized multiple insights compactly.
+- Request-context trace checks (LLM logs) confirmed:
+  - `Recent insights (last ~2 minutes):` section present
+  - expected seeded insight lines present for Test B/C.
+
+### Manual run instructions
+1. Build and run Executive:
+   - `cd packages/eva/executive`
+   - `npm run build`
+   - `npm run dev`
+2. Execute the README checklist under:
+   - `## Iteration 107 manual checklist (insight-first /respond)`
+3. For trace-level validation, inspect:
+   - `packages/eva/llm_logs/openai-requests.log`
+   - confirm respond request context contains the insight-first section.
+
+### Notes
+- This iteration changes prompt behavior and docs only; `/respond` context wiring remains as implemented in Iteration 106.

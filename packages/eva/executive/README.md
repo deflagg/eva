@@ -32,7 +32,7 @@ Node/TypeScript service for EVA text + insight generation.
 - Exposes real model-backed `POST /respond`:
   - accepts `{ "text": "...", "session_id": "optional" }`
   - builds retrieval context before the model call from:
-    - live `wm_event` entries from the last ~2 minutes (all non-chat event sources)
+    - recent `wm_insight` entries from the last ~2 minutes (insight-first recent activity context)
     - recent short-term SQLite summaries (tag-filtered)
     - top-K long-term vector hits from LanceDB tables (`long_term_experiences` + `long_term_personality`)
     - core cache files (`core_experiences.json`, `core_personality.json`)
@@ -219,6 +219,53 @@ curl -sS -X POST http://127.0.0.1:8791/respond \
   -H 'content-type: application/json' \
   -d '{"text":"hello"}'
 ```
+
+## Iteration 107 manual checklist (insight-first `/respond`)
+
+### Test A — No insights in last ~2 minutes
+
+1. Ensure no recent `wm_insight` entries exist (wait >2 minutes or clear recent test lines).
+2. Ask:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8791/respond \
+  -H 'content-type: application/json' \
+  -d '{"text":"what did you see"}'
+```
+
+Expected:
+- response states there were no recent insights (or equivalent no-recent-activity wording)
+- no fabricated detector activity.
+
+### Test B — One insight exists
+
+1. Ensure exactly one fresh `wm_insight` exists in `packages/eva/memory/working_memory.log`.
+2. Ask:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8791/respond \
+  -H 'content-type: application/json' \
+  -d '{"text":"what did you see"}'
+```
+
+Expected:
+- response cites the insight `one_liner`
+- response includes key `what_changed` details.
+
+### Test C — Multiple insights exist
+
+1. Ensure multiple fresh `wm_insight` entries exist within the last ~2 minutes.
+2. Ask:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8791/respond \
+  -H 'content-type: application/json' \
+  -d '{"text":"what happened"}'
+```
+
+Expected:
+- response summarizes multiple recent insights compactly
+- response should remain concise (bounded by prompt/context constraints).
 
 ## Insight check
 
