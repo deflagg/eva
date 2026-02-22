@@ -44,10 +44,10 @@
       "readyTimeoutMs": 30000,
       "shutdownTimeoutMs": 5000
     },
-    "quickvision": {
+    "vision": {
       "enabled": true,
       "cwd": "packages/eva/vision",
-      "command": ["python", "-m", "app.run"],
+      "command": [".venv/bin/python", "-m", "app.run"],
       "healthUrl": "http://127.0.0.1:8000/health",
       "readyTimeoutMs": 60000,
       "shutdownTimeoutMs": 10000

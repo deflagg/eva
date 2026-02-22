@@ -55,7 +55,7 @@ cp eva.config.local.example.json eva.config.local.json
 npm run dev
 ```
 
-If Vision fails to start because `python` is not the venv interpreter, set `subprocesses.quickvision.command` in `eva.config.local.json` to `packages/eva/vision/.venv/bin/python -m app.run`.
+If Vision fails to start because your venv python path differs, set `subprocesses.vision.command` in `eva.config.local.json` to your venv interpreter (for example: `packages/eva/vision/.venv/bin/python -m app.run`).
 
 ## Development Run Instructions
 

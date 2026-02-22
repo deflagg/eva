@@ -60,7 +60,7 @@ async function main(): Promise<void> {
   const config = loadEvaConfig();
 
   let agent: ManagedProcess | null = null;
-  let quickvision: ManagedProcess | null = null;
+  let vision: ManagedProcess | null = null;
   let server: Server | null = null;
 
   let shutdownInFlight: Promise<void> | null = null;
@@ -84,12 +84,12 @@ async function main(): Promise<void> {
         }
       }
 
-      if (quickvision) {
-        console.log('[eva] stopping quickvision...');
+      if (vision) {
+        console.log('[eva] stopping vision...');
         try {
-          await quickvision.stop();
+          await vision.stop();
         } finally {
-          quickvision = null;
+          vision = null;
         }
       }
 
@@ -133,10 +133,10 @@ async function main(): Promise<void> {
       server = null;
     }
 
-    if (quickvision) {
-      console.warn('[eva] force-killing quickvision...');
-      quickvision.forceKill();
-      quickvision = null;
+    if (vision) {
+      console.warn('[eva] force-killing vision...');
+      vision.forceKill();
+      vision = null;
     }
 
     if (agent) {
@@ -210,34 +210,32 @@ async function main(): Promise<void> {
       console.log(`[eva] agent healthy at ${agentConfig.healthUrl}`);
     }
 
-    if (config.subprocesses.enabled && config.subprocesses.quickvision.enabled) {
-      const quickvisionConfig = config.subprocesses.quickvision;
-      const quickvisionCwd = resolveRepoPath(quickvisionConfig.cwd);
+    if (config.subprocesses.enabled && config.subprocesses.vision.enabled) {
+      const visionConfig = config.subprocesses.vision;
+      const visionCwd = resolveRepoPath(visionConfig.cwd);
 
-      console.log(
-        `[eva] starting quickvision subprocess: ${quickvisionConfig.command.join(' ')} (cwd=${quickvisionCwd})`,
-      );
+      console.log(`[eva] starting vision subprocess: ${visionConfig.command.join(' ')} (cwd=${visionCwd})`);
 
-      quickvision = new ManagedProcess({
-        name: 'quickvision',
-        cwd: quickvisionCwd,
-        command: quickvisionConfig.command,
-        healthUrl: quickvisionConfig.healthUrl,
-        readyTimeoutMs: quickvisionConfig.readyTimeoutMs,
-        shutdownTimeoutMs: quickvisionConfig.shutdownTimeoutMs,
+      vision = new ManagedProcess({
+        name: 'vision',
+        cwd: visionCwd,
+        command: visionConfig.command,
+        healthUrl: visionConfig.healthUrl,
+        readyTimeoutMs: visionConfig.readyTimeoutMs,
+        shutdownTimeoutMs: visionConfig.shutdownTimeoutMs,
       });
 
-      quickvision.start();
+      vision.start();
 
-      console.log(`[eva] waiting for quickvision health at ${quickvisionConfig.healthUrl}...`);
-      await quickvision.waitForHealthy();
-      console.log(`[eva] quickvision healthy at ${quickvisionConfig.healthUrl}`);
+      console.log(`[eva] waiting for vision health at ${visionConfig.healthUrl}...`);
+      await vision.waitForHealthy();
+      console.log(`[eva] vision healthy at ${visionConfig.healthUrl}`);
     }
 
     server = startServer({
       port: config.server.port,
       eyePath: config.server.eyePath,
-      quickvisionWsUrl: config.vision.wsUrl,
+      visionWsUrl: config.vision.wsUrl,
       insightRelay: config.insightRelay,
       agent: config.agent,
       text: config.text,

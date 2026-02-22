@@ -10,9 +10,9 @@ import {
   makeError,
   makeHello,
   PROTOCOL_VERSION,
-  QuickVisionInboundMessageSchema,
+  VisionInboundMessageSchema,
 } from './protocol.js';
-import { createQuickVisionClient } from './quickvisionClient.js';
+import { createVisionClient } from './visionClient.js';
 import { FrameRouter } from './router.js';
 import { synthesize } from './speech/edgeTts.js';
 
@@ -58,7 +58,7 @@ class AgentRequestTimeoutError extends AgentRequestError {
 export interface StartServerOptions {
   port: number;
   eyePath: string;
-  quickvisionWsUrl: string;
+  visionWsUrl: string;
   insightRelay: {
     enabled: boolean;
     cooldownMs: number;
@@ -551,7 +551,7 @@ async function callAgentEventsIngest(agentBaseUrl: string, payload: AgentEventsI
 }
 
 export function startServer(options: StartServerOptions): Server {
-  const { port, eyePath, quickvisionWsUrl, insightRelay, agent, text, speech } = options;
+  const { port, eyePath, visionWsUrl, insightRelay, agent, text, speech } = options;
 
   let lastSpeechRequestStartedAtMs: number | null = null;
   let activeUiClient: WebSocket | null = null;
@@ -896,11 +896,11 @@ export function startServer(options: StartServerOptions): Server {
     },
   });
 
-  const quickvisionClient = createQuickVisionClient({
-    url: quickvisionWsUrl,
+  const visionClient = createVisionClient({
+    url: visionWsUrl,
     handlers: {
       onOpen: () => {
-        console.log(`[eva] connected to Vision at ${quickvisionWsUrl}`);
+        console.log(`[eva] connected to Vision at ${visionWsUrl}`);
       },
       onClose: () => {
         console.warn('[eva] Vision connection closed');
@@ -912,7 +912,7 @@ export function startServer(options: StartServerOptions): Server {
         console.error(`[eva] Vision connection error: ${error.message}`);
       },
       onMessage: (payload) => {
-        const parsedMessage = QuickVisionInboundMessageSchema.safeParse(payload);
+        const parsedMessage = VisionInboundMessageSchema.safeParse(payload);
         if (!parsedMessage.success) {
           console.warn('[eva] Vision message failed schema validation; dropping payload');
           return;
@@ -981,7 +981,7 @@ export function startServer(options: StartServerOptions): Server {
     },
   });
 
-  quickvisionClient.connect();
+  visionClient.connect();
 
   const wss = new WebSocketServer({ noServer: true });
 
@@ -1031,14 +1031,14 @@ export function startServer(options: StartServerOptions): Server {
 
         const frameId = decodedFrame.meta.frame_id;
 
-        if (!quickvisionClient.isConnected()) {
+        if (!visionClient.isConnected()) {
           sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.', frameId));
           return;
         }
 
         frameRouter.set(frameId, ws);
 
-        const forwarded = quickvisionClient.sendBinary(binaryPayload);
+        const forwarded = visionClient.sendBinary(binaryPayload);
         if (!forwarded) {
           frameRouter.delete(frameId);
           sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.', frameId));
@@ -1068,12 +1068,12 @@ export function startServer(options: StartServerOptions): Server {
           return;
         }
 
-        if (!quickvisionClient.isConnected()) {
+        if (!visionClient.isConnected()) {
           sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.'));
           return;
         }
 
-        const forwarded = quickvisionClient.sendJson(parsedCommand.data);
+        const forwarded = visionClient.sendJson(parsedCommand.data);
         if (!forwarded) {
           sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.'));
         }
@@ -1117,7 +1117,7 @@ export function startServer(options: StartServerOptions): Server {
   server.listen(port, () => {
     console.log(`[eva] listening on http://localhost:${port}`);
     console.log(`[eva] websocket endpoint ws://localhost:${port}${eyePath}`);
-    console.log(`[eva] Vision target ${quickvisionClient.getUrl()}`);
+    console.log(`[eva] Vision target ${visionClient.getUrl()}`);
     console.log(
       `[eva] insight relay enabled=${insightRelay.enabled} cooldownMs=${insightRelay.cooldownMs} dedupeWindowMs=${insightRelay.dedupeWindowMs}`,
     );
@@ -1141,7 +1141,7 @@ export function startServer(options: StartServerOptions): Server {
     seenInsightClipIds.clear();
     speechCache.clear();
     inFlightSpeechSynthesis.clear();
-    quickvisionClient.disconnect();
+    visionClient.disconnect();
     wss.close();
   });
 

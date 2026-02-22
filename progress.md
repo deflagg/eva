@@ -4497,3 +4497,239 @@
 
 ### Notes
 - Legacy quickvision-role compatibility is now removed from active runtime protocol types/schemas.
+
+## Iteration 91 — Config hard cutover: remove `quickvision.wsUrl` support everywhere
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated Eva config schema in `packages/eva/src/config.ts`:
+  - `vision` is now required in `EvaConfigSchema`.
+  - removed top-level `quickvision` config key support (no fallback / no deprecation warning path).
+  - simplified config return type to `z.infer<typeof EvaConfigSchema>`.
+  - removed alias resolution logic and `resolvedVision` return path.
+  - parse error formatting now maps missing `vision` object to `vision.wsUrl: Required`.
+- Updated Eva docs in `packages/eva/README.md`:
+  - removed deprecated `quickvision.wsUrl` alias note from runtime behavior section.
+  - removed top-level `quickvision` block from the config schema snippet.
+  - updated notes to state `vision.wsUrl` is required.
+
+### Files changed
+- `packages/eva/src/config.ts`
+- `packages/eva/README.md`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva && npm run build`
+- Startup smoke check with current config file boots Eva process:
+  - `cd packages/eva && timeout 12s npm run dev`
+  - Eva starts and proceeds into normal startup flow (stopped by timeout).
+
+### Manual run instructions
+1. Ensure `packages/eva/eva.config.json` contains `vision.wsUrl`.
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Confirm Eva starts without any `quickvision.wsUrl` deprecation warning.
+
+### Notes
+- `subprocesses.quickvision` is intentionally unchanged in this iteration and will be renamed in Iteration 92.
+
+## Iteration 92 — Subprocess hard cutover: rename `subprocesses.quickvision` → `subprocesses.vision` (no shim)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Renamed Eva subprocess config key in `packages/eva/src/config.ts`:
+  - `subprocesses.quickvision` -> `subprocesses.vision` in schema defaults and top-level defaults.
+  - no compatibility shim for `subprocesses.quickvision` remains in config parsing.
+- Updated local example config in `packages/eva/eva.config.local.example.json`:
+  - `subprocesses.quickvision` -> `subprocesses.vision`.
+- Docs alignment:
+  - root `README.md` now references `subprocesses.vision.command` for venv Python override.
+  - `packages/eva/README.md` schema snippet now uses `subprocesses.vision`.
+  - `packages/eva/README.md` subprocess-mode venv command override example now uses `subprocesses.vision`.
+- Compile-followup in `packages/eva/src/index.ts`:
+  - switched config access to `config.subprocesses.vision` so runtime matches the renamed schema key.
+  - intentionally left variable names/log labels unchanged (`quickvision`) for Iteration 93.
+
+### Files changed
+- `packages/eva/src/config.ts`
+- `packages/eva/src/index.ts`
+- `packages/eva/eva.config.local.example.json`
+- `README.md`
+- `packages/eva/README.md`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva && npm run build`
+- Manual subprocess boot check:
+  1. `cd packages/eva && cp eva.config.local.example.json eva.config.local.json`
+  2. `timeout 45s npm run dev`
+  3. Observed startup flow:
+     - agent started and became healthy
+     - Eva proceeded to start Vision subprocess from the renamed config key path
+     - process then failed in this host due missing Vision dependency (`ModuleNotFoundError: No module named 'uvicorn'`)
+
+### Manual run instructions
+1. `cd packages/eva`
+2. `cp eva.config.local.example.json eva.config.local.json`
+3. (If needed) set `subprocesses.vision.command` to your venv python.
+4. `npm run dev`
+5. Confirm Eva starts Agent, then Vision subprocess.
+
+### Notes
+- Subprocess runtime naming/log strings still use `quickvision` in `index.ts` and will be renamed in Iteration 93.
+
+## Iteration 92 (follow-up patch) — Vision subprocess interpreter continuity (`uvicorn` startup fix)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Fixed Vision subprocess command defaults to use the repo venv interpreter instead of system `python`:
+  - `packages/eva/src/config.ts`
+    - `VisionSubprocessConfigSchema.command` default:
+      - `['python', '-m', 'app.run']` -> `['.venv/bin/python', '-m', 'app.run']`
+    - `subprocesses.vision.command` default in top-level config default object updated to the same venv command.
+- Updated local/example config files so copied local config preserves venv interpreter usage:
+  - `packages/eva/eva.config.local.example.json`
+  - `packages/eva/eva.config.local.json`
+- Updated docs to reflect venv command continuity and local override guidance:
+  - `packages/eva/README.md` schema snippet now shows `"command": [".venv/bin/python", "-m", "app.run"]`.
+  - root `README.md` guidance updated to clarify `subprocesses.vision.command` should target your venv interpreter path.
+- Updated planning doc per request:
+  - `docs/implementation-plan-91-94.md` Iteration 92 now includes a required runtime-command continuity note explaining that old `subprocesses.quickvision.command` overrides no longer apply after hard cutover and `subprocesses.vision.command` must point to venv python.
+
+### Files changed
+- `packages/eva/src/config.ts`
+- `packages/eva/eva.config.local.example.json`
+- `packages/eva/eva.config.local.json`
+- `packages/eva/README.md`
+- `README.md`
+- `docs/implementation-plan-91-94.md`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva && npm run build`
+- Manual subprocess startup check:
+  1. `cd packages/eva`
+  2. `timeout 60s npm run dev`
+  3. Observed startup flow:
+     - agent started and became healthy
+     - Eva started Vision subprocess using `.venv/bin/python -m app.run`
+     - Vision launched under Uvicorn (`Uvicorn running on http://127.0.0.1:8000`)
+     - no `ModuleNotFoundError: No module named 'uvicorn'` in this path
+     - process then exited via timeout (expected).
+
+### Notes
+- Root cause was interpreter selection after key rename, not a removed package from the venv.
+
+## Iteration 93 — Rename subprocess runtime naming in `index.ts` (variable names + ManagedProcess name)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated Eva bootstrap/runtime naming in `packages/eva/src/index.ts`:
+  - local subprocess variable rename:
+    - `let quickvision` -> `let vision`
+  - subprocess startup locals renamed:
+    - `quickvisionConfig` -> `visionConfig`
+    - `quickvisionCwd` -> `visionCwd`
+  - operator logs renamed:
+    - `starting quickvision subprocess` -> `starting vision subprocess`
+    - `waiting for quickvision health` -> `waiting for vision health`
+    - `quickvision healthy` -> `vision healthy`
+    - `stopping quickvision` -> `stopping vision`
+    - `force-killing quickvision` -> `force-killing vision`
+  - `ManagedProcess` identity renamed:
+    - `name: 'quickvision'` -> `name: 'vision'`
+- Kept the server callsite option key intentionally unchanged in this iteration:
+  - `quickvisionWsUrl: config.vision.wsUrl` (to be renamed in Iteration 94).
+
+### Files changed
+- `packages/eva/src/index.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva && npm run build`
+- Manual subprocess boot check:
+  1. `cd packages/eva`
+  2. `timeout 45s npm run dev`
+  3. Observed logs show Vision naming in bootstrap path:
+     - `[eva] starting vision subprocess: ...`
+     - `[eva] waiting for vision health at ...`
+     - `[eva] stopping vision...`
+     - child prefix uses `[vision]` (from `ManagedProcess` name).
+
+### Manual run instructions
+1. `cd packages/eva`
+2. `npm run dev`
+3. Confirm bootstrap/shutdown logs use `vision subprocess` wording.
+
+### Notes
+- `quickvisionWsUrl` option key and remaining QuickVision TS surface names are intentionally deferred to Iteration 94.
+
+## Iteration 94 — TypeScript surface rename: client module + server options + protocol schema names
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Renamed Eva Vision WS client module:
+  - `packages/eva/src/quickvisionClient.ts` -> `packages/eva/src/visionClient.ts`
+- Updated client module symbols in `packages/eva/src/visionClient.ts`:
+  - `QuickVisionClientHandlers` -> `VisionClientHandlers`
+  - `QuickVisionClientOptions` -> `VisionClientOptions`
+  - `QuickVisionClient` -> `VisionClient`
+  - `createQuickVisionClient(...)` -> `createVisionClient(...)`
+  - updated invalid-binary marker text:
+    - `'<unexpected binary message from QuickVision>'` -> `'<unexpected binary message from Vision>'`
+- Renamed protocol exports in `packages/eva/src/protocol.ts`:
+  - `QuickVisionInboundMessageSchema` -> `VisionInboundMessageSchema`
+  - `QuickVisionInboundMessage` -> `VisionInboundMessage`
+- Updated server TS surface in `packages/eva/src/server.ts`:
+  - import path/name:
+    - `createQuickVisionClient` from `./quickvisionClient.js` -> `createVisionClient` from `./visionClient.js`
+  - protocol schema import:
+    - `QuickVisionInboundMessageSchema` -> `VisionInboundMessageSchema`
+  - start options rename:
+    - `StartServerOptions.quickvisionWsUrl` -> `StartServerOptions.visionWsUrl`
+  - local destructure/usage rename:
+    - `quickvisionWsUrl` -> `visionWsUrl`
+    - `quickvisionClient` -> `visionClient`
+- Updated Eva bootstrap callsite in `packages/eva/src/index.ts`:
+  - `quickvisionWsUrl: config.vision.wsUrl` -> `visionWsUrl: config.vision.wsUrl`
+- Docs sweep check completed:
+  - verified root `README.md` and `packages/eva/README.md` contain no `quickvision.wsUrl` or `subprocesses.quickvision` references.
+
+### Files changed
+- `packages/eva/src/visionClient.ts` (renamed from `quickvisionClient.ts`)
+- `packages/eva/src/protocol.ts`
+- `packages/eva/src/server.ts`
+- `packages/eva/src/index.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva && npm run build`
+- Repo quickvision-surface check:
+  - `find packages/eva ... | grep "quickvision"` (excluding `.venv`, `node_modules`, `dist`, `__pycache__`) returns no matches.
+  - note: `rg` is unavailable in this host, so equivalent grep check was used.
+- Manual subprocess startup check:
+  1. `cd packages/eva`
+  2. `timeout 45s npm run dev`
+  3. Observed expected startup path:
+     - `[eva] starting vision subprocess: ...`
+     - `[eva] waiting for vision health at ...`
+     - clean timeout-driven shutdown path still works.
+
+### Manual run instructions
+1. `cd packages/eva`
+2. `npm run dev`
+3. Confirm Eva starts Agent + Vision subprocess and logs `Vision target ...`.
+
+### Notes
+- Protocol error codes remain unchanged (for example `QV_UNAVAILABLE`) per hard-cutover decision.

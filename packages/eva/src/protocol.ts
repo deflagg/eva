@@ -100,7 +100,7 @@ export const InsightMessageSchema = z.object({
   usage: InsightUsageSchema,
 });
 
-export const QuickVisionInboundMessageSchema = z.discriminatedUnion('type', [
+export const VisionInboundMessageSchema = z.discriminatedUnion('type', [
   HelloMessageSchema,
   DetectionsMessageSchema,
   ErrorMessageSchema,
@@ -117,7 +117,7 @@ export type DetectionsMessage = z.infer<typeof DetectionsMessageSchema>;
 export type InsightSummary = z.infer<typeof InsightSummarySchema>;
 export type InsightUsage = z.infer<typeof InsightUsageSchema>;
 export type InsightMessage = z.infer<typeof InsightMessageSchema>;
-export type QuickVisionInboundMessage = z.infer<typeof QuickVisionInboundMessageSchema>;
+export type VisionInboundMessage = z.infer<typeof VisionInboundMessageSchema>;
 
 export interface DecodedBinaryFrameEnvelope {
   meta: FrameBinaryMeta;

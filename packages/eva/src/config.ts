@@ -92,7 +92,7 @@ const AgentSubprocessConfigSchema = z.object({
 const VisionSubprocessConfigSchema = z.object({
   enabled: z.boolean().default(true),
   cwd: z.string().trim().min(1).default('packages/eva/vision'),
-  command: CommandSchema.default(['python', '-m', 'app.run']),
+  command: CommandSchema.default(['.venv/bin/python', '-m', 'app.run']),
   healthUrl: HttpUrlSchema.default('http://127.0.0.1:8000/health'),
   readyTimeoutMs: PositiveTimeoutMsSchema.default(60_000),
   shutdownTimeoutMs: PositiveTimeoutMsSchema.default(10_000),
@@ -108,10 +108,10 @@ const SubprocessesConfigSchema = z.object({
     readyTimeoutMs: 30_000,
     shutdownTimeoutMs: 5_000,
   }),
-  quickvision: VisionSubprocessConfigSchema.default({
+  vision: VisionSubprocessConfigSchema.default({
     enabled: true,
     cwd: 'packages/eva/vision',
-    command: ['python', '-m', 'app.run'],
+    command: ['.venv/bin/python', '-m', 'app.run'],
     healthUrl: 'http://127.0.0.1:8000/health',
     readyTimeoutMs: 60_000,
     shutdownTimeoutMs: 10_000,
@@ -127,8 +127,7 @@ const EvaConfigSchema = z.object({
       .default('/eye')
       .refine((value) => value.startsWith('/'), 'server.eyePath must start with "/"'),
   }),
-  vision: VisionWsConfigSchema.optional(),
-  quickvision: VisionWsConfigSchema.optional(),
+  vision: VisionWsConfigSchema,
   insightRelay: InsightRelayConfigSchema.default({
     enabled: true,
     cooldownMs: 10_000,
@@ -167,10 +166,10 @@ const EvaConfigSchema = z.object({
       readyTimeoutMs: 30_000,
       shutdownTimeoutMs: 5_000,
     },
-    quickvision: {
+    vision: {
       enabled: true,
       cwd: 'packages/eva/vision',
-      command: ['python', '-m', 'app.run'],
+      command: ['.venv/bin/python', '-m', 'app.run'],
       healthUrl: 'http://127.0.0.1:8000/health',
       readyTimeoutMs: 60_000,
       shutdownTimeoutMs: 10_000,
@@ -178,13 +177,7 @@ const EvaConfigSchema = z.object({
   }),
 });
 
-type EvaConfigParsed = z.infer<typeof EvaConfigSchema>;
-
-export type EvaConfig = Omit<EvaConfigParsed, 'vision'> & {
-  vision: {
-    wsUrl: string;
-  };
-};
+export type EvaConfig = z.infer<typeof EvaConfigSchema>;
 
 export function loadEvaConfig(): EvaConfig {
   const explorer = cosmiconfigSync('eva', {
@@ -203,25 +196,17 @@ export function loadEvaConfig(): EvaConfig {
   const parsed = EvaConfigSchema.safeParse(result.config);
   if (!parsed.success) {
     const details = parsed.error.issues
-      .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+      .map((issue) => {
+        if (issue.path.length === 1 && issue.path[0] === 'vision') {
+          return 'vision.wsUrl: Required';
+        }
+
+        return `${issue.path.join('.') || '(root)'}: ${issue.message}`;
+      })
       .join('; ');
     throw new Error(`[eva] invalid config in ${result.filepath}: ${details}`);
   }
 
-  let resolvedVision = parsed.data.vision;
-  if (!resolvedVision && parsed.data.quickvision) {
-    console.warn('[eva] quickvision.wsUrl is deprecated; use vision.wsUrl');
-    resolvedVision = parsed.data.quickvision;
-  }
-
-  if (!resolvedVision) {
-    throw new Error(
-      `[eva] invalid config in ${result.filepath}: missing required vision.wsUrl (or deprecated quickvision.wsUrl)`,
-    );
-  }
-
-  return {
-    ...parsed.data,
-    vision: resolvedVision,
-  };
+  return parsed.data;
 }
+

@@ -16,8 +16,7 @@ TypeScript daemon for UI/WebSocket orchestration.
     - supports request guardrails (`maxBodyBytes`, `maxTextChars`, cooldown)
     - includes `X-Eva-TTS-Cache: HIT|MISS` header
 - Eva opens a WebSocket client to configured Vision URL:
-  - primary key: `vision.wsUrl` (default `ws://localhost:8000/infer`)
-  - deprecated alias (one-iteration compatibility): `quickvision.wsUrl`
+  - key: `vision.wsUrl` (default `ws://localhost:8000/infer`)
 - WebSocket endpoint at configured `server.eyePath` (default `/eye`)
   - sends a `hello` message on connect
   - accepts binary frame envelopes (`frame_binary`) for camera frames
@@ -60,9 +59,6 @@ Current schema (abridged):
   "vision": {
     "wsUrl": "ws://localhost:8000/infer"
   },
-  "quickvision": {
-    "wsUrl": "ws://localhost:8000/infer"
-  },
   "agent": {
     "baseUrl": "http://127.0.0.1:8791",
     "timeoutMs": 30000
@@ -81,10 +77,10 @@ Current schema (abridged):
       "command": ["npm", "run", "dev"],
       "healthUrl": "http://127.0.0.1:8791/health"
     },
-    "quickvision": {
+    "vision": {
       "enabled": true,
       "cwd": "packages/eva/vision",
-      "command": ["python", "-m", "app.run"],
+      "command": [".venv/bin/python", "-m", "app.run"],
       "healthUrl": "http://127.0.0.1:8000/health"
     }
   }
@@ -92,8 +88,7 @@ Current schema (abridged):
 ```
 
 Notes:
-- `vision.wsUrl` is the canonical key.
-- If `vision.wsUrl` is missing but `quickvision.wsUrl` is present, Eva will use it and log a deprecation warning.
+- `vision.wsUrl` is required.
 
 ## One-time prerequisites
 
@@ -163,7 +158,7 @@ cp eva.config.local.example.json eva.config.local.json
 ```json
 {
   "subprocesses": {
-    "quickvision": {
+    "vision": {
       "command": ["/absolute/path/to/packages/eva/vision/.venv/bin/python", "-m", "app.run"]
     }
   }

@@ -3,7 +3,7 @@ import WebSocket, { type RawData } from 'ws';
 const RECONNECT_INITIAL_DELAY_MS = 250;
 const RECONNECT_MAX_DELAY_MS = 5_000;
 
-export interface QuickVisionClientHandlers {
+export interface VisionClientHandlers {
   onOpen?: () => void;
   onClose?: () => void;
   onError?: (error: Error) => void;
@@ -12,12 +12,12 @@ export interface QuickVisionClientHandlers {
   onReconnectScheduled?: (delayMs: number) => void;
 }
 
-export interface QuickVisionClientOptions {
+export interface VisionClientOptions {
   url: string;
-  handlers?: QuickVisionClientHandlers;
+  handlers?: VisionClientHandlers;
 }
 
-export interface QuickVisionClient {
+export interface VisionClient {
   connect: () => void;
   disconnect: () => void;
   sendJson: (payload: unknown) => boolean;
@@ -42,7 +42,7 @@ function decodeRawData(data: RawData): string {
   return Buffer.from(data).toString('utf8');
 }
 
-export function createQuickVisionClient(options: QuickVisionClientOptions): QuickVisionClient {
+export function createVisionClient(options: VisionClientOptions): VisionClient {
   const handlers = options.handlers ?? {};
 
   let ws: WebSocket | null = null;
@@ -103,7 +103,7 @@ export function createQuickVisionClient(options: QuickVisionClientOptions): Quic
 
     ws.on('message', (data, isBinary) => {
       if (isBinary) {
-        handlers.onInvalidMessage?.('<unexpected binary message from QuickVision>');
+        handlers.onInvalidMessage?.('<unexpected binary message from Vision>');
         return;
       }
 
