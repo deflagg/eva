@@ -79,10 +79,13 @@ async def on_startup() -> None:
         "[vision] insights config: "
         f"enabled={_insight_settings.enabled} "
         f"agent_url={_insight_settings.agent_url} "
+        f"assets_dir={_insight_settings.assets_dir} "
         f"max_frames={_insight_settings.max_frames} "
         f"pre_frames={_insight_settings.pre_frames} "
         f"post_frames={_insight_settings.post_frames} "
         f"insight_cooldown_ms={_insight_settings.insight_cooldown_ms} "
+        f"assets_max_clips={_insight_settings.assets.max_clips} "
+        f"assets_max_age_hours={_insight_settings.assets.max_age_hours} "
         f"downsample_enabled={_insight_settings.downsample.enabled} "
         f"downsample_max_dim={_insight_settings.downsample.max_dim} "
         f"downsample_jpeg_quality={_insight_settings.downsample.jpeg_quality}"
@@ -147,6 +150,9 @@ async def health() -> dict[str, object]:
         "status": "ok",
         "model_loaded": is_model_loaded(),
         "insights_enabled": _insight_settings.enabled if _insight_settings is not None else False,
+        "insight_assets_dir": str(_insight_settings.assets_dir) if _insight_settings is not None else None,
+        "insight_assets_max_clips": _insight_settings.assets.max_clips if _insight_settings is not None else 0,
+        "insight_assets_max_age_hours": _insight_settings.assets.max_age_hours if _insight_settings is not None else 0,
         "insight_cooldown_ms": _insight_settings.insight_cooldown_ms if _insight_settings is not None else 0,
         "insight_downsample_enabled": _insight_settings.downsample.enabled if _insight_settings is not None else False,
         "insight_downsample_max_dim": _insight_settings.downsample.max_dim if _insight_settings is not None else 0,

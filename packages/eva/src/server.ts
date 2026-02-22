@@ -1032,7 +1032,7 @@ export function startServer(options: StartServerOptions): Server {
         const frameId = decodedFrame.meta.frame_id;
 
         if (!visionClient.isConnected()) {
-          sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.', frameId));
+          sendJson(ws, makeError('QV_UNAVAILABLE', 'Vision is not connected.', frameId));
           return;
         }
 
@@ -1041,7 +1041,7 @@ export function startServer(options: StartServerOptions): Server {
         const forwarded = visionClient.sendBinary(binaryPayload);
         if (!forwarded) {
           frameRouter.delete(frameId);
-          sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.', frameId));
+          sendJson(ws, makeError('QV_UNAVAILABLE', 'Vision is not connected.', frameId));
         }
 
         return;
@@ -1069,13 +1069,13 @@ export function startServer(options: StartServerOptions): Server {
         }
 
         if (!visionClient.isConnected()) {
-          sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.'));
+          sendJson(ws, makeError('QV_UNAVAILABLE', 'Vision is not connected.'));
           return;
         }
 
         const forwarded = visionClient.sendJson(parsedCommand.data);
         if (!forwarded) {
-          sendJson(ws, makeError('QV_UNAVAILABLE', 'QuickVision is not connected.'));
+          sendJson(ws, makeError('QV_UNAVAILABLE', 'Vision is not connected.'));
         }
 
         return;

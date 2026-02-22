@@ -2,7 +2,7 @@
 
 Python daemon that hosts YOLO inference and (optional) insight triggering.
 
-## Current behavior (Iteration 90)
+## Current behavior (Iteration 97)
 
 - HTTP health endpoint at `/health`
 - WebSocket endpoint at `/infer`
@@ -11,11 +11,13 @@ Python daemon that hosts YOLO inference and (optional) insight triggering.
   - runs YOLO inference and returns `detections`
   - supports tracking + event detectors + insight triggering
 - Insight path:
-  - calls Agent via HTTP (`insights.agent_url`)
+  - selects clip frames (pre/trigger/post), optionally downsamples, and persists only those clip assets under `packages/eva/memory/working_memory_assets/<clip_id>/`
+  - calls Agent via HTTP (`insights.agent_url`) with frame `asset_rel_path` references (no base64 in HTTP payload)
   - emits protocol `insight` on success
   - emits schema-aligned summary fields only:
     - `one_liner`, `what_changed`, `severity`, `tags`
   - strips narration-style fields (for example `tts_response`) before protocol emission
+  - prunes old clip directories after each new clip write using retention settings (`insights.assets.max_clips`, `insights.assets.max_age_hours`)
 
 ## Configuration (Dynaconf)
 
@@ -28,12 +30,20 @@ Key insight settings:
 
 - `insights.enabled`
 - `insights.agent_url`
-- `insights.vision_agent_url` (deprecated alias; fallback only)
+- `insights.assets_dir`
+- `insights.assets.max_clips`
+- `insights.assets.max_age_hours`
 - `insights.timeout_ms`
 - `insights.max_frames` (hard-capped at `6`)
 - `insights.pre_frames`
 - `insights.post_frames`
 - `insights.insight_cooldown_ms`
+
+`insights.assets_dir` defaults to `../memory/working_memory_assets` (relative to `packages/eva/vision`).
+
+Retention defaults:
+- keep newest `200` clip directories (`insights.assets.max_clips`)
+- remove clip directories older than `24` hours (`insights.assets.max_age_hours`)
 
 ## Run (dev)
 

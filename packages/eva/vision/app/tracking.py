@@ -44,7 +44,7 @@ def _as_busy_policy(value: Any, *, default: TrackingBusyPolicy) -> TrackingBusyP
         if lowered == "latest":
             return "latest"
 
-    raise RuntimeError("QuickVision config error: tracking.busy_policy must be one of {'drop', 'latest'}")
+    raise RuntimeError("Vision config error: tracking.busy_policy must be one of {'drop', 'latest'}")
 
 
 def load_tracking_settings() -> TrackingSettings:
@@ -58,7 +58,7 @@ def load_tracking_settings() -> TrackingSettings:
 
     raw_tracker = settings.get("tracking.tracker", default="bytetrack.yaml")
     if not isinstance(raw_tracker, str) or not raw_tracker.strip():
-        raise RuntimeError("QuickVision config error: tracking.tracker must be a non-empty string")
+        raise RuntimeError("Vision config error: tracking.tracker must be a non-empty string")
 
     busy_policy = _as_busy_policy(settings.get("tracking.busy_policy", default="latest"), default="latest")
 

@@ -70,17 +70,17 @@ def _as_non_negative_int(value: Any, *, key: str, default: int) -> int:
         return default
 
     if isinstance(value, bool):
-        raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+        raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
 
     if isinstance(value, int):
         if value < 0:
-            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+            raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
         return value
 
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
 
-    raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+    raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
 
 
 def _as_non_negative_float(value: Any, *, key: str, default: float) -> float:
@@ -88,26 +88,26 @@ def _as_non_negative_float(value: Any, *, key: str, default: float) -> float:
         return default
 
     if isinstance(value, bool):
-        raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number")
+        raise RuntimeError(f"Vision config error: {key} must be a non-negative number")
 
     if isinstance(value, (int, float)):
         parsed = float(value)
         if parsed < 0:
-            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number")
+            raise RuntimeError(f"Vision config error: {key} must be a non-negative number")
         return parsed
 
     if isinstance(value, str):
         try:
             parsed = float(value.strip())
         except ValueError as exc:
-            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number") from exc
+            raise RuntimeError(f"Vision config error: {key} must be a non-negative number") from exc
 
         if parsed < 0:
-            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number")
+            raise RuntimeError(f"Vision config error: {key} must be a non-negative number")
 
         return parsed
 
-    raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number")
+    raise RuntimeError(f"Vision config error: {key} must be a non-negative number")
 
 
 def _as_optional_non_negative_float(value: Any, *, key: str) -> float | None:
@@ -119,7 +119,7 @@ def _as_optional_non_negative_float(value: Any, *, key: str) -> float | None:
 
 def _normalize_class_name(value: Any, *, key: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise RuntimeError(f"QuickVision config error: {key} must be a non-empty string")
+        raise RuntimeError(f"Vision config error: {key} must be a non-empty string")
 
     return value.strip().lower()
 
@@ -130,7 +130,7 @@ def _as_object_classes(value: Any) -> set[str]:
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         raw_classes = value
     else:
-        raise RuntimeError("QuickVision config error: abandoned.object_classes must be a list of class names")
+        raise RuntimeError("Vision config error: abandoned.object_classes must be a list of class names")
 
     object_classes: set[str] = set()
 
@@ -139,10 +139,10 @@ def _as_object_classes(value: Any) -> set[str]:
         object_classes.add(class_name)
 
     if not object_classes:
-        raise RuntimeError("QuickVision config error: abandoned.object_classes must contain at least one class")
+        raise RuntimeError("Vision config error: abandoned.object_classes must contain at least one class")
 
     if PERSON_CLASS_NAME in object_classes:
-        raise RuntimeError("QuickVision config error: abandoned.object_classes must not include 'person'")
+        raise RuntimeError("Vision config error: abandoned.object_classes must not include 'person'")
 
     return object_classes
 
@@ -155,7 +155,7 @@ def _as_optional_roi_name(value: Any) -> str | None:
     roi_settings = load_roi_settings()
 
     if roi_name not in roi_settings.regions:
-        raise RuntimeError(f"QuickVision config error: abandoned.roi references unknown region '{roi_name}'")
+        raise RuntimeError(f"Vision config error: abandoned.roi references unknown region '{roi_name}'")
 
     return roi_name
 

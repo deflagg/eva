@@ -64,12 +64,12 @@ def _as_mapping(value: Any, *, key: str) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value
 
-    raise RuntimeError(f"QuickVision config error: {key} must be a mapping/object")
+    raise RuntimeError(f"Vision config error: {key} must be a mapping/object")
 
 
 def _as_float(value: Any, *, key: str) -> float:
     if isinstance(value, bool):
-        raise RuntimeError(f"QuickVision config error: {key} must be numeric")
+        raise RuntimeError(f"Vision config error: {key} must be numeric")
 
     if isinstance(value, (int, float)):
         return float(value)
@@ -80,7 +80,7 @@ def _as_float(value: Any, *, key: str) -> float:
         except ValueError:
             pass
 
-    raise RuntimeError(f"QuickVision config error: {key} must be numeric")
+    raise RuntimeError(f"Vision config error: {key} must be numeric")
 
 
 def _as_non_negative_int(value: Any, *, key: str, default: int) -> int:
@@ -88,17 +88,17 @@ def _as_non_negative_int(value: Any, *, key: str, default: int) -> int:
         return default
 
     if isinstance(value, bool):
-        raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+        raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
 
     if isinstance(value, int):
         if value < 0:
-            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+            raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
         return value
 
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
 
-    raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+    raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
 
 
 def _load_regions(raw: Any) -> tuple[dict[str, RoiRegion], dict[str, int]]:
@@ -108,7 +108,7 @@ def _load_regions(raw: Any) -> tuple[dict[str, RoiRegion], dict[str, int]]:
 
     for region_name, region_value in raw_regions.items():
         if not isinstance(region_name, str) or not region_name.strip():
-            raise RuntimeError("QuickVision config error: roi.regions keys must be non-empty strings")
+            raise RuntimeError("Vision config error: roi.regions keys must be non-empty strings")
 
         name = region_name.strip()
         region = _as_mapping(region_value, key=f"roi.regions.{name}")
@@ -123,7 +123,7 @@ def _load_regions(raw: Any) -> tuple[dict[str, RoiRegion], dict[str, int]]:
         bottom = max(y1, y2)
 
         if left == right or top == bottom:
-            raise RuntimeError(f"QuickVision config error: roi.regions.{name} rectangle must have area")
+            raise RuntimeError(f"Vision config error: roi.regions.{name} rectangle must have area")
 
         raw_region_dwell_threshold_ms = region.get("dwell_threshold_ms")
         if raw_region_dwell_threshold_ms is not None:
@@ -150,7 +150,7 @@ def _load_lines(raw: Any) -> dict[str, RoiLine]:
 
     for line_name, line_value in raw_lines.items():
         if not isinstance(line_name, str) or not line_name.strip():
-            raise RuntimeError("QuickVision config error: roi.lines keys must be non-empty strings")
+            raise RuntimeError("Vision config error: roi.lines keys must be non-empty strings")
 
         name = line_name.strip()
         line = _as_mapping(line_value, key=f"roi.lines.{name}")
@@ -160,7 +160,7 @@ def _load_lines(raw: Any) -> dict[str, RoiLine]:
         y2 = _as_float(line.get("y2"), key=f"roi.lines.{name}.y2")
 
         if x1 == x2 and y1 == y2:
-            raise RuntimeError(f"QuickVision config error: roi.lines.{name} must not be a single point")
+            raise RuntimeError(f"Vision config error: roi.lines.{name} must not be a single point")
 
         lines[name] = RoiLine(
             name=name,
@@ -179,12 +179,12 @@ def _load_dwell_region_threshold_overrides(raw: Any, *, known_region_names: set[
 
     for region_name, region_value in raw_overrides.items():
         if not isinstance(region_name, str) or not region_name.strip():
-            raise RuntimeError("QuickVision config error: roi.dwell.region_threshold_ms keys must be non-empty strings")
+            raise RuntimeError("Vision config error: roi.dwell.region_threshold_ms keys must be non-empty strings")
 
         name = region_name.strip()
         if name not in known_region_names:
             raise RuntimeError(
-                f"QuickVision config error: roi.dwell.region_threshold_ms.{name} references unknown region"
+                f"Vision config error: roi.dwell.region_threshold_ms.{name} references unknown region"
             )
 
         overrides[name] = _as_non_negative_int(
@@ -207,7 +207,7 @@ def load_roi_settings() -> RoiSettings:
     representative_point_value = settings.get("roi.representative_point", default="centroid")
     representative_point = str(representative_point_value).strip().lower()
     if representative_point != "centroid":
-        raise RuntimeError("QuickVision config error: roi.representative_point must be 'centroid'")
+        raise RuntimeError("Vision config error: roi.representative_point must be 'centroid'")
 
     regions, region_dwell_thresholds = _load_regions(settings.get("roi.regions", default={}))
     lines = _load_lines(settings.get("roi.lines", default={}))

@@ -4733,3 +4733,176 @@
 
 ### Notes
 - Protocol error codes remain unchanged (for example `QV_UNAVAILABLE`) per hard-cutover decision.
+
+## Iteration 95 — Hard cutover: store insight clip frames + send asset refs to Executive `/insight`
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Added working-memory assets runtime location and git hygiene:
+  - created `packages/eva/memory/working_memory_assets/.gitkeep`
+  - updated root `.gitignore` to ignore `packages/eva/memory/working_memory_assets/**` while keeping `.gitkeep` tracked.
+- Updated Executive `/insight` request contract in `packages/eva/executive/src/server.ts`:
+  - `ClipFrameSchema` now requires `asset_rel_path` and no longer accepts `image_b64`
+  - added `WORKING_MEMORY_ASSETS_DIRNAME = "working_memory_assets"`
+  - derives `assetsDirPath` from `config.memoryDirPath` and ensures directory exists at startup
+  - added guarded asset loading path for each frame:
+    - traversal guard (`INSIGHT_ASSET_INVALID_PATH`)
+    - missing file handling (`INSIGHT_ASSET_MISSING`)
+    - read failures (`INSIGHT_ASSET_READ_FAILED`)
+  - base64 encoding is now performed internally from asset bytes just before model call.
+- Extended working memory insight entries to persist asset references:
+  - `WorkingMemoryWmInsightEntry` now includes:
+    - `assets: Array<{ frame_id?: string; ts_ms?: number; mime: "image/jpeg"; asset_rel_path: string }>`
+- Updated Executive docs:
+  - `packages/eva/executive/README.md` insight curl example now uses `asset_rel_path`
+  - documented asset location under `packages/eva/memory/working_memory_assets/`.
+- Updated Vision insight transport and persistence:
+  - `packages/eva/vision/app/insights.py`
+    - removed base64 request-frame construction path
+    - added clip asset persistence per insight run under `<assets_dir>/<clip_id>/`
+    - persists the exact bytes used for the insight call (downsampled JPEG when enabled)
+    - sends request frames to Executive as `{ frame_id, ts_ms, mime, asset_rel_path }`
+  - `packages/eva/vision/app/vision_agent_client.py`
+    - `VisionAgentFrame` now uses `asset_rel_path` (no `image_b64`).
+- Removed deprecated alias usage in Vision config/docs (hard cutover):
+  - removed `insights.vision_agent_url` from `packages/eva/vision/settings.yaml`
+  - removed fallback alias logic from `packages/eva/vision/app/insights.py`
+  - removed alias mention from `packages/eva/vision/README.md`
+  - added `insights.assets_dir` setting (default `../memory/working_memory_assets`).
+
+### Files changed
+- `.gitignore`
+- `packages/eva/memory/working_memory_assets/.gitkeep`
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/README.md`
+- `packages/eva/vision/app/insights.py`
+- `packages/eva/vision/app/vision_agent_client.py`
+- `packages/eva/vision/app/main.py`
+- `packages/eva/vision/settings.yaml`
+- `packages/eva/vision/README.md`
+- `progress.md`
+
+### Verification
+- Build/compile checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+
+### Manual run instructions
+1. Start Executive + Vision + Eva + UI using existing dev instructions.
+2. Trigger an insight (manual insight test or surprise-triggered flow).
+3. Confirm files are persisted under:
+   - `packages/eva/memory/working_memory_assets/<clip_id>/`
+4. Confirm Executive `/insight` succeeds.
+5. Confirm `packages/eva/memory/working_memory.log` includes `wm_insight` entries with `assets: [...]` references.
+
+### Notes
+- This is a hard cutover for `/insight` transport: request frames must provide `asset_rel_path`.
+- Legacy `image_b64` request payloads for Executive `/insight` are intentionally no longer accepted.
+
+## Iteration 96 — Naming cleanup: remove remaining “QuickVision” strings (no aliases)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Updated Vision Python config error text to remove remaining legacy naming:
+  - replaced all `"QuickVision config error: ..."` occurrences with `"Vision config error: ..."` in:
+    - `packages/eva/vision/app/motion.py`
+    - `packages/eva/vision/app/collision.py`
+    - `packages/eva/vision/app/roi.py`
+    - `packages/eva/vision/app/abandoned.py`
+    - `packages/eva/vision/app/tracking.py`
+- Updated Eva user-facing `QV_UNAVAILABLE` message text in `packages/eva/src/server.ts`:
+  - `"QuickVision is not connected."` -> `"Vision is not connected."`
+  - kept error code `QV_UNAVAILABLE` unchanged.
+
+### Files changed
+- `packages/eva/src/server.ts`
+- `packages/eva/vision/app/motion.py`
+- `packages/eva/vision/app/collision.py`
+- `packages/eva/vision/app/roi.py`
+- `packages/eva/vision/app/abandoned.py`
+- `packages/eva/vision/app/tracking.py`
+- `progress.md`
+
+### Verification
+- Build/compile checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+- Naming sweep:
+  - `grep -RIn "QuickVision" packages/eva` returns no hits (excluding ignored/build dirs).
+
+### Manual run instructions
+1. Start Vision + Eva + UI.
+2. Temporarily disconnect Vision (or start Eva before Vision).
+3. Confirm UI receives `QV_UNAVAILABLE` with message text:
+   - `Vision is not connected.`
+4. Confirm Vision config validation failures (if induced) now use `Vision config error: ...` wording.
+
+### Notes
+- Iteration 96 is wording-only cleanup; protocol/error codes and behavior remain unchanged.
+
+## Iteration 97 — Asset retention (max clips + max age)
+
+**Status:** ✅ Completed (2026-02-21)
+
+### Completed
+- Added Vision insight asset retention config in `packages/eva/vision/app/insights.py`:
+  - new settings under `insights.assets`:
+    - `max_clips` (default `200`)
+    - `max_age_hours` (default `24`)
+  - validation:
+    - `insights.assets.max_clips` must be `>= 1`
+    - `insights.assets.max_age_hours` must be a non-negative integer.
+- Added retention defaults in `packages/eva/vision/settings.yaml`:
+  - `insights.assets.max_clips: 200`
+  - `insights.assets.max_age_hours: 24`
+- Implemented asset cleanup routine in `InsightBuffer`:
+  - runs after each new clip directory is written
+  - scans clip directories under `insights.assets_dir`
+  - sorts by directory mtime (newest first)
+  - prunes directories older than `max_age_hours`
+  - prunes directories beyond `max_clips`
+  - never prunes the just-written current clip directory
+  - logs prune-scan/prune-delete failures without failing active insight request flow.
+- Updated Vision startup/health observability in `packages/eva/vision/app/main.py`:
+  - startup log now includes `assets_max_clips` and `assets_max_age_hours`
+  - `/health` includes:
+    - `insight_assets_max_clips`
+    - `insight_assets_max_age_hours`.
+- Updated Vision docs (`packages/eva/vision/README.md`) for retention behavior and new config keys.
+
+### Files changed
+- `packages/eva/vision/app/insights.py`
+- `packages/eva/vision/app/main.py`
+- `packages/eva/vision/settings.yaml`
+- `packages/eva/vision/README.md`
+- `progress.md`
+
+### Verification
+- Build/compile checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall app`
+- Local retention smoke-check (Vision venv Python script) passed:
+  - created multiple fake clip directories
+  - ran pruning with `max_clips=2`
+  - verified only newest 2 clip dirs remained (including current clip).
+
+### Manual run instructions
+1. In `packages/eva/vision/settings.local.yaml`, set a small retention threshold for testing:
+   ```yaml
+   insights:
+     assets:
+       max_clips: 3
+       max_age_hours: 1
+   ```
+2. Start Vision + Eva + UI + Executive.
+3. Trigger insights repeatedly until more than 3 clip directories exist.
+4. Confirm older directories are pruned under `packages/eva/memory/working_memory_assets/`.
+5. Optionally age a clip directory mtime beyond `max_age_hours` and trigger another insight; confirm it is pruned.
+6. Confirm Executive `/insight` still succeeds and `wm_insight` logging remains intact.
+
+### Notes
+- Retention is clip-directory scoped and applies only to persisted insight clip assets.

@@ -1,26 +1,32 @@
 from __future__ import annotations
 
 import asyncio
-import base64
+import re
+import shutil
 import time
 import uuid
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from PIL import Image, UnidentifiedImageError
 
 from .protocol import EventEntry, FrameBinaryMetaMessage, InsightMessage
-from .settings import settings
+from .settings import BASE_DIR, settings
 from .vision_agent_client import VisionAgentClient, VisionAgentClientError, VisionAgentFrame
 
 HARD_MAX_INSIGHT_FRAMES = 6
 DEFAULT_SURPRISE_THRESHOLD = 5.0
 DEFAULT_DOWNSAMPLE_MAX_DIM = 640
 DEFAULT_DOWNSAMPLE_JPEG_QUALITY = 75
+DEFAULT_INSIGHT_ASSETS_DIR = "../memory/working_memory_assets"
+DEFAULT_INSIGHT_ASSETS_MAX_CLIPS = 200
+DEFAULT_INSIGHT_ASSETS_MAX_AGE_HOURS = 24
+FRAME_ID_FILENAME_SANITIZE_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
 DEFAULT_SURPRISE_WEIGHTS = {
     "abandoned_object": 5.0,
     "near_collision": 5.0,
@@ -53,9 +59,17 @@ class InsightDownsampleSettings:
 
 
 @dataclass(slots=True)
+class InsightAssetsRetentionSettings:
+    max_clips: int
+    max_age_hours: int
+
+
+@dataclass(slots=True)
 class InsightSettings:
     enabled: bool
     agent_url: str
+    assets_dir: Path
+    assets: InsightAssetsRetentionSettings
     timeout_ms: int
     max_frames: int
     pre_frames: int
@@ -82,6 +96,7 @@ class InsightBuffer:
         self._frame_event = asyncio.Event()
         self._last_insight_ts_ms: int | None = None
         self._last_surprise_trigger_ts_ms: int | None = None
+        self.config.assets_dir.mkdir(parents=True, exist_ok=True)
         self._vision_agent = VisionAgentClient(config.agent_url, config.timeout_ms)
 
     def add_frame(self, meta: FrameBinaryMetaMessage, image_payload: bytes) -> None:
@@ -140,8 +155,7 @@ class InsightBuffer:
             raise InsightError("NO_CLIP_FRAMES", "Failed to build insight clip frames.")
 
         clip_id = str(uuid.uuid4())
-
-        request_frames = [self._build_request_frame(frame) for frame in clip_frames]
+        request_frames = self._persist_clip_frames(clip_id, clip_frames)
 
         try:
             insight = await self._vision_agent.request_insight(
@@ -167,27 +181,113 @@ class InsightBuffer:
             usage=insight.usage.model_dump(exclude_none=True),
         )
 
-    def _build_request_frame(self, frame: BufferedFrame) -> VisionAgentFrame:
-        image_b64 = base64.b64encode(frame.image_bytes).decode("ascii")
-        if self.config.downsample.enabled:
-            image_b64 = self._downsample_payload_image(image_b64)
+    def _persist_clip_frames(self, clip_id: str, clip_frames: list[BufferedFrame]) -> list[VisionAgentFrame]:
+        clip_dir = self.config.assets_dir / clip_id
 
-        return VisionAgentFrame(
-            frame_id=frame.frame_id,
-            ts_ms=frame.ts_ms,
-            mime="image/jpeg",
-            image_b64=image_b64,
-        )
-
-    def _downsample_payload_image(self, image_b64: str) -> str:
         try:
-            source_bytes = base64.b64decode(image_b64, validate=True)
-        except Exception as exc:
+            clip_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
             raise InsightError(
-                "INSIGHT_DOWNSAMPLE_DECODE_FAILED",
-                "Failed to decode insight frame payload for downsampling.",
+                "INSIGHT_ASSET_WRITE_FAILED",
+                f"Failed to create clip asset directory: {clip_dir}",
             ) from exc
 
+        request_frames: list[VisionAgentFrame] = []
+
+        for frame_index, frame in enumerate(clip_frames, start=1):
+            image_bytes = self._prepare_asset_image_bytes(frame.image_bytes)
+            frame_id_suffix = self._sanitize_frame_id_for_filename(frame.frame_id)
+            filename = f"{frame_index:02d}-{frame_id_suffix}.jpg"
+            frame_path = clip_dir / filename
+
+            try:
+                frame_path.write_bytes(image_bytes)
+            except OSError as exc:
+                raise InsightError(
+                    "INSIGHT_ASSET_WRITE_FAILED",
+                    f"Failed to persist insight frame asset: {frame_path}",
+                ) from exc
+
+            request_frames.append(
+                VisionAgentFrame(
+                    frame_id=frame.frame_id,
+                    ts_ms=frame.ts_ms,
+                    mime="image/jpeg",
+                    asset_rel_path=f"{clip_id}/{filename}",
+                )
+            )
+
+        self._prune_asset_dirs(current_clip_dir=clip_dir)
+
+        return request_frames
+
+    def _prune_asset_dirs(self, *, current_clip_dir: Path) -> None:
+        max_clips = self.config.assets.max_clips
+        max_age_hours = self.config.assets.max_age_hours
+
+        try:
+            clip_dirs_with_mtime: list[tuple[Path, float]] = []
+            for candidate in self.config.assets_dir.iterdir():
+                if not candidate.is_dir():
+                    continue
+
+                try:
+                    mtime = candidate.stat().st_mtime
+                except OSError:
+                    continue
+
+                clip_dirs_with_mtime.append((candidate, mtime))
+        except OSError as exc:
+            print(f"[vision] failed to scan insight asset dirs for pruning: {exc}")
+            return
+
+        clip_dirs_with_mtime.sort(key=lambda item: item[1], reverse=True)
+
+        now_seconds = time.time()
+        max_age_seconds = float(max_age_hours) * 3600.0
+        cutoff_seconds = now_seconds - max_age_seconds
+
+        prune_targets: set[Path] = set()
+
+        for candidate, mtime in clip_dirs_with_mtime:
+            if candidate == current_clip_dir:
+                continue
+
+            if mtime < cutoff_seconds:
+                prune_targets.add(candidate)
+
+        for index, (candidate, _mtime) in enumerate(clip_dirs_with_mtime):
+            if index < max_clips:
+                continue
+
+            if candidate == current_clip_dir:
+                continue
+
+            prune_targets.add(candidate)
+
+        if not prune_targets:
+            return
+
+        for prune_target in sorted(prune_targets, key=lambda path_obj: path_obj.name):
+            try:
+                shutil.rmtree(prune_target)
+            except OSError as exc:
+                print(f"[vision] failed to prune insight asset dir {prune_target}: {exc}")
+
+    def _prepare_asset_image_bytes(self, image_bytes: bytes) -> bytes:
+        if not self.config.downsample.enabled:
+            return image_bytes
+
+        return self._downsample_payload_image(image_bytes)
+
+    def _sanitize_frame_id_for_filename(self, frame_id: str) -> str:
+        candidate = FRAME_ID_FILENAME_SANITIZE_PATTERN.sub("-", frame_id.strip()).strip("-_.")
+        if not candidate:
+            return "frame"
+
+        return candidate[:80]
+
+    def _downsample_payload_image(self, source_bytes: bytes) -> bytes:
         try:
             with Image.open(BytesIO(source_bytes)) as source_image:
                 image = source_image.convert("RGB")
@@ -221,7 +321,7 @@ class InsightBuffer:
                 "Failed to encode downsampled insight frame payload.",
             ) from exc
 
-        return base64.b64encode(output.getvalue()).decode("ascii")
+        return output.getvalue()
 
     async def _build_clip(self, trigger: BufferedFrame) -> list[BufferedFrame]:
         selected_pre = self._collect_pre_frames(trigger.seq)
@@ -407,27 +507,40 @@ def _validate_url(url: str, *, key: str) -> str:
     return url
 
 
-def _resolve_insight_service_url() -> tuple[str, str]:
-    raw_agent_url = settings.get("insights.agent_url", default=None)
-    if raw_agent_url is not None:
-        if not isinstance(raw_agent_url, str) or not raw_agent_url.strip():
-            raise RuntimeError("Vision config error: insights.agent_url must be a non-empty string")
-        return raw_agent_url.strip(), "insights.agent_url"
+def _resolve_assets_dir(raw_assets_dir: Any) -> Path:
+    if raw_assets_dir is None:
+        raw_assets_dir = DEFAULT_INSIGHT_ASSETS_DIR
 
-    raw_legacy_url = settings.get("insights.vision_agent_url", default=None)
-    if raw_legacy_url is not None:
-        if not isinstance(raw_legacy_url, str) or not raw_legacy_url.strip():
-            raise RuntimeError("Vision config error: insights.vision_agent_url must be a non-empty string")
-        print("[vision] insights.vision_agent_url is deprecated; use insights.agent_url")
-        return raw_legacy_url.strip(), "insights.vision_agent_url"
+    if not isinstance(raw_assets_dir, str) or not raw_assets_dir.strip():
+        raise RuntimeError("Vision config error: insights.assets_dir must be a non-empty string path")
 
-    return "http://127.0.0.1:8791/insight", "insights.agent_url"
+    assets_dir = Path(raw_assets_dir.strip()).expanduser()
+    if not assets_dir.is_absolute():
+        assets_dir = (BASE_DIR / assets_dir).resolve()
+    else:
+        assets_dir = assets_dir.resolve()
+
+    return assets_dir
 
 
 def load_insight_settings() -> InsightSettings:
     enabled = _as_bool(settings.get("insights.enabled", default=False), default=False)
 
-    raw_url, raw_url_key = _resolve_insight_service_url()
+    raw_agent_url = settings.get("insights.agent_url", default="http://127.0.0.1:8791/insight")
+    if not isinstance(raw_agent_url, str) or not raw_agent_url.strip():
+        raise RuntimeError("Vision config error: insights.agent_url must be a non-empty string")
+
+    assets_dir = _resolve_assets_dir(settings.get("insights.assets_dir", default=DEFAULT_INSIGHT_ASSETS_DIR))
+    assets_max_clips = _as_non_negative_int(
+        settings.get("insights.assets.max_clips", default=DEFAULT_INSIGHT_ASSETS_MAX_CLIPS),
+        key="insights.assets.max_clips",
+        default=DEFAULT_INSIGHT_ASSETS_MAX_CLIPS,
+    )
+    assets_max_age_hours = _as_non_negative_int(
+        settings.get("insights.assets.max_age_hours", default=DEFAULT_INSIGHT_ASSETS_MAX_AGE_HOURS),
+        key="insights.assets.max_age_hours",
+        default=DEFAULT_INSIGHT_ASSETS_MAX_AGE_HOURS,
+    )
 
     timeout_ms = _as_non_negative_int(
         settings.get("insights.timeout_ms", default=2000),
@@ -472,6 +585,9 @@ def load_insight_settings() -> InsightSettings:
     if downsample_jpeg_quality < 1 or downsample_jpeg_quality > 100:
         raise RuntimeError("Vision config error: insights.downsample.jpeg_quality must be between 1 and 100")
 
+    if assets_max_clips < 1:
+        raise RuntimeError("Vision config error: insights.assets.max_clips must be >= 1")
+
     surprise_enabled = _as_bool(settings.get("surprise.enabled", default=True), default=True)
     surprise_threshold = _as_non_negative_float(
         settings.get("surprise.threshold", default=DEFAULT_SURPRISE_THRESHOLD),
@@ -491,7 +607,12 @@ def load_insight_settings() -> InsightSettings:
 
     return InsightSettings(
         enabled=enabled,
-        agent_url=_validate_url(raw_url, key=raw_url_key),
+        agent_url=_validate_url(raw_agent_url.strip(), key="insights.agent_url"),
+        assets_dir=assets_dir,
+        assets=InsightAssetsRetentionSettings(
+            max_clips=assets_max_clips,
+            max_age_hours=assets_max_age_hours,
+        ),
         timeout_ms=max(timeout_ms, 1),
         max_frames=max_frames,
         pre_frames=pre_frames,

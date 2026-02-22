@@ -57,17 +57,17 @@ def _as_non_negative_int(value: Any, *, key: str, default: int) -> int:
         return default
 
     if isinstance(value, bool):
-        raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+        raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
 
     if isinstance(value, int):
         if value < 0:
-            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+            raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
         return value
 
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
 
-    raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+    raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
 
 
 def _as_non_negative_float(value: Any, *, key: str, default: float) -> float:
@@ -75,30 +75,30 @@ def _as_non_negative_float(value: Any, *, key: str, default: float) -> float:
         return default
 
     if isinstance(value, bool):
-        raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number")
+        raise RuntimeError(f"Vision config error: {key} must be a non-negative number")
 
     if isinstance(value, (int, float)):
         if float(value) < 0:
-            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number")
+            raise RuntimeError(f"Vision config error: {key} must be a non-negative number")
         return float(value)
 
     if isinstance(value, str):
         try:
             parsed = float(value.strip())
         except ValueError as exc:
-            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number") from exc
+            raise RuntimeError(f"Vision config error: {key} must be a non-negative number") from exc
 
         if parsed < 0:
-            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number")
+            raise RuntimeError(f"Vision config error: {key} must be a non-negative number")
 
         return parsed
 
-    raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number")
+    raise RuntimeError(f"Vision config error: {key} must be a non-negative number")
 
 
 def _normalize_class_name(value: Any, *, key: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise RuntimeError(f"QuickVision config error: {key} must be a non-empty string")
+        raise RuntimeError(f"Vision config error: {key} must be a non-empty string")
 
     return value.strip().lower()
 
@@ -116,7 +116,7 @@ def _parse_class_pairs(value: Any) -> set[tuple[str, str]]:
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         raw_pairs = value
     else:
-        raise RuntimeError("QuickVision config error: collision.pairs must be a list of [classA, classB]")
+        raise RuntimeError("Vision config error: collision.pairs must be a list of [classA, classB]")
 
     pairs: set[tuple[str, str]] = set()
 
@@ -124,10 +124,10 @@ def _parse_class_pairs(value: Any) -> set[tuple[str, str]]:
         key = f"collision.pairs[{index}]"
 
         if not isinstance(raw_pair, Sequence) or isinstance(raw_pair, (str, bytes, bytearray)):
-            raise RuntimeError(f"QuickVision config error: {key} must be [classA, classB]")
+            raise RuntimeError(f"Vision config error: {key} must be [classA, classB]")
 
         if len(raw_pair) != 2:
-            raise RuntimeError(f"QuickVision config error: {key} must contain exactly two class names")
+            raise RuntimeError(f"Vision config error: {key} must contain exactly two class names")
 
         a_class = _normalize_class_name(raw_pair[0], key=f"{key}[0]")
         b_class = _normalize_class_name(raw_pair[1], key=f"{key}[1]")

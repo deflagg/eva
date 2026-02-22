@@ -63,9 +63,10 @@ abandoned:
 insights:
   enabled: true
   agent_url: http://127.0.0.1:8791/insight
-  # Deprecated alias. Kept for migration compatibility.
-  # Use insights.agent_url for all new configs.
-  vision_agent_url: http://127.0.0.1:8791/insight
+  assets_dir: ../memory/working_memory_assets
+  assets:
+    max_clips: 200
+    max_age_hours: 24
   timeout_ms: 20000
   max_frames: 6
   pre_frames: 3

@@ -30,6 +30,7 @@ import { deriveLanceDbDir, getOrCreateTable, mergeUpsertById, openDb, queryTopK 
 
 const HARD_MAX_FRAMES = 6;
 const WORKING_MEMORY_LOG_FILENAME = 'working_memory.log';
+const WORKING_MEMORY_ASSETS_DIRNAME = 'working_memory_assets';
 const SHORT_TERM_MEMORY_DB_FILENAME = 'short_term_memory.db';
 const LEGACY_LONG_TERM_MEMORY_DIRNAME = ['vector', 'db'].join('_');
 const LONG_TERM_MEMORY_DB_DIRNAME = 'long_term_memory_db';
@@ -116,7 +117,7 @@ const ClipFrameSchema = z
     frame_id: z.string().min(1).optional(),
     ts_ms: z.number().int().nonnegative().optional(),
     mime: z.literal('image/jpeg').default('image/jpeg'),
-    image_b64: z.string().min(1),
+    asset_rel_path: z.string().min(1),
   })
   .strict();
 
@@ -192,6 +193,20 @@ type HourlyJobRequest = z.infer<typeof HourlyJobRequestSchema>;
 type DailyJobRequest = z.infer<typeof DailyJobRequestSchema>;
 type EventsIngestRequest = z.infer<typeof EventsIngestRequestSchema>;
 type WmEventSeverity = z.infer<typeof WmEventSeveritySchema>;
+
+interface InsightModelFrame {
+  frame_id?: string;
+  ts_ms?: number;
+  mime: 'image/jpeg';
+  image_b64: string;
+}
+
+interface WorkingMemoryInsightAssetRef {
+  frame_id?: string;
+  ts_ms?: number;
+  mime: 'image/jpeg';
+  asset_rel_path: string;
+}
 
 type VectorStoreKind = (typeof VECTOR_STORE_KINDS)[keyof typeof VECTOR_STORE_KINDS];
 
@@ -285,6 +300,7 @@ interface WorkingMemoryWmInsightEntry {
   one_liner: string;
   what_changed: string[];
   tags: string[];
+  assets: WorkingMemoryInsightAssetRef[];
   narration?: string;
   usage: InsightUsage;
 }
@@ -509,6 +525,68 @@ function parseInsightRequest(payload: unknown): InsightRequest {
   }
 
   return parsed.data;
+}
+
+function resolveInsightAssetPath(assetsDirPath: string, assetRelPath: string): string {
+  const assetsDirResolved = path.resolve(assetsDirPath);
+  const resolvedAssetPath = path.resolve(assetsDirResolved, assetRelPath);
+  const assetsDirPrefix = `${assetsDirResolved}${path.sep}`;
+
+  if (resolvedAssetPath !== assetsDirResolved && !resolvedAssetPath.startsWith(assetsDirPrefix)) {
+    throw new HttpRequestError(
+      400,
+      'INSIGHT_ASSET_INVALID_PATH',
+      'Insight frame asset path must stay within working_memory_assets.',
+      { assetRelPath },
+    );
+  }
+
+  return resolvedAssetPath;
+}
+
+async function loadInsightModelFrames(
+  frames: InsightRequest['frames'],
+  assetsDirPath: string,
+): Promise<InsightModelFrame[]> {
+  return await Promise.all(
+    frames.map(async (frame) => {
+      const resolvedAssetPath = resolveInsightAssetPath(assetsDirPath, frame.asset_rel_path);
+
+      let assetBytes: Buffer;
+      try {
+        assetBytes = await readFile(resolvedAssetPath);
+      } catch (error) {
+        const errorCode =
+          error && typeof error === 'object' && 'code' in error
+            ? String((error as { code?: string }).code ?? '')
+            : undefined;
+
+        if (errorCode === 'ENOENT' || errorCode === 'ENOTDIR') {
+          throw new HttpRequestError(400, 'INSIGHT_ASSET_MISSING', `Insight frame asset not found: ${frame.asset_rel_path}`, {
+            assetRelPath: frame.asset_rel_path,
+          });
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        throw new HttpRequestError(
+          400,
+          'INSIGHT_ASSET_READ_FAILED',
+          `Failed to read insight frame asset: ${frame.asset_rel_path}`,
+          {
+            assetRelPath: frame.asset_rel_path,
+            reason: message,
+          },
+        );
+      }
+
+      return {
+        ...(frame.frame_id ? { frame_id: frame.frame_id } : {}),
+        ...(typeof frame.ts_ms === 'number' ? { ts_ms: frame.ts_ms } : {}),
+        mime: frame.mime,
+        image_b64: assetBytes.toString('base64'),
+      };
+    }),
+  );
 }
 
 function parseRespondRequest(payload: unknown): RespondRequest {
@@ -952,6 +1030,12 @@ function buildWorkingMemoryInsightEntry(
     one_liner: insight.summary.one_liner,
     what_changed: [...insight.summary.what_changed],
     tags: [...insight.summary.tags],
+    assets: request.frames.map((frame) => ({
+      ...(frame.frame_id ? { frame_id: frame.frame_id } : {}),
+      ...(typeof frame.ts_ms === 'number' ? { ts_ms: frame.ts_ms } : {}),
+      mime: frame.mime,
+      asset_rel_path: frame.asset_rel_path,
+    })),
     ...(rawNarration ? { narration: rawNarration } : {}),
     usage: {
       input_tokens: insight.usage.input_tokens,
@@ -2013,11 +2097,14 @@ async function buildRespondMemoryContext(params: {
 
 async function generateInsight(
   request: InsightRequest,
+  assetsDirPath: string,
   config: AgentConfig,
   secrets: AgentSecrets,
   tagWhitelist: ExperienceTagWhitelist,
 ): Promise<InsightResult> {
   const model = getModel(config.model.provider as never, config.model.id as never);
+
+  const modelFrames = await loadInsightModelFrames(request.frames, assetsDirPath);
 
   const messageContent = [
     {
@@ -2028,7 +2115,7 @@ async function generateInsight(
         frameCount: request.frames.length,
       }),
     },
-    ...request.frames.map((frame) => ({
+    ...modelFrames.map((frame) => ({
       type: 'image',
       data: frame.image_b64,
       mimeType: frame.mime,
@@ -2268,6 +2355,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
   const personaPrompt = loadPersonaPrompt(config.memoryDirPath);
 
   const workingMemoryLogPath = path.resolve(config.memoryDirPath, WORKING_MEMORY_LOG_FILENAME);
+  const assetsDirPath = path.join(config.memoryDirPath, WORKING_MEMORY_ASSETS_DIRNAME);
   const shortTermMemoryDbPath = path.resolve(config.memoryDirPath, SHORT_TERM_MEMORY_DB_FILENAME);
   const personalityToneCachePath = path.resolve(config.memoryDirPath, 'cache', 'personality_tone.json');
   const coreExperiencesCachePath = path.resolve(config.memoryDirPath, 'cache', 'core_experiences.json');
@@ -2276,6 +2364,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
   const workingMemoryWriteQueue = new SerialTaskQueue();
 
   mkdirSync(config.memoryDirPath, { recursive: true });
+  mkdirSync(assetsDirPath, { recursive: true });
   migrateLegacyLongTermMemoryDir(config.memoryDirPath);
   initializeShortTermMemoryDb(shortTermMemoryDbPath);
 
@@ -2305,6 +2394,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
             experienceTagCount: tagWhitelist.allowedTags.length,
             personaPath: personaPrompt.sourcePath,
             workingMemoryLogPath,
+            workingMemoryAssetsDirPath: assetsDirPath,
             shortTermMemoryDbPath,
             personalityToneCachePath,
             coreExperiencesCachePath,
@@ -2694,7 +2784,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
         lastInsightRequestAt = now;
 
         try {
-          const insight = await generateInsight(insightRequest, config, secrets, tagWhitelist);
+          const insight = await generateInsight(insightRequest, assetsDirPath, config, secrets, tagWhitelist);
           const wmInsightEntry = buildWorkingMemoryInsightEntry(insightRequest, insight, Date.now());
 
           await workingMemoryWriteQueue.run(async () => {
@@ -2737,6 +2827,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
     console.log(`[agent] memory dir: ${config.memoryDirPath}`);
     console.log(`[agent] persona: ${personaPrompt.sourcePath}`);
     console.log(`[agent] working memory log: ${workingMemoryLogPath}`);
+    console.log(`[agent] working memory assets dir: ${assetsDirPath}`);
     console.log(`[agent] short-term memory db: ${shortTermMemoryDbPath}`);
     console.log(`[agent] personality tone cache: ${personalityToneCachePath}`);
     console.log(`[agent] core experiences cache: ${coreExperiencesCachePath}`);

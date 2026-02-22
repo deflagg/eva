@@ -18,7 +18,7 @@ class VisionAgentFrame(BaseModel):
     frame_id: str = Field(min_length=1)
     ts_ms: int = Field(ge=0)
     mime: Literal["image/jpeg"] = "image/jpeg"
-    image_b64: str = Field(min_length=1)
+    asset_rel_path: str = Field(min_length=1)
 
 
 class VisionAgentInsightRequest(BaseModel):

@@ -26,6 +26,8 @@ packages/eva/memory/working_memory.log
 packages/eva/memory/short_term_memory.db
 packages/eva/memory/cache/**
 packages/eva/memory/long_term_memory_db/**
+packages/eva/memory/working_memory_assets/**
+!packages/eva/memory/working_memory_assets/.gitkeep
 
 # EVA LLM trace logs
 packages/eva/llm_logs/**

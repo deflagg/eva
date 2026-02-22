@@ -59,20 +59,20 @@ def _as_positive_int(value: Any, *, key: str, default: int) -> int:
         return default
 
     if isinstance(value, bool):
-        raise RuntimeError(f"QuickVision config error: {key} must be a positive integer")
+        raise RuntimeError(f"Vision config error: {key} must be a positive integer")
 
     if isinstance(value, int):
         if value <= 0:
-            raise RuntimeError(f"QuickVision config error: {key} must be a positive integer")
+            raise RuntimeError(f"Vision config error: {key} must be a positive integer")
         return value
 
     if isinstance(value, str) and value.strip().isdigit():
         parsed = int(value.strip())
         if parsed <= 0:
-            raise RuntimeError(f"QuickVision config error: {key} must be a positive integer")
+            raise RuntimeError(f"Vision config error: {key} must be a positive integer")
         return parsed
 
-    raise RuntimeError(f"QuickVision config error: {key} must be a positive integer")
+    raise RuntimeError(f"Vision config error: {key} must be a positive integer")
 
 
 def _as_non_negative_int(value: Any, *, key: str, default: int) -> int:
@@ -80,17 +80,17 @@ def _as_non_negative_int(value: Any, *, key: str, default: int) -> int:
         return default
 
     if isinstance(value, bool):
-        raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+        raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
 
     if isinstance(value, int):
         if value < 0:
-            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+            raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
         return value
 
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
 
-    raise RuntimeError(f"QuickVision config error: {key} must be a non-negative integer")
+    raise RuntimeError(f"Vision config error: {key} must be a non-negative integer")
 
 
 def _as_non_negative_float(value: Any, *, key: str, default: float) -> float:
@@ -98,25 +98,25 @@ def _as_non_negative_float(value: Any, *, key: str, default: float) -> float:
         return default
 
     if isinstance(value, bool):
-        raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number")
+        raise RuntimeError(f"Vision config error: {key} must be a non-negative number")
 
     if isinstance(value, (int, float)):
         if float(value) < 0:
-            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number")
+            raise RuntimeError(f"Vision config error: {key} must be a non-negative number")
         return float(value)
 
     if isinstance(value, str):
         try:
             parsed = float(value.strip())
         except ValueError as exc:
-            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number") from exc
+            raise RuntimeError(f"Vision config error: {key} must be a non-negative number") from exc
 
         if parsed < 0:
-            raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number")
+            raise RuntimeError(f"Vision config error: {key} must be a non-negative number")
 
         return parsed
 
-    raise RuntimeError(f"QuickVision config error: {key} must be a non-negative number")
+    raise RuntimeError(f"Vision config error: {key} must be a non-negative number")
 
 
 def load_motion_settings() -> MotionSettings:
@@ -128,7 +128,7 @@ def load_motion_settings() -> MotionSettings:
     enabled = _as_bool(settings.get("motion.enabled", default=True), default=True)
     history_frames = _as_positive_int(settings.get("motion.history_frames", default=8), key="motion.history_frames", default=8)
     if history_frames < 2:
-        raise RuntimeError("QuickVision config error: motion.history_frames must be >= 2")
+        raise RuntimeError("Vision config error: motion.history_frames must be >= 2")
 
     sudden_motion_speed_px_s = _as_non_negative_float(
         settings.get("motion.sudden_motion_speed_px_s", default=250.0),

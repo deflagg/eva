@@ -222,12 +222,16 @@ curl -sS -X POST http://127.0.0.1:8791/respond \
 
 ## Insight check
 
+Insight frame assets must already exist under:
+
+- `packages/eva/memory/working_memory_assets/`
+
 ```bash
 curl -sS -X POST http://127.0.0.1:8791/insight \
   -H 'content-type: application/json' \
   -d '{
     "clip_id":"clip-1",
     "trigger_frame_id":"frame-2",
-    "frames":[{"frame_id":"frame-1","ts_ms":1700000000000,"mime":"image/jpeg","image_b64":"<base64-jpeg>"}]
+    "frames":[{"frame_id":"frame-1","ts_ms":1700000000000,"mime":"image/jpeg","asset_rel_path":"clip-1/01-frame-1.jpg"}]
   }'
 ```
