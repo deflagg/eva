@@ -5310,3 +5310,237 @@
 
 ### Notes
 - This iteration changes prompt behavior and docs only; `/respond` context wiring remains as implemented in Iteration 106.
+
+## Iteration 108 — Remove user-text wrapper (send raw user message as the user turn)
+
+**Status:** ✅ Completed (2026-02-22)
+
+### Completed
+- Updated `/respond` user-prompt construction in:
+  - `packages/eva/executive/src/prompts/respond.ts`
+- Removed wrapper/instruction-style user payload assembly.
+  - before: multi-line wrapper (`Generate a direct response...`, `session_id: ...`, `user_text: ...`)
+  - after: returns raw `input.text` only.
+- Simplified prompt input type by removing unused `sessionId` from `RespondPromptInput`.
+- Updated `/respond` call site in:
+  - `packages/eva/executive/src/server.ts`
+  - now passes only `text: request.text` into `buildRespondUserPrompt(...)`.
+
+### Files changed
+- `packages/eva/executive/src/prompts/respond.ts`
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build + typecheck pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva/executive && npm run typecheck`
+- Prompt helper smoke check passes:
+  - `cd packages/eva/executive && npx tsx --eval "import { buildRespondUserPrompt } from './src/prompts/respond.ts'; console.log(buildRespondUserPrompt({ text: 'what just happened' }));"`
+  - output: `what just happened`
+- Source sanity checks pass:
+  - no remaining prompt wrapper string matches for:
+    - `Generate a direct response for the user message`
+    - `user_text:` in `prompts/respond.ts`
+
+### Manual run instructions
+1. Start Executive and UI stack as usual.
+2. Send `/respond` input: `what just happened`.
+3. Inspect request trace logs (`packages/eva/llm_logs/openai-requests.log`) and confirm user message content is exactly:
+   - `what just happened`
+   - with no wrapper lines (`Generate a direct response...`, `session_id:`, `user_text:`).
+
+### Notes
+- This iteration intentionally keeps system prompt/tool constraints unchanged; style rubric changes are planned for Iteration 109.
+
+## Iteration 109 — Remove incident-report rubric + add spoken-style defaults/examples
+
+**Status:** ✅ Completed (2026-02-22)
+
+### Completed
+- Removed the report-style behavior rule from EVA base persona in:
+  - `packages/eva/memory/persona.md`
+- Replaced it with a compact spoken-style default rule:
+  - default 1-2 short conversational sentences
+  - only expand into detailed breakdown when user asks for details or risk is genuinely high.
+- Updated `/respond` system prompt template in:
+  - `packages/eva/executive/src/prompts/respond.ts`
+- Added explicit chat style guidance section:
+  - `Response style defaults:`
+  - spoken/casual short-reply default + detail expansion condition
+- Added two few-shot style examples in system prompt:
+  - user: `what just happened` -> concise conversational summary
+  - user: `give me details` -> structured detail mode allowed
+- Kept the existing rule unchanged:
+  - never include internal IDs/telemetry/system internals in spoken output (via persona guidance).
+
+### Files changed
+- `packages/eva/memory/persona.md`
+- `packages/eva/executive/src/prompts/respond.ts`
+- `progress.md`
+
+### Verification
+- Build + typecheck pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva/executive && npm run typecheck`
+- Prompt template smoke check passes:
+  - `cd packages/eva/executive && npx tsx --eval "import { buildRespondSystemPrompt } from './src/prompts/respond.ts'; const p=buildRespondSystemPrompt({ persona:'persona', allowedConcepts:['chat'], maxConcepts:6, currentTone:'neutral', toneSessionKey:'s', allowedTones:['neutral'] as const, memoryContext:'none' }); console.log(p.includes('Describe what changed, why it matters, and what to do next.')); console.log(p.includes('Response style defaults:')); console.log(p.includes('Style examples:'));"`
+  - output:
+    - `false`
+    - `true`
+    - `true`
+
+### Manual run instructions
+1. Start Executive/UI stack as usual.
+2. Ask: `what just happened`.
+3. Confirm response is conversational and does not default to report framing (e.g., avoid opening with `Recently, there was...`).
+4. Ask: `give me details`.
+5. Confirm a more structured breakdown is allowed in that mode.
+
+### Notes
+- Tool-call contract is unchanged: model must still call `commit_text_response` exactly once.
+- Recent-insight memory shaping is unchanged in this iteration and is scheduled for Iteration 110.
+
+## Iteration 109 (follow-up patch) — /respond no-tool-call hardening + prompt example clarification
+
+**Status:** ✅ Completed (2026-02-22)
+
+### Why this patch
+- During manual runtime usage after Iteration 109, `/respond` intermittently returned HTTP 502 (`MODEL_NO_TOOL_CALL`).
+- LLM traces showed occasional plain-text assistant output (`type: "text"`, `stopReason: "stop"`) instead of a `commit_text_response` tool call.
+
+### Completed
+- Updated style example wording in:
+  - `packages/eva/executive/src/prompts/respond.ts`
+- Reframed examples to describe the desired **tool `text` field value** instead of `Assistant: ...` plain-output examples.
+- Added explicit reminder line in prompt examples:
+  - still call `commit_text_response` exactly once.
+- Added runtime fallback hardening in:
+  - `packages/eva/executive/src/server.ts`
+- New behavior when model omits required tool call but returns plain text blocks:
+  - extract text from assistant `content[]` (`type: "text"` blocks)
+  - synthesize a valid `RespondPayload` with safe fallback metadata
+  - sanitize and return response instead of throwing 502.
+- Preserved strict error behavior when neither tool call nor usable text content is present.
+
+### Files changed
+- `packages/eva/executive/src/prompts/respond.ts`
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build + typecheck pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva/executive && npm run typecheck`
+- Prompt smoke check passes:
+  - confirms old `Assistant: ...` example text is absent
+  - confirms new `text`-value wording is present.
+
+### Manual run instructions
+1. Restart/reload Executive.
+2. Send `/respond` requests such as:
+   - `what is happening`
+   - `what just happened`
+3. If model returns plain text instead of tool call, confirm request no longer fails with 502 and still returns a user-facing response.
+4. Inspect logs for fallback warning line:
+   - `respond model returned plain text without commit_text_response; using extracted text fallback...`
+
+### Notes
+- This follow-up is a stability hardening patch; it does not change memory-context formatting (still planned for Iteration 110).
+
+## Iteration 110 — Humanize injected recent-observations context (keep raw severity/timestamps in debug logs)
+
+**Status:** ✅ Completed (2026-02-22)
+
+### Completed
+- Updated recent-insight prompt formatting utilities in:
+  - `packages/eva/executive/src/memcontext/retrieve_recent_insights.ts`
+- Changed model-facing formatter (`formatInsightsForPrompt`) from report-style lines to human-shaped bullets:
+  - before: `[HH:MM:SS] (severity) one_liner`
+  - after: `- one_liner` + `- what_changed ...` (no timestamp/severity labels)
+- Added new debug formatter (`formatInsightsForDebug`) that preserves prior structured format with:
+  - timestamps
+  - severity labels
+  - `(+N more)` truncation marker
+- Updated `/respond` memory-context assembly in:
+  - `packages/eva/executive/src/server.ts`
+- Replaced injected heading and empty-state phrasing:
+  - before: `Recent insights (last ~2 minutes):`
+  - after: `Recent observations:`
+- Added debug-only raw recent-insight lines to request trace payload (not in model prompt):
+  - `payload.memory_debug.recent_insights_count`
+  - `payload.memory_debug.recent_insights_raw`
+- Kept all other memory layers and retrieval logic unchanged.
+
+### Files changed
+- `packages/eva/executive/src/memcontext/retrieve_recent_insights.ts`
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build + typecheck pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva/executive && npm run typecheck`
+- Formatter smoke check passes:
+  - `cd packages/eva/executive && npx tsx --eval 'import { formatInsightsForPrompt, formatInsightsForDebug } from "./src/memcontext/retrieve_recent_insights.ts"; const sample=[{ ts_ms: Date.now(), clip_id:"c", trigger_frame_id:"f", summary:{ one_liner:"Someone looked tense and adjusted their hood.", what_changed:["They stayed mostly still, then fidgeted briefly."], severity:"medium", tags:["person"] } }]; const promptText=formatInsightsForPrompt(sample); const debugText=formatInsightsForDebug(sample); console.log(promptText); console.log("HAS_DEBUG_PATTERN_IN_PROMPT", /\[[0-9]{2}:[0-9]{2}:[0-9]{2}\] \((low|medium|high)\)/.test(promptText)); console.log("HAS_DEBUG_PATTERN_IN_DEBUG", /\[[0-9]{2}:[0-9]{2}:[0-9]{2}\] \((low|medium|high)\)/.test(debugText));'`
+  - output confirms:
+    - prompt formatter has no `[HH:MM:SS] (severity)` pattern
+    - debug formatter retains `[HH:MM:SS] (severity)` pattern
+
+### Manual run instructions
+1. Restart/reload Executive.
+2. Send `/respond` prompts like:
+   - `what just happened`
+   - `what is happening`
+3. Inspect `packages/eva/llm_logs/openai-requests.log` and confirm model request context now includes:
+   - `Recent observations:`
+   - bullet-only humanized lines (no timestamp/severity labels).
+4. In the same request trace payload, confirm `memory_debug.recent_insights_raw` still contains structured `[HH:MM:SS] (severity)` lines for debugging.
+
+### Notes
+- This iteration changes context shaping only; tool-call contract (`commit_text_response` exactly once) remains unchanged.
+
+## Iteration 111 — Add prompt-regression checks + smoke checklist
+
+**Status:** ✅ Completed (2026-02-22)
+
+### Completed
+- Added a minimal regression-check script in:
+  - `packages/eva/executive/scripts/check-respond-prompt-regressions.ts`
+- Added package script entry in:
+  - `packages/eva/executive/package.json`
+  - new command: `npm run check:respond-prompt`
+- Implemented automated checks for `/respond` prompt behavior:
+  1. Asserts user prompt equals raw `user_text` exactly.
+  2. Asserts old wrapper text is absent from user prompt:
+     - `Generate a direct response for the user message`
+     - `user_text:`
+  3. Asserts system prompt does **not** contain removed report rubric:
+     - `Describe what changed, why it matters, and what to do next.`
+  4. Asserts prompt-formatted recent observations do **not** include report-style timestamp/severity pattern:
+     - `[HH:MM:SS] (severity)`
+- Added smoke checklist for conversational behavior (below).
+
+### Files changed
+- `packages/eva/executive/scripts/check-respond-prompt-regressions.ts`
+- `packages/eva/executive/package.json`
+- `progress.md`
+
+### Verification
+- Build + typecheck + regression-check script all pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva/executive && npm run typecheck`
+  - `cd packages/eva/executive && npm run check:respond-prompt`
+- Script output:
+  - `PASS: respond prompt regression checks`
+
+### Smoke checklist (Iteration 111)
+1. `what just happened`
+   - expected: 1-2 casual spoken sentences (no report framing by default).
+2. `give me details`
+   - expected: structured breakdown is allowed (bullets OK when asked).
+3. High-severity activity present
+   - expected: concise response that mentions safety/urgency first.
+
+### Notes
+- This iteration adds a lightweight automated guard and smoke checklist to reduce regressions in style/prompt assembly behavior.

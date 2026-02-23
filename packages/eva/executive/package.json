@@ -7,6 +7,7 @@
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check:respond-prompt": "tsx ./scripts/check-respond-prompt-regressions.ts",
     "mem:reset:working": "node ./scripts/reset-working.mjs",
     "mem:reset:session": "node ./scripts/reset-session.mjs",
     "mem:reset:all": "node ./scripts/reset-all.mjs"

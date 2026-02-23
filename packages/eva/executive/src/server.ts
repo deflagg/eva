@@ -19,7 +19,7 @@ import {
   saveToneStateAtomic,
   updateToneForSession,
 } from './memcontext/tone.js';
-import { formatInsightsForPrompt, retrieveRecentInsights } from './memcontext/retrieve_recent_insights.js';
+import { formatInsightsForDebug, formatInsightsForPrompt, retrieveRecentInsights } from './memcontext/retrieve_recent_insights.js';
 import { logLlmTrace } from './llm_log.js';
 import type { AgentConfig, AgentSecrets } from './config.js';
 import { buildInsightSystemPrompt, buildInsightUserPrompt } from './prompts/insight.js';
@@ -356,6 +356,8 @@ interface RespondMemoryContextResult {
   text: string;
   approxTokens: number;
   tokenBudget: number;
+  recentInsightsCount: number;
+  debugRecentInsightsRaw: string;
 }
 
 interface RetrievedVectorHit {
@@ -853,6 +855,43 @@ function sanitizeRespondPayload(
       note,
     },
   };
+}
+
+function extractAssistantTextContent(assistantMessage: unknown): string | null {
+  if (!assistantMessage || typeof assistantMessage !== 'object') {
+    return null;
+  }
+
+  const content = (assistantMessage as { content?: unknown }).content;
+  if (!Array.isArray(content)) {
+    return null;
+  }
+
+  const textBlocks = content
+    .map((block) => {
+      if (!block || typeof block !== 'object') {
+        return null;
+      }
+
+      if ((block as { type?: unknown }).type !== 'text') {
+        return null;
+      }
+
+      const text = (block as { text?: unknown }).text;
+      if (typeof text !== 'string') {
+        return null;
+      }
+
+      const trimmed = text.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    })
+    .filter((value): value is string => typeof value === 'string');
+
+  if (textBlocks.length === 0) {
+    return null;
+  }
+
+  return textBlocks.join('\n').trim();
 }
 
 async function ensureParentDir(filePath: string): Promise<void> {
@@ -1906,9 +1945,18 @@ async function buildRespondMemoryContext(params: {
     limit: RESPOND_RECENT_INSIGHTS_MAX_ITEMS,
   });
 
-  appendLineWithinBudget(lines, 'Recent insights (last ~2 minutes):', budget);
+  const debugRecentInsightsRaw =
+    recentInsights.length === 0
+      ? '- none'
+      : formatInsightsForDebug(recentInsights, {
+          maxItems: RESPOND_RECENT_INSIGHTS_MAX_ITEMS,
+          maxWhatChangedItems: 2,
+          maxLineChars: 180,
+        });
+
+  appendLineWithinBudget(lines, 'Recent observations:', budget);
   if (recentInsights.length === 0) {
-    appendLineWithinBudget(lines, '- No insights were generated in the last ~2 minutes.', budget);
+    appendLineWithinBudget(lines, '- Nothing notable was observed in the last ~2 minutes.', budget);
   } else {
     const formattedInsights = formatInsightsForPrompt(recentInsights, {
       maxItems: RESPOND_RECENT_INSIGHTS_MAX_ITEMS,
@@ -2072,6 +2120,8 @@ async function buildRespondMemoryContext(params: {
     text: lines.join('\n'),
     approxTokens: budget.usedTokens,
     tokenBudget: budget.maxTokens,
+    recentInsightsCount: recentInsights.length,
+    debugRecentInsightsRaw,
   };
 }
 
@@ -2240,7 +2290,6 @@ async function generateRespond(
             type: 'text',
             text: buildRespondUserPrompt({
               text: request.text,
-              sessionId: request.session_id,
             }),
           },
         ],
@@ -2267,6 +2316,10 @@ async function generateRespond(
         session_id: request.session_id,
       },
       context,
+      memory_debug: {
+        recent_insights_count: memoryContext.recentInsightsCount,
+        recent_insights_raw: memoryContext.debugRecentInsightsRaw,
+      },
     },
   });
 
@@ -2313,6 +2366,26 @@ async function generateRespond(
     : undefined;
 
   if (!toolCall) {
+    const fallbackText = extractAssistantTextContent(assistantMessage);
+    if (fallbackText) {
+      console.warn(
+        `[agent] respond model returned plain text without ${RESPOND_TOOL_NAME}; using extracted text fallback to avoid user-visible failure.`,
+      );
+
+      return sanitizeRespondPayload(
+        {
+          text: fallbackText,
+          meta: {
+            tone: toneContext.currentTone,
+            concepts: [tagWhitelist.fallbackConcept],
+            surprise: 0,
+            note: `Fallback path: model omitted ${RESPOND_TOOL_NAME}; preserved plain-text response.`,
+          },
+        },
+        tagWhitelist,
+      );
+    }
+
     throw new HttpRequestError(502, 'MODEL_NO_TOOL_CALL', `Model did not call required tool: ${RESPOND_TOOL_NAME}`);
   }
 

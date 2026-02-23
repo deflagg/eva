@@ -159,6 +159,29 @@ export function formatInsightsForPrompt(
   const lines: string[] = [];
 
   for (const insight of selected) {
+    lines.push(truncateText(`- ${insight.summary.one_liner}`, maxLineChars));
+
+    const changes = insight.summary.what_changed.slice(0, maxWhatChangedItems);
+    for (const change of changes) {
+      lines.push(truncateText(`- ${change}`, maxLineChars));
+    }
+  }
+
+  return lines.join('\n');
+}
+
+export function formatInsightsForDebug(
+  insights: InsightEntry[],
+  options: FormatInsightsForPromptOptions = {},
+): string {
+  const maxItems = Math.max(1, options.maxItems ?? 10);
+  const maxWhatChangedItems = Math.max(1, options.maxWhatChangedItems ?? 2);
+  const maxLineChars = Math.max(80, options.maxLineChars ?? 180);
+
+  const selected = insights.slice(-maxItems);
+  const lines: string[] = [];
+
+  for (const insight of selected) {
     lines.push(
       truncateText(
         `[${formatTimeHms(insight.ts_ms)}] (${insight.summary.severity}) ${insight.summary.one_liner}`,

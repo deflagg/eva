@@ -1,6 +1,5 @@
 export interface RespondPromptInput {
   text: string;
-  sessionId?: string;
 }
 
 export interface RespondSystemPromptInput {
@@ -32,6 +31,17 @@ export function buildRespondSystemPrompt(input: RespondSystemPromptInput): strin
     'Persona guidance:',
     input.persona,
     '',
+    'Response style defaults:',
+    '- Default to a casual spoken reply: 1-2 short sentences. Summarize like a human.',
+    '- Only expand into a detailed breakdown (including bullets/enumeration) if the user asks for details or if there is genuine high risk.',
+    '',
+    'Style examples (the quoted line is the desired `text` value inside `commit_text_response`):',
+    '- User: "what just happened"',
+    '- text: "Not much - someone looks a bit tense and is fiddling with their hood. Nothing clearly urgent."',
+    '- User: "give me details"',
+    '- text: "Here\'s what I noticed: ... (bullets are OK here)"',
+    '- Important: still call `commit_text_response` exactly once.',
+    '',
     'Current EVA tone (session-scoped):',
     `- session_key: ${input.toneSessionKey}`,
     `- current_tone: ${input.currentTone}`,
@@ -62,9 +72,5 @@ export function buildRespondSystemPrompt(input: RespondSystemPromptInput): strin
 }
 
 export function buildRespondUserPrompt(input: RespondPromptInput): string {
-  return [
-    'Generate a direct response for the user message.',
-    `session_id: ${input.sessionId ?? 'none'}`,
-    `user_text: ${input.text}`,
-  ].join('\n');
+  return input.text;
 }
