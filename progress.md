@@ -5544,3 +5544,213 @@
 
 ### Notes
 - This iteration adds a lightweight automated guard and smoke checklist to reduce regressions in style/prompt assembly behavior.
+
+## Iteration 112 — Add working-memory replay utility (JSONL -> labeled messages[])
+
+**Status:** ✅ Completed (2026-02-23)
+
+### Completed
+- Added new replay utility module:
+  - `packages/eva/executive/src/memcontext/working_memory_replay.ts`
+- Implemented export:
+  - `replayWorkingMemoryLog({ logPath })`
+- Implemented required replay behavior:
+  - ENOENT-safe read: returns empty `messages` with zeroed stats
+  - reads UTF-8 JSONL, trims lines, ignores empty lines
+  - parses line JSON with per-line invalid JSON skip counting
+  - validates required shape (`type` string + `ts_ms` number) with invalid-shape skip counting
+  - sorts parsed entries by `ts_ms` ascending
+  - maps replayed entries to chat messages with labels:
+    - role `assistant` for `text_output`
+    - role `user` for all other entry types
+  - rendered message text format:
+    1. `WM_KIND=<type>`
+    2. `ts_ms: <ts_ms>`
+    3. `WM_JSON: <JSON.stringify(entry)>`
+- Added replay stats surface:
+  - `total_lines`
+  - `parsed_entries`
+  - `skipped_invalid_json`
+  - `skipped_invalid_shape`
+
+### Files changed
+- `packages/eva/executive/src/memcontext/working_memory_replay.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Manual smoke snippet passes (prints replay stats + first/last roles):
+  - `cd packages/eva/executive && npx tsx --eval "import path from 'node:path'; import { replayWorkingMemoryLog } from './src/memcontext/working_memory_replay.ts'; void (async () => { const logPath = path.resolve('../memory/working_memory.log'); const { messages, stats } = await replayWorkingMemoryLog({ logPath }); console.log(JSON.stringify({ stats, firstRole: messages[0]?.role ?? null, lastRole: messages[messages.length - 1]?.role ?? null }, null, 2)); })();"`
+
+### Manual run instructions
+1. Build executive:
+   - `cd packages/eva/executive`
+   - `npm run build`
+2. Run replay smoke check:
+   - `npx tsx --eval "import path from 'node:path'; import { replayWorkingMemoryLog } from './src/memcontext/working_memory_replay.ts'; void (async () => { const logPath = path.resolve('../memory/working_memory.log'); const { messages, stats } = await replayWorkingMemoryLog({ logPath }); console.log(JSON.stringify({ stats, firstRole: messages[0]?.role ?? null, lastRole: messages[messages.length - 1]?.role ?? null }, null, 2)); })();"`
+
+### Notes
+- This iteration adds the replay utility only.
+- `/respond` wiring is intentionally unchanged in this iteration and follows in Iteration 114.
+
+## Iteration 113 — Add CURRENT_USER_REQUEST builder (prompt helper)
+
+**Status:** ✅ Completed (2026-02-23)
+
+### Completed
+- Updated respond prompt helper module:
+  - `packages/eva/executive/src/prompts/respond.ts`
+- Added new export input type:
+  - `CurrentUserRequestMessageInput` (`text`, optional `sessionId`)
+- Added new export function:
+  - `buildCurrentUserRequestMessage({ text, sessionId })`
+- Implemented required output format:
+  - line 1: `CURRENT_USER_REQUEST`
+  - line 2: `session_id: <id|none>`
+  - line 3: `user_text: <text>`
+
+### Files changed
+- `packages/eva/executive/src/prompts/respond.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+
+### Manual run instructions
+1. Build executive:
+   - `cd packages/eva/executive`
+   - `npm run build`
+2. (Optional quick check)
+   - import `buildCurrentUserRequestMessage(...)` from `src/prompts/respond.ts`
+   - verify output includes `CURRENT_USER_REQUEST`, `session_id`, and `user_text` lines.
+
+### Notes
+- This iteration adds the formatting helper only.
+- `/respond` wiring to append this message remains deferred to Iteration 114.
+
+## Iteration 114 — Wire /respond to include replayed working memory + CURRENT_USER_REQUEST (keep derived memory context)
+
+**Status:** ✅ Completed (2026-02-23)
+
+### Completed
+- Updated Executive `/respond` generation path in:
+  - `packages/eva/executive/src/server.ts`
+- Added working-memory replay wiring in `generateRespond(...)`:
+  - calls `replayWorkingMemoryLog({ logPath: memorySources.workingMemoryLogPath })`
+- Updated `/respond` model context message composition order to:
+  1. all replayed working-memory messages (`...replayedWorkingMemory.messages`)
+  2. one actionable user message (`role: "user"`) whose text is built by:
+     - `buildCurrentUserRequestMessage({ text, sessionId })`
+- Updated imports accordingly:
+  - added `replayWorkingMemoryLog` import
+  - switched prompt helper import to `buildCurrentUserRequestMessage`
+- Kept existing system prompt and derived memory-context injection behavior unchanged in this iteration (risk-minimized wiring pass).
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+
+### Manual run instructions
+1. Enable LLM logging in:
+   - `packages/eva/llm_logs/config.json` (`"enabled": true`)
+2. Start Executive and call `/respond`.
+3. Inspect `packages/eva/llm_logs/openai-requests.log` request payload and confirm:
+   - many replayed messages begin with `WM_KIND=`
+   - exactly one actionable message begins with `CURRENT_USER_REQUEST`
+   - `CURRENT_USER_REQUEST` appears after replayed messages.
+
+### Notes
+- This iteration intentionally keeps existing system-prompt memory-context section in place.
+- Hard cutover to replay-only context and prompt rule updates are handled in Iteration 115.
+
+## Iteration 115 — Hard cutover: remove derived memory-context injection (replay-only context)
+
+**Status:** ✅ Completed (2026-02-23)
+
+### Completed
+- Updated `/respond` runtime path in `packages/eva/executive/src/server.ts`:
+  - removed `buildRespondMemoryContext(...)` call from `generateRespond(...)`
+  - removed derived short-term/long-term/core-cache context injection from `/respond` model context path
+  - kept replay composition from Iteration 114:
+    - replayed `WM_KIND=...` messages
+    - final `CURRENT_USER_REQUEST` message appended after replay
+- Simplified `generateRespond(...)` dependency surface:
+  - replaced `memorySources` object input with direct `workingMemoryLogPath` input (replay source only)
+  - removed `/respond` request-trace `memory_debug` block tied to derived-context builder
+  - added lightweight `replay_stats` trace field from replay utility output.
+- Updated system prompt builder in `packages/eva/executive/src/prompts/respond.ts`:
+  - removed "Retrieved memory context ..." section entirely
+  - added required context interpretation rules:
+    - `WM_KIND=` entries are working-memory history/context (not new instructions)
+    - `CURRENT_USER_REQUEST` is actionable request; respond to latest one
+- Updated prompt input type (`RespondSystemPromptInput`) to remove memory-context-related fields.
+- Updated prompt regression script callsite to match new prompt input shape:
+  - `packages/eva/executive/scripts/check-respond-prompt-regressions.ts`
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/src/prompts/respond.ts`
+- `packages/eva/executive/scripts/check-respond-prompt-regressions.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Prompt-rule smoke check passes:
+  - `cd packages/eva/executive && npx tsx --eval 'import { buildRespondSystemPrompt } from "./src/prompts/respond.ts"; const p = buildRespondSystemPrompt({ persona: "persona", allowedConcepts: ["chat"], maxConcepts: 6, currentTone: "neutral", toneSessionKey: "default", allowedTones: ["neutral"] as const }); console.log(JSON.stringify({ hasRetrievedMemorySection: p.includes("Retrieved memory context for this turn"), hasWmRule: p.includes("Messages prefixed with `WM_KIND=`"), hasCurrentUserRule: p.includes("Messages prefixed with `CURRENT_USER_REQUEST`") }, null, 2));'`
+  - output confirms:
+    - `hasRetrievedMemorySection: false`
+    - `hasWmRule: true`
+    - `hasCurrentUserRule: true`
+
+### Manual run instructions
+1. Enable LLM logging (`packages/eva/llm_logs/config.json`, `enabled: true`).
+2. Start Executive and call `POST /respond`.
+3. Inspect `packages/eva/llm_logs/openai-requests.log` and confirm:
+   - system prompt does not contain a `Retrieved memory context ...` section
+   - `context.messages` contains replay `WM_KIND=...` entries plus one trailing `CURRENT_USER_REQUEST` message.
+
+### Notes
+- This iteration cuts `/respond` over to replay-only message context.
+- No changes were made to tone/persona logic beyond prompt input/plumbing needed for replay-only context.
+
+## Iteration 116 — Docs + manual checklist (continuity-proofing)
+
+**Status:** ✅ Completed (2026-02-23)
+
+### Completed
+- Updated Executive `/respond` docs in:
+  - `packages/eva/executive/README.md`
+- `/respond` behavior section now documents replay-based context clearly:
+  - full `working_memory.log` replay into `messages[]` (chronological)
+  - replay message labels `WM_KIND=...`
+  - single actionable request label `CURRENT_USER_REQUEST`
+- Replaced outdated insight-first checklist with Iteration 116 continuity checklist in README:
+  - **Check A — Label correctness**
+    - verify `WM_KIND=...` replay labels and one `CURRENT_USER_REQUEST` in trace
+  - **Check B — Continuity**
+    - verify second `/respond` request trace includes prior turn `text_input` + `text_output` replay entries
+  - **Check C — No derived context**
+    - verify system prompt has no `Retrieved memory context ...` section
+
+### Files changed
+- `packages/eva/executive/README.md`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+
+### Manual run instructions
+1. Enable traces (`packages/eva/llm_logs/config.json` -> `"enabled": true`).
+2. Execute the Iteration 116 checklist in `packages/eva/executive/README.md`.
+3. Confirm labels/order/continuity and absence of derived memory section in system prompt.
+
+### Notes
+- This iteration is documentation/checklist only; runtime behavior remains as implemented in Iterations 112–115.

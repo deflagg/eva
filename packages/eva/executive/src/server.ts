@@ -20,10 +20,11 @@ import {
   updateToneForSession,
 } from './memcontext/tone.js';
 import { formatInsightsForDebug, formatInsightsForPrompt, retrieveRecentInsights } from './memcontext/retrieve_recent_insights.js';
+import { replayWorkingMemoryLog } from './memcontext/working_memory_replay.js';
 import { logLlmTrace } from './llm_log.js';
 import type { AgentConfig, AgentSecrets } from './config.js';
 import { buildInsightSystemPrompt, buildInsightUserPrompt } from './prompts/insight.js';
-import { buildRespondSystemPrompt, buildRespondUserPrompt } from './prompts/respond.js';
+import { buildCurrentUserRequestMessage, buildRespondSystemPrompt } from './prompts/respond.js';
 import { INSIGHT_TOOL, INSIGHT_TOOL_NAME, type InsightSummary } from './tools/insight.js';
 import { RESPOND_TOOL, RESPOND_TOOL_NAME, type RespondPayload } from './tools/respond.js';
 import { deriveLanceDbDir, getOrCreateTable, mergeUpsertById, openDb, queryTopK } from './memcontext/long_term/lancedb.js';
@@ -2256,7 +2257,7 @@ async function generateRespond(
   secrets: AgentSecrets,
   tagWhitelist: ExperienceTagWhitelist,
   personaPrompt: PersonaPrompt,
-  memorySources: RespondMemorySources,
+  workingMemoryLogPath: string,
   toneContext: {
     sessionKey: string;
     currentTone: string;
@@ -2264,10 +2265,8 @@ async function generateRespond(
 ): Promise<{ text: string; meta: RespondMeta }> {
   const model = getModel(config.model.provider as never, config.model.id as never);
 
-  const memoryContext = await buildRespondMemoryContext({
-    request,
-    memorySources,
-    tagWhitelist,
+  const replayedWorkingMemory = await replayWorkingMemoryLog({
+    logPath: workingMemoryLogPath,
   });
 
   const context = {
@@ -2275,21 +2274,20 @@ async function generateRespond(
       persona: personaPrompt.text,
       allowedConcepts: tagWhitelist.allowedTags,
       maxConcepts: 6,
-      memoryContext: memoryContext.text,
-      memoryApproxTokens: memoryContext.approxTokens,
-      memoryTokenBudget: memoryContext.tokenBudget,
       currentTone: toneContext.currentTone,
       toneSessionKey: toneContext.sessionKey,
       allowedTones: ALLOWED_TONES,
     }),
     messages: [
+      ...replayedWorkingMemory.messages,
       {
         role: 'user',
         content: [
           {
             type: 'text',
-            text: buildRespondUserPrompt({
+            text: buildCurrentUserRequestMessage({
               text: request.text,
+              sessionId: request.session_id,
             }),
           },
         ],
@@ -2316,10 +2314,7 @@ async function generateRespond(
         session_id: request.session_id,
       },
       context,
-      memory_debug: {
-        recent_insights_count: memoryContext.recentInsightsCount,
-        recent_insights_raw: memoryContext.debugRecentInsightsRaw,
-      },
+      replay_stats: replayedWorkingMemory.stats,
     },
   });
 
@@ -2703,13 +2698,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
             secrets,
             tagWhitelist,
             personaPrompt,
-            {
-              workingMemoryLogPath,
-              shortTermMemoryDbPath,
-              lancedbDir,
-              coreExperiencesCachePath,
-              corePersonalityCachePath,
-            },
+            workingMemoryLogPath,
             {
               sessionKey: toneSessionKey,
               currentTone,

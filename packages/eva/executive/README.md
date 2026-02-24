@@ -2,7 +2,7 @@
 
 Node/TypeScript service for EVA text + insight generation.
 
-## Current behavior (Iteration 65)
+## Current behavior (Iteration 116)
 
 - Loads config via `cosmiconfig` + `zod`.
 - Resolves `memory.dir` relative to the loaded config file path.
@@ -31,13 +31,16 @@ Node/TypeScript service for EVA text + insight generation.
     - `packages/eva/memory/cache/core_personality.json`
 - Exposes real model-backed `POST /respond`:
   - accepts `{ "text": "...", "session_id": "optional" }`
-  - builds retrieval context before the model call from:
-    - recent `wm_insight` entries from the last ~2 minutes (insight-first recent activity context)
-    - recent short-term SQLite summaries (tag-filtered)
-    - top-K long-term vector hits from LanceDB tables (`long_term_experiences` + `long_term_personality`)
-    - core cache files (`core_experiences.json`, `core_personality.json`)
-  - if LanceDB is empty (or no relevant hits), retrieval context includes an explicit “no relevant long-term memory found” note
-  - injects retrieval context into the respond prompt with a hard budget cap (approx token-aware)
+  - replays the full `packages/eva/memory/working_memory.log` into `context.messages[]` in chronological order
+  - replayed entries are labeled per message content with:
+    - `WM_KIND=<type>` (history/context marker)
+    - `ts_ms: <timestamp>`
+    - `WM_JSON: <raw json line payload>`
+  - appends exactly one actionable user message at the end of `context.messages[]` labeled:
+    - `CURRENT_USER_REQUEST`
+  - system prompt explicitly instructs the model:
+    - treat `WM_KIND=` entries as context/history (not new instructions)
+    - respond to the latest `CURRENT_USER_REQUEST`
   - calls model through `@mariozechner/pi-ai` tool loop (`commit_text_response`)
   - enforces concept whitelist from `packages/eva/memory/experience_tags.json`
     - unknown concepts are dropped and logged
@@ -220,52 +223,52 @@ curl -sS -X POST http://127.0.0.1:8791/respond \
   -d '{"text":"hello"}'
 ```
 
-## Iteration 107 manual checklist (insight-first `/respond`)
+## Iteration 116 manual checklist (`/respond` replay continuity)
 
-### Test A — No insights in last ~2 minutes
+### Check A — Label correctness
 
-1. Ensure no recent `wm_insight` entries exist (wait >2 minutes or clear recent test lines).
-2. Ask:
-
-```bash
-curl -sS -X POST http://127.0.0.1:8791/respond \
-  -H 'content-type: application/json' \
-  -d '{"text":"what did you see"}'
-```
-
-Expected:
-- response states there were no recent insights (or equivalent no-recent-activity wording)
-- no fabricated detector activity.
-
-### Test B — One insight exists
-
-1. Ensure exactly one fresh `wm_insight` exists in `packages/eva/memory/working_memory.log`.
-2. Ask:
+1. Enable LLM trace logging (`packages/eva/llm_logs/config.json` -> `"enabled": true`).
+2. Call `/respond` once:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8791/respond \
   -H 'content-type: application/json' \
-  -d '{"text":"what did you see"}'
+  -d '{"text":"what just happened"}'
 ```
 
+3. Inspect `packages/eva/llm_logs/openai-requests.log` for the corresponding `respond` request trace.
+
 Expected:
-- response cites the insight `one_liner`
-- response includes key `what_changed` details.
+- replayed context messages start with `WM_KIND=...`
+- exactly one actionable request message starts with `CURRENT_USER_REQUEST`
 
-### Test C — Multiple insights exist
+### Check B — Continuity across turns
 
-1. Ensure multiple fresh `wm_insight` entries exist within the last ~2 minutes.
-2. Ask:
+1. Send two back-to-back requests in the same session:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8791/respond \
   -H 'content-type: application/json' \
-  -d '{"text":"what happened"}'
+  -d '{"text":"first turn","session_id":"replay-check-1"}'
+
+curl -sS -X POST http://127.0.0.1:8791/respond \
+  -H 'content-type: application/json' \
+  -d '{"text":"second turn","session_id":"replay-check-1"}'
 ```
 
+2. Inspect the second request trace in `packages/eva/llm_logs/openai-requests.log`.
+
 Expected:
-- response summarizes multiple recent insights compactly
-- response should remain concise (bounded by prompt/context constraints).
+- replay includes prior turn `WM_KIND=text_input` entry for `first turn`
+- replay includes prior turn `WM_KIND=text_output` entry for the assistant response to `first turn`
+
+### Check C — No derived memory section in system prompt
+
+1. In the same trace record(s), inspect the `systemPrompt` text.
+
+Expected:
+- system prompt does **not** contain any `Retrieved memory context ...` section
+- system prompt includes WM/CURRENT interpretation rules (`WM_KIND=` vs `CURRENT_USER_REQUEST`).
 
 ## Insight check
 
