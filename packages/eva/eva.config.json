@@ -13,7 +13,7 @@
   },
   "agent": {
     "baseUrl": "http://127.0.0.1:8791",
-    "timeoutMs": 30000
+    "timeoutMs": 90000
   },
   "text": {
     "enabled": true,

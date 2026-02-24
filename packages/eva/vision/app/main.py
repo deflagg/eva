@@ -111,7 +111,8 @@ async def on_startup() -> None:
         f"regions={len(_roi_settings.regions)} "
         f"lines={len(_roi_settings.lines)} "
         f"dwell_default_threshold_ms={_roi_settings.dwell_default_threshold_ms} "
-        f"dwell_region_overrides={len(_roi_settings.dwell_region_threshold_ms)}"
+        f"dwell_region_overrides={len(_roi_settings.dwell_region_threshold_ms)} "
+        f"transition_min_ms={_roi_settings.transition_min_ms}"
     )
     print(
         "[vision] motion config: "
@@ -168,6 +169,7 @@ async def health() -> dict[str, object]:
         "roi_lines": len(_roi_settings.lines) if _roi_settings is not None else 0,
         "roi_dwell_default_threshold_ms": _roi_settings.dwell_default_threshold_ms if _roi_settings is not None else 0,
         "roi_dwell_region_overrides": len(_roi_settings.dwell_region_threshold_ms) if _roi_settings is not None else 0,
+        "roi_transition_min_ms": _roi_settings.transition_min_ms if _roi_settings is not None else 0,
         "motion_enabled": _motion_settings.enabled if _motion_settings is not None else False,
         "motion_history_frames": _motion_settings.history_frames if _motion_settings is not None else 0,
         "motion_sudden_motion_speed_px_s": _motion_settings.sudden_motion_speed_px_s if _motion_settings is not None else 0,

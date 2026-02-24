@@ -19,21 +19,18 @@ roi:
     left_half:
       x1: 0
       y1: 0
-      x2: 320
+      x2: 280
       y2: 480
-  lines:
-    center_vertical:
-      x1: 320
-      y1: 0
-      x2: 320
-      y2: 480
+  lines: {}
   dwell:
-    default_threshold_ms: 5000
+    default_threshold_ms: 999999999 
     region_threshold_ms: {}
+  transitions:
+    min_transition_ms: 500
 
 
 motion:
-  enabled: true
+  enabled: false
   history_frames: 8
   sudden_motion_speed_px_s: 250
   stop_speed_px_s: 20
@@ -41,7 +38,7 @@ motion:
   event_cooldown_ms: 1500
 
 collision:
-  enabled: true
+  enabled: false
   pairs:
     - [person, person]
   distance_px: 90
@@ -49,7 +46,7 @@ collision:
   pair_cooldown_ms: 1500
 
 abandoned:
-  enabled: true
+  enabled: false
   object_classes:
     - bottle
     - cellphone
@@ -82,10 +79,11 @@ surprise:
   threshold: 5
   cooldown_ms: 10000
   weights:
-    abandoned_object: 5
-    near_collision: 5
-    roi_dwell: 3
-    line_cross: 3
-    sudden_motion: 1.5
-    track_stop: 1.5
+    abandoned_object: 0
+    near_collision: 0
+    roi_dwell: 0
+    line_cross: 0
+    sudden_motion: 0
+    track_stop: 0
     roi_enter: 5
+    roi_exit: 5

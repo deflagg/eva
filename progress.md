@@ -5754,3 +5754,138 @@
 
 ### Notes
 - This iteration is documentation/checklist only; runtime behavior remains as implemented in Iterations 112–115.
+
+## Iteration 120 — Add ROI transition debounce config plumbing (no behavior change yet)
+
+**Status:** ✅ Completed (2026-02-23)
+
+### Completed
+- Added committed default `roi.transitions.min_transition_ms: 250` in:
+  - `packages/eva/vision/settings.yaml`
+- Extended ROI settings plumbing in `packages/eva/vision/app/roi.py`:
+  - added `RoiSettings.transition_min_ms`
+  - added validated config load for `roi.transitions.min_transition_ms` using `_as_non_negative_int`
+- Surfaced transition debounce config in Vision runtime (`packages/eva/vision/app/main.py`):
+  - startup ROI config log now includes `transition_min_ms`
+  - `/health` now includes `roi_transition_min_ms`
+
+### Files changed
+- `packages/eva/vision/settings.yaml`
+- `packages/eva/vision/app/roi.py`
+- `packages/eva/vision/app/main.py`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/vision && python3 -m compileall app`
+
+### Manual run instructions
+1. Start Vision:
+   - `cd packages/eva/vision`
+   - `source .venv/bin/activate` (if using venv)
+   - `python -m app.run`
+2. Confirm startup log includes `transition_min_ms=<value>` in `[vision] roi config ...`.
+3. Check health endpoint:
+   - `curl http://127.0.0.1:8000/health`
+   - confirm `roi_transition_min_ms` is present.
+
+### Notes
+- Iteration 120 adds config plumbing only; ROI enter/exit emission behavior is unchanged.
+- Iteration 121 will apply debounce behavior in `DetectionEventEngine`.
+
+## Iteration 121 — Implement ROI enter/exit debounce in DetectionEventEngine
+
+**Status:** ✅ Completed (2026-02-23)
+
+### Completed
+- Updated ROI per-track state in `packages/eva/vision/app/events.py`:
+  - added `TrackEventState.region_pending_inside`
+  - added `TrackEventState.region_pending_since_ts_ms`
+- Implemented transition debounce in `_append_region_events(...)`:
+  - reads `min_transition_ms = self._roi_settings.transition_min_ms`
+  - preserves legacy immediate enter/exit path when `min_transition_ms <= 0`
+  - for `min_transition_ms > 0`, requires candidate inside/outside state to remain stable for the configured duration before commit and event emission
+- Commit behavior now aligns enter/exit with dwell bookkeeping:
+  - on committed `roi_enter`:
+    - sets `regions_inside[region]=True`
+    - sets `region_enter_ts_ms[region]=ts_ms`
+    - sets `region_dwell_emitted[region]=False`
+    - clears pending transition state for region
+  - on committed `roi_exit`:
+    - sets `regions_inside[region]=False`
+    - clears `region_enter_ts_ms[region]`
+    - clears `region_dwell_emitted[region]`
+    - clears pending transition state for region
+- Updated dwell evaluation to run from **committed** ROI membership state (not raw `inside_now`) to prevent boundary jitter from prematurely toggling dwell behavior.
+
+### Files changed
+- `packages/eva/vision/app/events.py`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/vision && python3 -m compileall app`
+
+### Manual run instructions
+1. Set transition debounce config (if overriding defaults) in `packages/eva/vision/settings.local.yaml`:
+   ```yaml
+   roi:
+     transitions:
+       min_transition_ms: 250
+   ```
+2. Start Vision:
+   - `cd packages/eva/vision`
+   - `source .venv/bin/activate` (if using venv)
+   - `python -m app.run`
+3. Flapping test:
+   - hold a tracked object near ROI boundary and jitter slightly
+   - confirm enter/exit spam is significantly reduced
+4. Real crossing test:
+   - move clearly outside -> inside and hold >250ms; confirm one `roi_enter`
+   - move clearly inside -> outside and hold >250ms; confirm one `roi_exit`
+
+### Notes
+- Debounce applies only to ROI enter/exit transitions.
+- Setting `roi.transitions.min_transition_ms: 0` restores legacy immediate transition behavior.
+- Iteration 122 remains: docs + tuning guidance.
+
+## Iteration 122 — Docs + tuning guidance
+
+**Status:** ✅ Completed (2026-02-23)
+
+### Completed
+- Updated `packages/eva/vision/README.md` with ROI transition debounce documentation:
+  - added dedicated section for `roi.transitions.min_transition_ms`
+  - documented behavior (`roi_enter` / `roi_exit` debounce)
+  - documented disable path (`0` = legacy immediate transitions)
+  - added tuning guidance:
+    - recommended `150–300ms` for typical webcam FPS
+    - increase further if boundary flapping persists
+- Added/updated ROI example config snippet in README to include:
+  - `roi.transitions.min_transition_ms: 250`
+
+### Files changed
+- `packages/eva/vision/README.md`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/vision && python3 -m compileall app`
+
+### Manual run instructions
+1. Edit local config (`packages/eva/vision/settings.local.yaml`) and tune:
+   ```yaml
+   roi:
+     transitions:
+       min_transition_ms: 250
+   ```
+2. Start Vision:
+   - `cd packages/eva/vision`
+   - `source .venv/bin/activate` (if using venv)
+   - `python -m app.run`
+3. Observe ROI event stream while moving near ROI boundaries:
+   - lower value if transitions feel delayed
+   - raise value if enter/exit still flaps near boundary.
+
+### Notes
+- This iteration is docs-only; runtime behavior remains as implemented in Iterations 120–121.

@@ -45,6 +45,34 @@ Retention defaults:
 - keep newest `200` clip directories (`insights.assets.max_clips`)
 - remove clip directories older than `24` hours (`insights.assets.max_age_hours`)
 
+### ROI transition debounce
+
+`roi.transitions.min_transition_ms` debounces ROI boundary transitions so `roi_enter` / `roi_exit` only emit after inside/outside state remains stable for at least the configured duration.
+
+- `0` disables debounce (legacy immediate transitions)
+- Recommended starting range for webcam streams: `150–300ms`
+- If you still see boundary flapping, increase the value gradually (for example `350–500ms`)
+
+Example `settings.local.yaml` ROI config:
+
+```yaml
+roi:
+  enabled: true
+  representative_point: centroid
+  regions:
+    left_half:
+      x1: 0
+      y1: 0
+      x2: 320
+      y2: 480
+  lines: {}
+  dwell:
+    default_threshold_ms: 5000
+    region_threshold_ms: {}
+  transitions:
+    min_transition_ms: 250
+```
+
 ## Run (dev)
 
 ```bash

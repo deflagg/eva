@@ -16,6 +16,8 @@ class TrackEventState:
     regions_inside: dict[str, bool] = field(default_factory=dict)
     region_enter_ts_ms: dict[str, int] = field(default_factory=dict)
     region_dwell_emitted: dict[str, bool] = field(default_factory=dict)
+    region_pending_inside: dict[str, bool] = field(default_factory=dict)
+    region_pending_since_ts_ms: dict[str, int] = field(default_factory=dict)
     line_side_state: dict[str, str] = field(default_factory=dict)
     last_seen_ts_ms: int = 0
 
@@ -146,36 +148,90 @@ class DetectionEventEngine:
         point: tuple[float, float],
         state: TrackEventState,
     ) -> None:
+        min_transition_ms = self._roi_settings.transition_min_ms
+
         for region_name, region in self._roi_settings.regions.items():
             inside_now = point_in_region(point, region)
-            inside_before = state.regions_inside.get(region_name, False)
+            committed_inside = state.regions_inside.get(region_name, False)
 
-            if inside_now and not inside_before:
-                events.append(
-                    EventEntry(
-                        name="roi_enter",
-                        ts_ms=ts_ms,
-                        severity="low",
-                        track_id=track_id,
-                        data={"roi": region_name},
-                    )
-                )
-                state.region_enter_ts_ms[region_name] = ts_ms
-                state.region_dwell_emitted[region_name] = False
-            elif inside_before and not inside_now:
-                events.append(
-                    EventEntry(
-                        name="roi_exit",
-                        ts_ms=ts_ms,
-                        severity="low",
-                        track_id=track_id,
-                        data={"roi": region_name},
-                    )
-                )
-                state.region_enter_ts_ms.pop(region_name, None)
-                state.region_dwell_emitted.pop(region_name, None)
+            if min_transition_ms <= 0:
+                state.region_pending_inside.pop(region_name, None)
+                state.region_pending_since_ts_ms.pop(region_name, None)
 
-            if inside_now:
+                if inside_now and not committed_inside:
+                    events.append(
+                        EventEntry(
+                            name="roi_enter",
+                            ts_ms=ts_ms,
+                            severity="low",
+                            track_id=track_id,
+                            data={"roi": region_name},
+                        )
+                    )
+                    state.region_enter_ts_ms[region_name] = ts_ms
+                    state.region_dwell_emitted[region_name] = False
+                elif committed_inside and not inside_now:
+                    events.append(
+                        EventEntry(
+                            name="roi_exit",
+                            ts_ms=ts_ms,
+                            severity="low",
+                            track_id=track_id,
+                            data={"roi": region_name},
+                        )
+                    )
+                    state.region_enter_ts_ms.pop(region_name, None)
+                    state.region_dwell_emitted.pop(region_name, None)
+
+                state.regions_inside[region_name] = inside_now
+            else:
+                if inside_now == committed_inside:
+                    state.region_pending_inside.pop(region_name, None)
+                    state.region_pending_since_ts_ms.pop(region_name, None)
+                else:
+                    pending_inside = state.region_pending_inside.get(region_name)
+                    pending_since_ts_ms = state.region_pending_since_ts_ms.get(region_name)
+
+                    if pending_inside != inside_now:
+                        state.region_pending_inside[region_name] = inside_now
+                        state.region_pending_since_ts_ms[region_name] = ts_ms
+                    else:
+                        if pending_since_ts_ms is None:
+                            state.region_pending_since_ts_ms[region_name] = ts_ms
+                        else:
+                            elapsed_ms = max(ts_ms - pending_since_ts_ms, 0)
+                            if elapsed_ms >= min_transition_ms:
+                                if inside_now:
+                                    events.append(
+                                        EventEntry(
+                                            name="roi_enter",
+                                            ts_ms=ts_ms,
+                                            severity="low",
+                                            track_id=track_id,
+                                            data={"roi": region_name},
+                                        )
+                                    )
+                                    state.region_enter_ts_ms[region_name] = ts_ms
+                                    state.region_dwell_emitted[region_name] = False
+                                else:
+                                    events.append(
+                                        EventEntry(
+                                            name="roi_exit",
+                                            ts_ms=ts_ms,
+                                            severity="low",
+                                            track_id=track_id,
+                                            data={"roi": region_name},
+                                        )
+                                    )
+                                    state.region_enter_ts_ms.pop(region_name, None)
+                                    state.region_dwell_emitted.pop(region_name, None)
+
+                                state.regions_inside[region_name] = inside_now
+                                state.region_pending_inside.pop(region_name, None)
+                                state.region_pending_since_ts_ms.pop(region_name, None)
+
+            committed_inside = state.regions_inside.get(region_name, False)
+            if committed_inside:
                 enter_ts_ms = state.region_enter_ts_ms.get(region_name)
                 if enter_ts_ms is None:
                     enter_ts_ms = ts_ms
@@ -196,8 +252,6 @@ class DetectionEventEngine:
                         )
                     )
                     state.region_dwell_emitted[region_name] = True
-
-            state.regions_inside[region_name] = inside_now
 
     def _append_line_events(
         self,

@@ -35,6 +35,7 @@ class RoiSettings:
     lines: dict[str, RoiLine]
     dwell_default_threshold_ms: int
     dwell_region_threshold_ms: dict[str, int]
+    transition_min_ms: int
 
     def dwell_threshold_ms_for_region(self, region_name: str) -> int:
         return self.dwell_region_threshold_ms.get(region_name, self.dwell_default_threshold_ms)
@@ -228,6 +229,12 @@ def load_roi_settings() -> RoiSettings:
         **dwell_region_threshold_overrides,
     }
 
+    transition_min_ms = _as_non_negative_int(
+        settings.get("roi.transitions.min_transition_ms", default=250),
+        key="roi.transitions.min_transition_ms",
+        default=250,
+    )
+
     _roi_settings = RoiSettings(
         enabled=enabled,
         representative_point="centroid",
@@ -235,6 +242,7 @@ def load_roi_settings() -> RoiSettings:
         lines=lines,
         dwell_default_threshold_ms=dwell_default_threshold_ms,
         dwell_region_threshold_ms=dwell_region_threshold_ms,
+        transition_min_ms=transition_min_ms,
     )
     return _roi_settings
 
