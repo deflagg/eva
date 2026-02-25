@@ -2,60 +2,21 @@ server:
   host: 127.0.0.1
   port: 8000
 
-yolo:
-  model_source: yolo26n.pt
-  device: auto
-
-tracking:
+scene_change:
   enabled: true
-  persist: true
-  tracker: bytetrack.yaml
-  busy_policy: latest
-
-roi:
-  enabled: true
-  representative_point: centroid
-  regions:
-    left_half:
-      x1: 0
-      y1: 0
-      x2: 280
-      y2: 480
-  lines: {}
-  dwell:
-    default_threshold_ms: 999999999 
-    region_threshold_ms: {}
-  transitions:
-    min_transition_ms: 500
-
-
-motion:
-  enabled: false
-  history_frames: 8
-  sudden_motion_speed_px_s: 250
-  stop_speed_px_s: 20
-  stop_duration_ms: 1500
-  event_cooldown_ms: 1500
-
-collision:
-  enabled: false
-  pairs:
-    - [person, person]
-  distance_px: 90
-  closing_speed_px_s: 120
-  pair_cooldown_ms: 1500
-
-abandoned:
-  enabled: false
-  object_classes:
-    - bottle
-    - cellphone
-  associate_max_distance_px: 120
-  associate_min_ms: 1000
-  abandon_delay_ms: 5000
-  stationary_max_move_px: 20
-  roi: null
-  event_cooldown_ms: 10000
+  downsample:
+    max_dim: 160
+  ema_alpha: 0.08
+  pixel_threshold: 18
+  cell_px: 10
+  cell_active_ratio: 0.08
+  min_blob_cells: 4
+  score_threshold: 1.2
+  min_persist_frames: 3
+  cooldown_ms: 2500
+  severity:
+    medium_score: 2.5
+    high_score: 5.0
 
 insights:
   enabled: true
@@ -79,11 +40,4 @@ surprise:
   threshold: 5
   cooldown_ms: 10000
   weights:
-    abandoned_object: 0
-    near_collision: 0
-    roi_dwell: 0
-    line_cross: 0
-    sudden_motion: 0
-    track_stop: 0
-    roi_enter: 5
-    roi_exit: 5
+    scene_change: 5

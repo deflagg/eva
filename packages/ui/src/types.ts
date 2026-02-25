@@ -2,14 +2,14 @@ export type InsightSeverity = 'low' | 'medium' | 'high';
 
 export interface HelloMessage {
   type: 'hello';
-  v: 1;
+  v: 2;
   role: 'ui' | 'eva' | 'vision';
   ts_ms: number;
 }
 
 export interface FrameBinaryMeta {
   type: 'frame_binary';
-  v: 1;
+  v: 2;
   frame_id: string;
   ts_ms: number;
   mime: 'image/jpeg';
@@ -20,7 +20,7 @@ export interface FrameBinaryMeta {
 
 export interface ErrorMessage {
   type: 'error';
-  v: 1;
+  v: 2;
   frame_id?: string;
   code: string;
   message: string;
@@ -28,40 +28,30 @@ export interface ErrorMessage {
 
 export interface CommandMessage {
   type: 'command';
-  v: 1;
+  v: 2;
   name: string;
-}
-
-export interface DetectionEntry {
-  cls: number;
-  name: string;
-  conf: number;
-  box: [number, number, number, number];
-  track_id?: number;
 }
 
 export interface EventEntry {
   name: string;
   ts_ms: number;
   severity: InsightSeverity;
-  track_id?: number;
   data: Record<string, unknown>;
 }
 
-export interface DetectionsMessage {
-  type: 'detections';
-  v: 1;
+export interface FrameEventsMessage {
+  type: 'frame_events';
+  v: 2;
   frame_id: string;
   ts_ms: number;
   width: number;
   height: number;
-  model: string;
-  detections: DetectionEntry[];
-  events?: EventEntry[];
+  events: EventEntry[];
 }
 
 export interface InsightSummary {
   one_liner: string;
+  tts_response: string;
   what_changed: string[];
   severity: InsightSeverity;
   tags: string[];
@@ -75,7 +65,7 @@ export interface InsightUsage {
 
 export interface InsightMessage {
   type: 'insight';
-  v: 1;
+  v: 2;
   clip_id: string;
   trigger_frame_id: string;
   ts_ms: number;
@@ -93,7 +83,7 @@ export interface TextOutputMeta {
 
 export interface TextOutputMessage {
   type: 'text_output';
-  v: 1;
+  v: 2;
   request_id: string;
   session_id?: string;
   ts_ms: number;
@@ -110,7 +100,7 @@ export interface SpeechOutputMeta {
 
 export interface SpeechOutputMessage {
   type: 'speech_output';
-  v: 1;
+  v: 2;
   request_id: string;
   session_id: string;
   ts_ms: number;
@@ -124,7 +114,7 @@ export interface SpeechOutputMessage {
 
 export type ProtocolMessage =
   | HelloMessage
-  | DetectionsMessage
+  | FrameEventsMessage
   | ErrorMessage
   | InsightMessage
   | TextOutputMessage

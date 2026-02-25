@@ -84,6 +84,7 @@ Notes:
   "ts_ms": 1700000000456,
   "summary": {
     "one_liner": "Two people crossed paths quickly near the entry.",
+    "tts_response": "Whoa—did those two just cross paths near the entry? Was that expected?",
     "what_changed": [
       "Person A entered from left",
       "Person B moved toward doorway"
@@ -98,6 +99,9 @@ Notes:
   }
 }
 ```
+
+Notes:
+- `summary.tts_response` is required and carries the conversational utterance string produced by the insight model.
 
 ### 4) `text_output` (Eva -> UI) JSON
 

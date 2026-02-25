@@ -3,46 +3,47 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from dataclasses import dataclass
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
-from .abandoned import AbandonedSettings, load_abandoned_settings
-from .collision import CollisionSettings, load_collision_settings
-from .events import DetectionEventEngine
 from .insights import InsightBuffer, InsightError, InsightSettings, load_insight_settings
-from .motion import MotionSettings, load_motion_settings
-from .protocol import BinaryFrameParseError, CommandMessage, EventEntry, decode_binary_frame_envelope, make_error, make_hello
-from .roi import RoiSettings, load_roi_settings
-from .tracking import TrackingSettings, load_tracking_settings, should_use_latest_pending_slot
-from .yolo import (
-    FrameDecodeError,
-    InferenceFrame,
-    get_model_summary,
-    is_model_loaded,
-    load_model,
-    run_inference,
+from .protocol import (
+    BinaryFrameParseError,
+    CommandMessage,
+    EventEntry,
+    FrameEventsMessage,
+    decode_binary_frame_envelope,
+    make_error,
+    make_hello,
+)
+from .scene_change import (
+    SceneChangeEngine,
+    SceneChangeFrameDecodeError,
+    SceneChangeSettings,
+    load_scene_change_settings,
 )
 
 app = FastAPI(title="vision", version="0.1.0")
 
 _insight_settings: InsightSettings | None = None
-_tracking_settings: TrackingSettings | None = None
-_roi_settings: RoiSettings | None = None
-_motion_settings: MotionSettings | None = None
-_collision_settings: CollisionSettings | None = None
-_abandoned_settings: AbandonedSettings | None = None
+_scene_change_settings: SceneChangeSettings | None = None
+
+
+@dataclass(slots=True)
+class FrameRequest:
+    frame_id: str
+    ts_ms: int
+    width: int
+    height: int
+    image_bytes: bytes
 
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    """Fail fast if YOLO/tracking/ROI/motion/collision/abandoned/insight config is missing/invalid."""
-    global _insight_settings, _tracking_settings, _roi_settings, _motion_settings, _collision_settings, _abandoned_settings
-
-    try:
-        load_model()
-    except Exception as exc:
-        raise RuntimeError(f"Vision startup failed: {exc}") from exc
+    """Fail fast if scene-change or insight config is missing/invalid."""
+    global _insight_settings, _scene_change_settings
 
     try:
         _insight_settings = load_insight_settings()
@@ -50,31 +51,10 @@ async def on_startup() -> None:
         raise RuntimeError(f"Vision startup failed: {exc}") from exc
 
     try:
-        _tracking_settings = load_tracking_settings()
+        _scene_change_settings = load_scene_change_settings()
     except Exception as exc:
         raise RuntimeError(f"Vision startup failed: {exc}") from exc
 
-    try:
-        _roi_settings = load_roi_settings()
-    except Exception as exc:
-        raise RuntimeError(f"Vision startup failed: {exc}") from exc
-
-    try:
-        _motion_settings = load_motion_settings()
-    except Exception as exc:
-        raise RuntimeError(f"Vision startup failed: {exc}") from exc
-
-    try:
-        _collision_settings = load_collision_settings()
-    except Exception as exc:
-        raise RuntimeError(f"Vision startup failed: {exc}") from exc
-
-    try:
-        _abandoned_settings = load_abandoned_settings()
-    except Exception as exc:
-        raise RuntimeError(f"Vision startup failed: {exc}") from exc
-
-    print(f"[vision] model loaded: {get_model_summary()}")
     print(
         "[vision] insights config: "
         f"enabled={_insight_settings.enabled} "
@@ -98,49 +78,19 @@ async def on_startup() -> None:
         f"weights={len(_insight_settings.surprise.weights)}"
     )
     print(
-        "[vision] tracking config: "
-        f"enabled={_tracking_settings.enabled} "
-        f"persist={_tracking_settings.persist} "
-        f"tracker={_tracking_settings.tracker} "
-        f"busy_policy={_tracking_settings.busy_policy}"
-    )
-    print(
-        "[vision] roi config: "
-        f"enabled={_roi_settings.enabled} "
-        f"representative_point={_roi_settings.representative_point} "
-        f"regions={len(_roi_settings.regions)} "
-        f"lines={len(_roi_settings.lines)} "
-        f"dwell_default_threshold_ms={_roi_settings.dwell_default_threshold_ms} "
-        f"dwell_region_overrides={len(_roi_settings.dwell_region_threshold_ms)} "
-        f"transition_min_ms={_roi_settings.transition_min_ms}"
-    )
-    print(
-        "[vision] motion config: "
-        f"enabled={_motion_settings.enabled} "
-        f"history_frames={_motion_settings.history_frames} "
-        f"sudden_motion_speed_px_s={_motion_settings.sudden_motion_speed_px_s} "
-        f"stop_speed_px_s={_motion_settings.stop_speed_px_s} "
-        f"stop_duration_ms={_motion_settings.stop_duration_ms} "
-        f"event_cooldown_ms={_motion_settings.event_cooldown_ms}"
-    )
-    print(
-        "[vision] collision config: "
-        f"enabled={_collision_settings.enabled} "
-        f"pairs={len(_collision_settings.pairs)} "
-        f"distance_px={_collision_settings.distance_px} "
-        f"closing_speed_px_s={_collision_settings.closing_speed_px_s} "
-        f"pair_cooldown_ms={_collision_settings.pair_cooldown_ms}"
-    )
-    print(
-        "[vision] abandoned config: "
-        f"enabled={_abandoned_settings.enabled} "
-        f"object_classes={len(_abandoned_settings.object_classes)} "
-        f"associate_max_distance_px={_abandoned_settings.associate_max_distance_px} "
-        f"associate_min_ms={_abandoned_settings.associate_min_ms} "
-        f"abandon_delay_ms={_abandoned_settings.abandon_delay_ms} "
-        f"stationary_max_move_px={_abandoned_settings.stationary_max_move_px} "
-        f"roi={_abandoned_settings.roi} "
-        f"event_cooldown_ms={_abandoned_settings.event_cooldown_ms}"
+        "[vision] scene_change config: "
+        f"enabled={_scene_change_settings.enabled} "
+        f"downsample_max_dim={_scene_change_settings.downsample.max_dim} "
+        f"ema_alpha={_scene_change_settings.ema_alpha} "
+        f"pixel_threshold={_scene_change_settings.pixel_threshold} "
+        f"cell_px={_scene_change_settings.cell_px} "
+        f"cell_active_ratio={_scene_change_settings.cell_active_ratio} "
+        f"min_blob_cells={_scene_change_settings.min_blob_cells} "
+        f"score_threshold={_scene_change_settings.score_threshold} "
+        f"min_persist_frames={_scene_change_settings.min_persist_frames} "
+        f"cooldown_ms={_scene_change_settings.cooldown_ms} "
+        f"medium_score={_scene_change_settings.severity.medium_score} "
+        f"high_score={_scene_change_settings.severity.high_score}"
     )
 
 
@@ -149,7 +99,6 @@ async def health() -> dict[str, object]:
     return {
         "service": "vision",
         "status": "ok",
-        "model_loaded": is_model_loaded(),
         "insights_enabled": _insight_settings.enabled if _insight_settings is not None else False,
         "insight_assets_dir": str(_insight_settings.assets_dir) if _insight_settings is not None else None,
         "insight_assets_max_clips": _insight_settings.assets.max_clips if _insight_settings is not None else 0,
@@ -162,33 +111,26 @@ async def health() -> dict[str, object]:
         "surprise_threshold": _insight_settings.surprise.threshold if _insight_settings is not None else 0,
         "surprise_cooldown_ms": _insight_settings.surprise.cooldown_ms if _insight_settings is not None else 0,
         "surprise_weights": len(_insight_settings.surprise.weights) if _insight_settings is not None else 0,
-        "tracking_enabled": _tracking_settings.enabled if _tracking_settings is not None else False,
-        "tracking_busy_policy": _tracking_settings.busy_policy if _tracking_settings is not None else None,
-        "roi_enabled": _roi_settings.enabled if _roi_settings is not None else False,
-        "roi_regions": len(_roi_settings.regions) if _roi_settings is not None else 0,
-        "roi_lines": len(_roi_settings.lines) if _roi_settings is not None else 0,
-        "roi_dwell_default_threshold_ms": _roi_settings.dwell_default_threshold_ms if _roi_settings is not None else 0,
-        "roi_dwell_region_overrides": len(_roi_settings.dwell_region_threshold_ms) if _roi_settings is not None else 0,
-        "roi_transition_min_ms": _roi_settings.transition_min_ms if _roi_settings is not None else 0,
-        "motion_enabled": _motion_settings.enabled if _motion_settings is not None else False,
-        "motion_history_frames": _motion_settings.history_frames if _motion_settings is not None else 0,
-        "motion_sudden_motion_speed_px_s": _motion_settings.sudden_motion_speed_px_s if _motion_settings is not None else 0,
-        "motion_stop_speed_px_s": _motion_settings.stop_speed_px_s if _motion_settings is not None else 0,
-        "motion_stop_duration_ms": _motion_settings.stop_duration_ms if _motion_settings is not None else 0,
-        "motion_event_cooldown_ms": _motion_settings.event_cooldown_ms if _motion_settings is not None else 0,
-        "collision_enabled": _collision_settings.enabled if _collision_settings is not None else False,
-        "collision_pairs": len(_collision_settings.pairs) if _collision_settings is not None else 0,
-        "collision_distance_px": _collision_settings.distance_px if _collision_settings is not None else 0,
-        "collision_closing_speed_px_s": _collision_settings.closing_speed_px_s if _collision_settings is not None else 0,
-        "collision_pair_cooldown_ms": _collision_settings.pair_cooldown_ms if _collision_settings is not None else 0,
-        "abandoned_enabled": _abandoned_settings.enabled if _abandoned_settings is not None else False,
-        "abandoned_object_classes": len(_abandoned_settings.object_classes) if _abandoned_settings is not None else 0,
-        "abandoned_associate_max_distance_px": _abandoned_settings.associate_max_distance_px if _abandoned_settings is not None else 0,
-        "abandoned_associate_min_ms": _abandoned_settings.associate_min_ms if _abandoned_settings is not None else 0,
-        "abandoned_abandon_delay_ms": _abandoned_settings.abandon_delay_ms if _abandoned_settings is not None else 0,
-        "abandoned_stationary_max_move_px": _abandoned_settings.stationary_max_move_px if _abandoned_settings is not None else None,
-        "abandoned_roi": _abandoned_settings.roi if _abandoned_settings is not None else None,
-        "abandoned_event_cooldown_ms": _abandoned_settings.event_cooldown_ms if _abandoned_settings is not None else 0,
+        "scene_change_enabled": _scene_change_settings.enabled if _scene_change_settings is not None else False,
+        "scene_change_downsample_max_dim": _scene_change_settings.downsample.max_dim
+        if _scene_change_settings is not None
+        else 0,
+        "scene_change_ema_alpha": _scene_change_settings.ema_alpha if _scene_change_settings is not None else 0,
+        "scene_change_pixel_threshold": _scene_change_settings.pixel_threshold if _scene_change_settings is not None else 0,
+        "scene_change_cell_px": _scene_change_settings.cell_px if _scene_change_settings is not None else 0,
+        "scene_change_cell_active_ratio": _scene_change_settings.cell_active_ratio
+        if _scene_change_settings is not None
+        else 0,
+        "scene_change_min_blob_cells": _scene_change_settings.min_blob_cells if _scene_change_settings is not None else 0,
+        "scene_change_score_threshold": _scene_change_settings.score_threshold if _scene_change_settings is not None else 0,
+        "scene_change_min_persist_frames": _scene_change_settings.min_persist_frames
+        if _scene_change_settings is not None
+        else 0,
+        "scene_change_cooldown_ms": _scene_change_settings.cooldown_ms if _scene_change_settings is not None else 0,
+        "scene_change_medium_score": _scene_change_settings.severity.medium_score
+        if _scene_change_settings is not None
+        else 0,
+        "scene_change_high_score": _scene_change_settings.severity.high_score if _scene_change_settings is not None else 0,
     }
 
 
@@ -197,15 +139,12 @@ async def infer_socket(websocket: WebSocket) -> None:
     await websocket.accept()
 
     insight_settings = _insight_settings if _insight_settings is not None else load_insight_settings()
-    tracking_settings = _tracking_settings if _tracking_settings is not None else load_tracking_settings()
-    roi_settings = _roi_settings if _roi_settings is not None else load_roi_settings()
-    motion_settings = _motion_settings if _motion_settings is not None else load_motion_settings()
-    collision_settings = _collision_settings if _collision_settings is not None else load_collision_settings()
-    abandoned_settings = _abandoned_settings if _abandoned_settings is not None else load_abandoned_settings()
-    use_latest_pending_slot = should_use_latest_pending_slot(tracking_settings)
+    scene_change_settings = (
+        _scene_change_settings if _scene_change_settings is not None else load_scene_change_settings()
+    )
 
     insight_buffer = InsightBuffer(insight_settings)
-    detection_event_engine = DetectionEventEngine(roi_settings, motion_settings, collision_settings, abandoned_settings)
+    scene_change_engine = SceneChangeEngine(scene_change_settings)
 
     send_lock = asyncio.Lock()
 
@@ -219,22 +158,30 @@ async def infer_socket(websocket: WebSocket) -> None:
 
     await send_payload(make_hello("vision"))
 
-    pending_frame: InferenceFrame | None = None
+    pending_frame: FrameRequest | None = None
     pending_frame_event = asyncio.Event()
     inference_running = False
     manual_insight_task: asyncio.Task[None] | None = None
     auto_insight_task: asyncio.Task[None] | None = None
 
-    async def process_frame(frame: InferenceFrame) -> None:
+    async def process_frame(frame: FrameRequest) -> None:
         nonlocal auto_insight_task
 
         try:
-            detections = await run_inference(frame)
-            events = detection_event_engine.process(detections)
-            if events:
-                detections.events = events
-
-            await send_payload(detections.model_dump(exclude_none=True))
+            events = scene_change_engine.process_frame(
+                ts_ms=frame.ts_ms,
+                width=frame.width,
+                height=frame.height,
+                jpeg_bytes=frame.image_bytes,
+            )
+            frame_events = FrameEventsMessage(
+                frame_id=frame.frame_id,
+                ts_ms=frame.ts_ms,
+                width=frame.width,
+                height=frame.height,
+                events=events,
+            )
+            await send_payload(frame_events.model_dump(exclude_none=True))
 
             if (
                 events
@@ -243,9 +190,9 @@ async def infer_socket(websocket: WebSocket) -> None:
                 and (auto_insight_task is None or auto_insight_task.done())
             ):
                 auto_insight_task = asyncio.create_task(
-                    process_auto_insight(trigger_frame_id=detections.frame_id, events=events)
+                    process_auto_insight(trigger_frame_id=frame_events.frame_id, events=events)
                 )
-        except FrameDecodeError as exc:
+        except SceneChangeFrameDecodeError as exc:
             await send_payload(make_error("INVALID_IMAGE", str(exc), frame_id=frame.frame_id))
         except Exception as exc:
             await send_payload(make_error("INFERENCE_ERROR", str(exc), frame_id=frame.frame_id))
@@ -362,17 +309,13 @@ async def infer_socket(websocket: WebSocket) -> None:
 
             insight_buffer.add_frame(envelope.meta, envelope.image_payload)
 
-            frame = InferenceFrame(
+            frame = FrameRequest(
                 frame_id=envelope.meta.frame_id,
+                ts_ms=envelope.meta.ts_ms,
                 width=envelope.meta.width,
                 height=envelope.meta.height,
                 image_bytes=envelope.image_payload,
             )
-
-            if use_latest_pending_slot:
-                pending_frame = frame
-                pending_frame_event.set()
-                continue
 
             if inference_running or pending_frame is not None:
                 await send_payload(

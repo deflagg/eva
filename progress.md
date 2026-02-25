@@ -5889,3 +5889,557 @@
 
 ### Notes
 - This iteration is docs-only; runtime behavior remains as implemented in Iterations 120–121.
+
+## Iteration 123 — Protocol v2 cutover + `frame_events` ACK path (no scene_change yet)
+
+**Status:** ✅ Completed (2026-02-24)
+
+### Completed
+- Bumped protocol version to **v2** across Vision/Eva/UI WS protocol surfaces.
+- Added new `frame_events` protocol message in Vision + Eva TypeScript protocol schemas:
+  - includes `frame_id`, `ts_ms`, `width`, `height`, `events[]`.
+- Switched Vision frame loop (`packages/eva/vision/app/main.py`) to stop running YOLO inference on the frame path for this iteration.
+  - each binary frame now returns a single `frame_events` ACK with `events: []`.
+  - retained `insight_buffer.add_frame(...)` and `insight_test` command path.
+  - retained send lock and sequential frame worker behavior.
+- Updated Eva server routing to use `frame_events` frame-scoped responses (instead of `detections`) for UI ACK routing.
+  - frame route still keyed by `frame_id`.
+  - non-empty `events[]` still forwards to agent `/events` as before.
+- Updated UI runtime handling to ACK in-flight frames on matching `frame_events.frame_id`.
+  - replaced frame ACK gating from detections-based to frame-events-based.
+  - added `FrameEventsMessage` type and parser.
+- Updated UI protocol version usage to v2 for outgoing command/test/frame metadata and incoming message guards.
+
+### Files changed
+- `packages/eva/vision/app/protocol.py`
+- `packages/eva/vision/app/main.py`
+- `packages/eva/src/protocol.ts`
+- `packages/eva/src/server.ts`
+- `packages/ui/src/types.ts`
+- `packages/ui/src/main.tsx`
+- `progress.md`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/eva/vision && python3 -m compileall app` passes.
+
+### Manual run instructions
+1. Start Vision:
+   - `cd packages/eva/vision`
+   - `python -m app.run`
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+4. In UI, start camera + streaming.
+5. Confirm frame ACK path is healthy:
+   - `acked` counter increases
+   - fewer frame timeouts
+   - event feed remains empty (expected in Iteration 123)
+
+### Notes
+- This iteration intentionally keeps YOLO/tracking/ROI/motion/collision/abandoned modules in place; only the live frame path was switched to `frame_events` ACK.
+- Automatic insight triggering from detector events remains effectively inactive here because emitted `events[]` are currently empty.
+
+## Iteration 124 — Implement `SceneChangeEngine` + emit `scene_change` blobs in `frame_events`
+
+**Status:** ✅ Completed (2026-02-24)
+
+### Completed
+- Added new scene-change module:
+  - `packages/eva/vision/app/scene_change.py`
+- Implemented `SceneChangeSettings` loader from Dynaconf with fail-fast validation for:
+  - `scene_change.enabled`
+  - `scene_change.downsample.max_dim`
+  - `scene_change.ema_alpha`
+  - `scene_change.pixel_threshold`
+  - `scene_change.cell_px`
+  - `scene_change.cell_active_ratio`
+  - `scene_change.min_blob_cells`
+  - `scene_change.score_threshold`
+  - `scene_change.min_persist_frames`
+  - `scene_change.cooldown_ms`
+  - `scene_change.severity.medium_score`
+  - `scene_change.severity.high_score`
+- Implemented per-connection `SceneChangeEngine` with required algorithm steps:
+  - JPEG decode -> RGB -> downsample -> grayscale uint8
+  - EMA background update
+  - abs-diff threshold mask
+  - coarse cell pooling and active-cell thresholding
+  - 8-neighbor BFS clustering
+  - min-blob-cell filtering
+  - score computation (`sum(area_cells * density)`)
+  - persist-frame debounce + cooldown gating
+  - severity mapping (`low|medium|high`)
+- Engine now emits `scene_change` events in `frame_events.events[]` with data shape:
+  - `score`
+  - `reason: "pixel"`
+  - `blobs[]` entries containing normalized `x1,y1,x2,y2`, `area_cells`, `density`
+- Added committed defaults for `scene_change` in:
+  - `packages/eva/vision/settings.yaml`
+- Wired scene-change processing into Vision WS frame path in:
+  - `packages/eva/vision/app/main.py`
+  - creates `SceneChangeEngine` per websocket connection (baseline/state per stream)
+  - each frame now runs through `scene_change_engine.process_frame(...)`
+  - returned events are attached to `FrameEventsMessage.events`
+- Added scene-change startup/health observability in `main.py`:
+  - startup logs now include scene-change config summary
+  - `/health` now includes scene-change enablement and key thresholds
+
+### Files changed
+- `packages/eva/vision/app/scene_change.py` (new)
+- `packages/eva/vision/app/main.py`
+- `packages/eva/vision/settings.yaml`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/vision && python3 -m compileall app` passes.
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- Local scene-change engine smoke script (in vision venv) confirms:
+  - baseline frame emits no event
+  - repeated changed frames emit `scene_change` after persist threshold
+  - subsequent frames are suppressed by cooldown window.
+
+### Manual run instructions
+1. Start Vision:
+   - `cd packages/eva/vision`
+   - `python -m app.run`
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+4. Start camera + streaming in UI.
+5. Move a hand/object into frame and hold for a moment:
+   - expect one `scene_change` event (or short burst), then quiet during cooldown.
+6. Stop moving:
+   - events should stop.
+7. Quick lighting flicker check:
+   - at most occasional event; thresholds can be tuned next iteration if needed.
+
+### Notes
+- This iteration keeps existing legacy modules/config sections (tracking/roi/motion/collision/abandoned) in place; scene-change is now the active event source in the frame path.
+- Surprise-weight tuning and UI blob overlay are scheduled for Iteration 125.
+
+## Iteration 125 — `scene_change` as the only surprise trigger + UI blob overlay
+
+**Status:** ✅ Completed (2026-02-24)
+
+### Completed
+- Updated surprise defaults in Vision insights module:
+  - `packages/eva/vision/app/insights.py`
+  - `DEFAULT_SURPRISE_WEIGHTS` is now:
+    - `{ "scene_change": 5.0 }`
+- Updated committed Vision config weights to scene-change-only:
+  - `packages/eva/vision/settings.yaml`
+  - `surprise.weights` now contains only:
+    - `scene_change: 5`
+- Confirmed/retained auto-insight trigger path in Vision frame-events flow:
+  - `packages/eva/vision/app/main.py`
+  - auto insight continues to use `frame_events.frame_id` + `events` list with existing cooldown behavior.
+- Replaced UI detections overlay implementation with scene-change blob overlay:
+  - `packages/ui/src/overlay.ts`
+  - removed detections drawing path
+  - added `drawSceneChangeOverlay(video, canvas, frameEventsMessage, options?)`
+  - parses `scene_change` event `data.blobs[]`
+  - maps normalized blob coords -> source frame coords -> display coords using `message.width/height` and video scaling
+  - draws blob rectangles (+ lightweight label metadata)
+- Wired UI to render scene-change blobs with TTL in runtime flow:
+  - `packages/ui/src/main.tsx`
+  - on incoming `frame_events`, when `scene_change` blobs are present:
+    - draw overlay immediately
+    - keep it visible for ~1.5s (`SCENE_CHANGE_OVERLAY_TTL_MS`)
+    - auto-clear after TTL
+  - clears overlay/timer on camera stop, streaming pause, websocket disconnect, and component unmount.
+
+### Files changed
+- `packages/eva/vision/app/insights.py`
+- `packages/eva/vision/settings.yaml`
+- `packages/ui/src/overlay.ts`
+- `packages/ui/src/main.tsx`
+- `progress.md`
+
+### Verification
+- `cd packages/ui && npm run build` passes.
+- `cd packages/eva && npm run build` passes.
+- `cd packages/eva/vision && python3 -m compileall -f app` passes.
+- Vision venv check:
+  - `load_insight_settings().surprise.weights` resolves to `{'scene_change': 5.0}`.
+
+### Manual run instructions
+1. Start Vision:
+   - `cd packages/eva/vision`
+   - `python -m app.run`
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+4. Start camera + streaming in UI.
+5. Move hand/object to trigger scene change:
+   - confirm `scene_change` events appear in event feed
+   - confirm orange blob rectangles render on the video and fade after ~1–2 seconds.
+6. Observe insight behavior:
+   - when thresholds/cooldowns allow, auto-insight triggers on scene-change events.
+
+### Notes
+- Detections overlay behavior is now removed from active UI runtime path.
+- Legacy detector modules/config blocks remain in repo for now; deletion/cleanup is planned for Iteration 126.
+
+## Iteration 126 — Remove YOLO/tracking/ROI/legacy detectors + heavy deps
+
+**Status:** ✅ Completed (2026-02-24)
+
+### Completed
+- Removed legacy Vision detector/inference modules from source tree:
+  - `packages/eva/vision/app/yolo.py`
+  - `packages/eva/vision/app/tracking.py`
+  - `packages/eva/vision/app/roi.py`
+  - `packages/eva/vision/app/motion.py`
+  - `packages/eva/vision/app/collision.py`
+  - `packages/eva/vision/app/abandoned.py`
+  - `packages/eva/vision/app/events.py`
+- Simplified Vision runtime wiring in `packages/eva/vision/app/main.py`:
+  - removed all imports/usages of deleted YOLO/tracking/ROI/motion/collision/abandoned modules
+  - startup now only loads:
+    - insight settings
+    - scene-change settings
+  - websocket frame path remains:
+    - binary frame decode
+    - scene-change processing
+    - `frame_events` emit
+    - optional auto insight trigger
+- Simplified `/health` payload in `main.py`:
+  - removed tracking/roi/motion/collision/abandoned fields
+  - retained service/status + insight/surprise + scene-change fields.
+- Removed deprecated config sections from `packages/eva/vision/settings.yaml`:
+  - deleted `yolo`, `tracking`, `roi`, `motion`, `collision`, `abandoned`
+  - retained `server`, `scene_change`, `insights`, `surprise`
+- Removed heavy inference dependencies from `packages/eva/vision/requirements.txt`:
+  - removed `ultralytics`
+  - removed torch/torchvision pins
+  - removed `--extra-index-url` torch wheel source
+  - retained lightweight runtime deps (`fastapi`, `uvicorn`, `Pillow`, `numpy`, `pydantic`, `dynaconf`, `httpx`).
+
+### Files changed
+- `packages/eva/vision/app/main.py`
+- `packages/eva/vision/app/yolo.py` (deleted)
+- `packages/eva/vision/app/tracking.py` (deleted)
+- `packages/eva/vision/app/roi.py` (deleted)
+- `packages/eva/vision/app/motion.py` (deleted)
+- `packages/eva/vision/app/collision.py` (deleted)
+- `packages/eva/vision/app/abandoned.py` (deleted)
+- `packages/eva/vision/app/events.py` (deleted)
+- `packages/eva/vision/settings.yaml`
+- `packages/eva/vision/requirements.txt`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/vision && python3 -m compileall -f app` passes.
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- Vision startup smoke check passes:
+  - `cd packages/eva/vision && timeout 8s .venv/bin/python -m app.run`
+- Fresh venv install (no torch/ultralytics) succeeds:
+  - `cd packages/eva/vision`
+  - `python3 -m venv .venv.iter126`
+  - `.venv.iter126/bin/pip install -r requirements.txt`
+  - install completed successfully with only lightweight deps.
+
+### Manual run instructions
+1. Recreate/refresh Vision venv using current requirements:
+   - `cd packages/eva/vision`
+   - `python3 -m venv .venv`
+   - `source .venv/bin/activate`
+   - `pip install -r requirements.txt`
+2. Start Vision:
+   - `python -m app.run`
+3. Start Eva/UI as usual:
+   - `cd packages/eva && npm run dev`
+   - `cd packages/ui && npm run dev`
+4. Start camera + streaming in UI and confirm scene-change events still flow.
+
+### Notes
+- Iteration 126 intentionally removes legacy detector stack and heavy model deps; scene-change remains the active event source.
+- Remaining protocol/type/docs cleanup for detections vocabulary is in Iteration 127.
+
+## Iteration 127 — Protocol/types/docs cleanup (remove detections vocabulary)
+
+**Status:** ✅ Completed (2026-02-24)
+
+### Completed
+- Cleaned Vision Python protocol model surface in:
+  - `packages/eva/vision/app/protocol.py`
+- Removed legacy detection protocol models:
+  - deleted `DetectionEntry`
+  - deleted `DetectionsMessage`
+- Simplified event envelope shape for scene-change era:
+  - removed optional `track_id` from `EventEntry`
+- Confirmed remaining protocol message models are now:
+  - `hello`
+  - `error`
+  - `command`
+  - `frame_binary`
+  - `frame_events`
+  - `insight`
+
+- Cleaned Eva TypeScript protocol schema/types in:
+  - `packages/eva/src/protocol.ts`
+- Removed:
+  - `DetectionEntrySchema`
+  - `DetectionsMessageSchema`
+  - related exported detection types
+- Updated Vision inbound union to include only:
+  - `hello | frame_events | error | insight`
+- Removed `track_id` from TS `EventEntrySchema`.
+
+- Cleaned UI protocol types in:
+  - `packages/ui/src/types.ts`
+- Removed:
+  - `DetectionEntry`
+  - `DetectionsMessage`
+- Removed `track_id` from UI `EventEntry`.
+
+- Cleaned Eva event-ingest metadata and high-alert dedupe in:
+  - `packages/eva/src/server.ts`
+- Removed `model` field from `/events` ingest meta schema.
+- Removed `track_id` from events ingest schema.
+- Updated high-severity alert dedupe keys to not depend on `track_id`:
+  - now uses `event:${event.name}:${event.ts_ms}`.
+
+- Updated docs to align with scene-change-only architecture:
+  - `packages/eva/vision/README.md`
+  - `packages/ui/README.md`
+  - `README.md` (root)
+- Documentation now describes Vision as scene-change detector (no YOLO), UI blob overlays, and current end-to-end behavior without detections/track IDs/model fields.
+
+### Files changed
+- `packages/eva/vision/app/protocol.py`
+- `packages/eva/src/protocol.ts`
+- `packages/eva/src/server.ts`
+- `packages/ui/src/types.ts`
+- `packages/ui/src/main.tsx`
+- `packages/eva/vision/README.md`
+- `packages/ui/README.md`
+- `README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+- `cd packages/ui && npm run build` passes.
+- `cd packages/eva/vision && python3 -m compileall -f app` passes.
+- Vision startup smoke check passes:
+  - `cd packages/eva/vision && timeout 8s .venv/bin/python -m app.run`
+
+### Manual run instructions
+1. Start Vision:
+   - `cd packages/eva/vision`
+   - `python -m app.run`
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+4. Start camera + streaming in UI and confirm:
+   - frame ACKs continue via `frame_events`
+   - scene-change events/overlay still work
+   - insights (when triggered) continue to flow.
+
+### Notes
+- Runtime code paths no longer reference detections/track_id/model fields.
+- This completes the 123–127 scene-change cutover plan.
+
+## Iteration 128 — Executive prompt rewrite for scene-agnostic human-reaction `tts_response`
+
+**Status:** ✅ Completed (2026-02-24)
+
+### Completed
+- Updated Executive insight system prompt in:
+  - `packages/eva/executive/src/prompts/insight.ts`
+- Kept hard constraints intact:
+  - model must call `submit_insight` exactly once
+  - no plain text outside the tool call
+- Reworked `tts_response` guidance to enforce:
+  - 1–2 short spoken-friendly sentences
+  - natural human-reaction style (e.g., interjections like “whoa”, “wait—what was that?”)
+  - one gentle follow-up question most of the time
+- Added explicit safety/non-creepy policy:
+  - no cameras/frames/model/telemetry/token/cost mentions
+  - no person accusations as fact; uncertainty/hedging required
+  - no over-claiming emotion/intent
+- Added scene-aware response policy covering:
+  - person-present scenes
+  - no-person scenes
+  - pet/animal scenes
+  - object move/fall/spin scenes (light safety check)
+  - door/gate/window movement scenes
+- Added style examples for object spin/fall, door/gate, animal, and person-present reactions.
+- Added profanity guidance:
+  - prefer mild language (e.g., “what the heck”)
+  - disallow slurs/harassment.
+
+### Files changed
+- `packages/eva/executive/src/prompts/insight.ts`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/executive && npm run build` passes.
+
+### Manual run instructions
+1. Start Executive and the full stack (Vision + Eva + UI) with your normal local dev flow.
+2. Trigger multiple insights across different scene types (object movement, door/gate movement, animal/pet if available, person-present).
+3. Confirm returned `summary.tts_response` follows the new policy:
+   - conversational human reaction tone
+   - hedged uncertainty
+   - no creepy/system-internal wording
+   - usually includes a gentle follow-up question.
+
+### Notes
+- This iteration is prompt-only and keeps runtime protocol behavior unchanged.
+- Iteration 129 will carry `summary.tts_response` end-to-end through Vision/Eva/UI schemas and docs.
+
+## Iteration 129 — Vision + Protocol: carry `tts_response` in Insight payload end-to-end
+
+**Status:** ✅ Completed (2026-02-24)
+
+### Completed
+- Updated Vision Insight summary model in:
+  - `packages/eva/vision/app/protocol.py`
+  - Added required `summary.tts_response` (`min_length=1`) on `InsightSummary`.
+- Updated Vision insight packaging in:
+  - `packages/eva/vision/app/insights.py`
+  - Included `tts_response` from VisionAgent response when building `summary_payload`.
+- Updated Eva protocol schema in:
+  - `packages/eva/src/protocol.ts`
+  - Extended `InsightSummarySchema` with required `tts_response: z.string().min(1)`.
+- Updated UI protocol types in:
+  - `packages/ui/src/types.ts`
+  - Extended `InsightSummary` with required `tts_response: string`.
+- Added runtime guard alignment in UI parser:
+  - `packages/ui/src/main.tsx`
+  - `isInsightMessage(...)` now also checks `summary.tts_response` is a string.
+- Updated protocol docs/spec in:
+  - `packages/protocol/README.md`
+  - `packages/protocol/schema.json`
+  - Documented `insight.summary.tts_response` as required and added it to the insight example/schema.
+
+### Files changed
+- `packages/eva/vision/app/protocol.py`
+- `packages/eva/vision/app/insights.py`
+- `packages/eva/src/protocol.ts`
+- `packages/ui/src/types.ts`
+- `packages/ui/src/main.tsx`
+- `packages/protocol/README.md`
+- `packages/protocol/schema.json`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/vision && timeout 8s python -m app.run` ❌ in this sandbox (`ModuleNotFoundError: No module named 'uvicorn'`).
+- `cd packages/eva/vision && python3 -m compileall app` ✅ passes.
+- `cd packages/eva && npm run build` ✅ passes.
+- `cd packages/ui && npm run build` ✅ passes.
+
+### Manual run instructions
+1. Ensure Vision runtime deps are installed (including `uvicorn`) in your Vision environment.
+2. Start Vision:
+   - `cd packages/eva/vision`
+   - `python -m app.run`
+3. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+4. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+5. Trigger `insight_test` (or auto-insight) and confirm incoming `insight` payload now includes:
+   - `summary.tts_response` (non-empty string).
+
+### Notes
+- This iteration is schema/plumbing only; utterance emission behavior is unchanged.
+- Iteration 130 will remove event-based alert utterances and emit one insight-derived utterance per `clip_id`.
+
+## Iteration 130 — Eva: remove event alerts; emit one utterance only on Insight
+
+**Status:** ✅ Completed (2026-02-24)
+
+### Completed
+- Updated Eva server behavior in:
+  - `packages/eva/src/server.ts`
+- Removed direct event-based push alert path:
+  - removed high-severity event -> `text_output`/`speech_output` emission logic
+  - kept forwarding `frame_events.events[]` to agent `/events` intact.
+- Added insight-driven utterance emission:
+  - in `message.type === "insight"` handler, Eva now emits a `text_output` message to the UI with:
+    - `text = summary.tts_response` (fallback to trimmed `summary.one_liner` if needed)
+    - `session_id = "system-insights"`
+    - `meta.note = "Auto utterance from insight."`
+    - `meta.concepts = ["insight"]`
+    - passthrough metadata: `meta.trigger_kind = "insight"`, `meta.trigger_id = clip_id`
+- Added per-clip utterance dedupe:
+  - introduced `clip_id` tracking so only one insight-derived utterance is emitted per clip.
+
+### Files changed
+- `packages/eva/src/server.ts`
+- `progress.md`
+
+### Verification
+- `cd packages/eva && npm run build` ✅ passes.
+
+### Manual run instructions
+1. Start Vision, Eva, and UI with your normal local setup.
+2. Generate raw `scene_change` events without triggering insight:
+   - confirm no `Alert:` / event-driven conversational utterance appears.
+3. Trigger an insight (`insight_test` or auto insight):
+   - confirm exactly one conversational `text_output` utterance appears.
+4. Re-deliver the same `clip_id` (or replay duplicate insight payload):
+   - confirm duplicate utterance is suppressed by clip dedupe.
+
+### Notes
+- Insight relay gating (`insightRelay`) remains in place for relaying raw `insight` payloads to UI.
+- Utterance emission is now insight-only and decoupled from event severity.
+
+## Iteration 131 — UI auto-speak guardrail + docs
+
+**Status:** ✅ Completed (2026-02-24)
+
+### Completed
+- Updated UI auto-speak gating in:
+  - `packages/ui/src/main.tsx`
+- Added lightweight text-output classification helpers:
+  - `getTextOutputTriggerKind(...)`
+  - `isUserChatReplyTextOutput(...)`
+- Updated auto-speak policy for `text_output` messages:
+  - auto-speak now runs **only** when either:
+    - message is a user chat reply, or
+    - `text_output.meta.trigger_kind === "insight"`
+  - non-chat/non-insight system `text_output` messages are ignored by auto-speak.
+- Added small logging clarity improvement:
+  - distinguishes auto-spoken chat replies vs insight utterances in UI logs.
+- Updated UI docs in:
+  - `packages/ui/README.md`
+  - documented that raw frame/event traffic is not auto-spoken and that system auto-speak is insight-only.
+
+### Files changed
+- `packages/ui/src/main.tsx`
+- `packages/ui/README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/ui && npm run build` ✅ passes.
+
+### Manual run instructions
+1. Start Vision, Eva, and UI.
+2. Enable auto-speak in UI settings.
+3. Send a normal chat message via `POST /text` and confirm reply auto-speaks.
+4. Trigger an insight utterance (`meta.trigger_kind === "insight"`) and confirm it auto-speaks.
+5. Trigger raw scene-change/frame events without insight and confirm no auto-speak occurs.
+
+### Notes
+- This is a minimal guardrail change; no refactor of UI speech subsystem.
+- Iterations 128–131 are now complete.

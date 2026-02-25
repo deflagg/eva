@@ -214,12 +214,17 @@
       "additionalProperties": false,
       "required": [
         "one_liner",
+        "tts_response",
         "what_changed",
         "severity",
         "tags"
       ],
       "properties": {
         "one_liner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tts_response": {
           "type": "string",
           "minLength": 1
         },

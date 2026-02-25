@@ -1,9 +1,87 @@
 import type { UiDebugOverlayConfig } from './config';
-import type { DetectionsMessage } from './types';
+import type { FrameEventsMessage } from './types';
 
 export interface DrawOverlayOptions {
   debugOverlayEnabled?: boolean;
   debugOverlay?: UiDebugOverlayConfig;
+}
+
+interface SceneChangeBlob {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  areaCells?: number;
+  density?: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return value;
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function extractSceneChangeBlobs(message: FrameEventsMessage): SceneChangeBlob[] {
+  const blobs: SceneChangeBlob[] = [];
+
+  for (const event of message.events) {
+    if (event.name !== 'scene_change' || !isRecord(event.data)) {
+      continue;
+    }
+
+    const eventBlobs = event.data.blobs;
+    if (!Array.isArray(eventBlobs)) {
+      continue;
+    }
+
+    for (const candidate of eventBlobs) {
+      if (!isRecord(candidate)) {
+        continue;
+      }
+
+      const x1 = asFiniteNumber(candidate.x1);
+      const y1 = asFiniteNumber(candidate.y1);
+      const x2 = asFiniteNumber(candidate.x2);
+      const y2 = asFiniteNumber(candidate.y2);
+
+      if (x1 === null || y1 === null || x2 === null || y2 === null) {
+        continue;
+      }
+
+      const areaCells = asFiniteNumber(candidate.area_cells ?? candidate.areaCells) ?? undefined;
+      const density = asFiniteNumber(candidate.density) ?? undefined;
+
+      const normalizedX1 = clamp01(x1);
+      const normalizedY1 = clamp01(y1);
+      const normalizedX2 = clamp01(x2);
+      const normalizedY2 = clamp01(y2);
+
+      if (normalizedX2 <= normalizedX1 || normalizedY2 <= normalizedY1) {
+        continue;
+      }
+
+      blobs.push({
+        x1: normalizedX1,
+        y1: normalizedY1,
+        x2: normalizedX2,
+        y2: normalizedY2,
+        ...(areaCells !== undefined ? { areaCells } : {}),
+        ...(density !== undefined ? { density } : {}),
+      });
+    }
+  }
+
+  return blobs;
 }
 
 function getOverlayContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {
@@ -100,10 +178,10 @@ function drawDebugOverlay(
   ctx.restore();
 }
 
-export function drawDetectionsOverlay(
+export function drawSceneChangeOverlay(
   video: HTMLVideoElement,
   canvas: HTMLCanvasElement,
-  message: DetectionsMessage,
+  message: FrameEventsMessage,
   options: DrawOverlayOptions = {},
 ): void {
   if (!ensureOverlaySize(video, canvas)) {
@@ -117,32 +195,49 @@ export function drawDetectionsOverlay(
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  const scaleX = video.clientWidth / message.width;
-  const scaleY = video.clientHeight / message.height;
+  const sourceWidth = Math.max(1, message.width);
+  const sourceHeight = Math.max(1, message.height);
+  const scaleX = video.clientWidth / sourceWidth;
+  const scaleY = video.clientHeight / sourceHeight;
 
   if (options.debugOverlayEnabled && options.debugOverlay) {
     drawDebugOverlay(ctx, scaleX, scaleY, options.debugOverlay);
   }
 
-  if (!message.detections.length) {
+  const blobs = extractSceneChangeBlobs(message);
+  if (blobs.length === 0) {
     return;
   }
 
   ctx.lineWidth = 2;
-  ctx.strokeStyle = '#22c55e';
-  ctx.font = '14px sans-serif';
+  ctx.strokeStyle = '#f97316';
+  ctx.fillStyle = 'rgba(249, 115, 22, 0.14)';
+  ctx.font = '12px sans-serif';
   ctx.textBaseline = 'top';
 
-  for (const detection of message.detections) {
-    const [x1, y1, x2, y2] = detection.box;
-    const drawX = x1 * scaleX;
-    const drawY = y1 * scaleY;
-    const drawWidth = (x2 - x1) * scaleX;
-    const drawHeight = (y2 - y1) * scaleY;
+  for (const blob of blobs) {
+    const sourceX1 = blob.x1 * sourceWidth;
+    const sourceY1 = blob.y1 * sourceHeight;
+    const sourceX2 = blob.x2 * sourceWidth;
+    const sourceY2 = blob.y2 * sourceHeight;
 
+    const drawX = sourceX1 * scaleX;
+    const drawY = sourceY1 * scaleY;
+    const drawWidth = Math.max(1, (sourceX2 - sourceX1) * scaleX);
+    const drawHeight = Math.max(1, (sourceY2 - sourceY1) * scaleY);
+
+    ctx.fillRect(drawX, drawY, drawWidth, drawHeight);
     ctx.strokeRect(drawX, drawY, drawWidth, drawHeight);
 
-    const label = `${detection.name} ${(detection.conf * 100).toFixed(0)}%`;
-    drawLabel(ctx, drawX, drawY, label, 'rgba(34, 197, 94, 0.85)', '#052e16');
+    const details: string[] = [];
+    if (blob.areaCells !== undefined) {
+      details.push(`cells=${Math.round(blob.areaCells)}`);
+    }
+    if (blob.density !== undefined) {
+      details.push(`density=${blob.density.toFixed(2)}`);
+    }
+
+    const label = details.length > 0 ? `change (${details.join(', ')})` : 'change';
+    drawLabel(ctx, drawX, drawY, label, 'rgba(249, 115, 22, 0.9)', '#431407');
   }
 }

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 export type ProtocolVersion = typeof PROTOCOL_VERSION;
 
@@ -49,36 +49,26 @@ export const FrameBinaryMetaSchema = z.object({
 
 export const InsightSeveritySchema = z.enum(['low', 'medium', 'high']);
 
-export const DetectionEntrySchema = z.object({
-  cls: z.number().int().nonnegative(),
-  name: z.string().min(1),
-  conf: z.number().min(0).max(1),
-  box: z.tuple([z.number(), z.number(), z.number(), z.number()]),
-  track_id: z.number().int().optional(),
-});
-
 export const EventEntrySchema = z.object({
   name: z.string().min(1),
   ts_ms: z.number().int().nonnegative(),
   severity: InsightSeveritySchema,
-  track_id: z.number().int().optional(),
   data: z.record(z.unknown()),
 });
 
-export const DetectionsMessageSchema = z.object({
-  type: z.literal('detections'),
+export const FrameEventsMessageSchema = z.object({
+  type: z.literal('frame_events'),
   v: z.literal(PROTOCOL_VERSION),
   frame_id: z.string().min(1),
   ts_ms: z.number().int().nonnegative(),
   width: z.number().int().positive(),
   height: z.number().int().positive(),
-  model: z.string().min(1),
-  detections: z.array(DetectionEntrySchema),
-  events: z.array(EventEntrySchema).optional(),
+  events: z.array(EventEntrySchema),
 });
 
 export const InsightSummarySchema = z.object({
   one_liner: z.string().min(1),
+  tts_response: z.string().min(1),
   what_changed: z.array(z.string().min(1)),
   severity: InsightSeveritySchema,
   tags: z.array(z.string().min(1)),
@@ -102,7 +92,7 @@ export const InsightMessageSchema = z.object({
 
 export const VisionInboundMessageSchema = z.discriminatedUnion('type', [
   HelloMessageSchema,
-  DetectionsMessageSchema,
+  FrameEventsMessageSchema,
   ErrorMessageSchema,
   InsightMessageSchema,
 ]);
@@ -111,9 +101,8 @@ export type HelloMessage = z.infer<typeof HelloMessageSchema>;
 export type ErrorMessage = z.infer<typeof ErrorMessageSchema>;
 export type CommandMessage = z.infer<typeof CommandMessageSchema>;
 export type FrameBinaryMeta = z.infer<typeof FrameBinaryMetaSchema>;
-export type DetectionEntry = z.infer<typeof DetectionEntrySchema>;
 export type EventEntry = z.infer<typeof EventEntrySchema>;
-export type DetectionsMessage = z.infer<typeof DetectionsMessageSchema>;
+export type FrameEventsMessage = z.infer<typeof FrameEventsMessageSchema>;
 export type InsightSummary = z.infer<typeof InsightSummarySchema>;
 export type InsightUsage = z.infer<typeof InsightUsageSchema>;
 export type InsightMessage = z.infer<typeof InsightMessageSchema>;

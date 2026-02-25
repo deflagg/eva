@@ -4,7 +4,7 @@ import ReactDOM from 'react-dom/client';
 import { captureJpegFrame, isCameraSupported, startCamera, stopCamera } from './camera';
 import { loadUiRuntimeConfig, type UiDebugOverlayConfig, type UiRuntimeConfig } from './config';
 import { encodeBinaryFrameEnvelope } from './frameBinary';
-import { clearOverlay, drawDetectionsOverlay } from './overlay';
+import { clearOverlay, drawSceneChangeOverlay } from './overlay';
 import {
   createSpeechClient,
   deriveEvaHttpBaseUrl,
@@ -12,9 +12,9 @@ import {
   type SpeechClient,
 } from './speech';
 import type {
-  DetectionsMessage,
   EventEntry,
   FrameBinaryMeta,
+  FrameEventsMessage,
   InsightMessage,
   InsightSeverity,
   SpeechOutputMessage,
@@ -41,7 +41,6 @@ interface EventFeedEntry {
   ts: string;
   name: string;
   severity: InsightSeverity;
-  trackId: number | null;
   summary: string;
 }
 
@@ -83,6 +82,7 @@ const SEVERITY_COLOR: Record<InsightSeverity, string> = {
 const FRAME_TIMEOUT_MS = 500;
 const FRAME_LOOP_INTERVAL_MS = 100;
 const EVENT_FEED_LIMIT = 60;
+const SCENE_CHANGE_OVERLAY_TTL_MS = 1_500;
 
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -133,19 +133,19 @@ function parseTextEndpointErrorMessage(raw: string): string | null {
   }
 }
 
-function isDetectionsMessage(message: unknown): message is DetectionsMessage {
+function isFrameEventsMessage(message: unknown): message is FrameEventsMessage {
   if (!message || typeof message !== 'object') {
     return false;
   }
 
   const candidate = message as Record<string, unknown>;
   return (
-    candidate.type === 'detections' &&
-    candidate.v === 1 &&
+    candidate.type === 'frame_events' &&
+    candidate.v === 2 &&
     typeof candidate.frame_id === 'string' &&
     typeof candidate.width === 'number' &&
     typeof candidate.height === 'number' &&
-    Array.isArray(candidate.detections)
+    Array.isArray(candidate.events)
   );
 }
 
@@ -166,10 +166,11 @@ function isInsightMessage(message: unknown): message is InsightMessage {
 
   return (
     candidate.type === 'insight' &&
-    candidate.v === 1 &&
+    candidate.v === 2 &&
     typeof candidate.clip_id === 'string' &&
     typeof candidate.trigger_frame_id === 'string' &&
-    typeof summaryRecord.one_liner === 'string'
+    typeof summaryRecord.one_liner === 'string' &&
+    typeof summaryRecord.tts_response === 'string'
   );
 }
 
@@ -179,7 +180,7 @@ function isTextOutputMessage(message: unknown): message is TextOutputMessage {
   }
 
   const candidate = message as Record<string, unknown>;
-  if (candidate.type !== 'text_output' || candidate.v !== 1) {
+  if (candidate.type !== 'text_output' || candidate.v !== 2) {
     return false;
   }
 
@@ -207,7 +208,7 @@ function isSpeechOutputMessage(message: unknown): message is SpeechOutputMessage
   }
 
   const candidate = message as Record<string, unknown>;
-  if (candidate.type !== 'speech_output' || candidate.v !== 1) {
+  if (candidate.type !== 'speech_output' || candidate.v !== 2) {
     return false;
   }
 
@@ -235,6 +236,24 @@ function isSpeechOutputMessage(message: unknown): message is SpeechOutputMessage
     typeof metaRecord.trigger_id === 'string' &&
     metaRecord.severity === 'high'
   );
+}
+
+function getTextOutputTriggerKind(textOutput: TextOutputMessage): string | null {
+  const triggerKind = (textOutput.meta as Record<string, unknown>).trigger_kind;
+  return typeof triggerKind === 'string' ? triggerKind : null;
+}
+
+function isUserChatReplyTextOutput(textOutput: TextOutputMessage): boolean {
+  if (getTextOutputTriggerKind(textOutput) !== null) {
+    return false;
+  }
+
+  const sessionId = textOutput.session_id?.trim();
+  if (!sessionId) {
+    return true;
+  }
+
+  return !sessionId.startsWith('system-');
 }
 
 function decodeBase64ToArrayBuffer(base64: string): ArrayBuffer {
@@ -285,6 +304,25 @@ function summarizeEventData(data: Record<string, unknown>): string {
     .slice(0, 3)
     .map(([key, value]) => `${key}=${formatEventValue(value)}`)
     .join(', ');
+}
+
+function getSceneChangeBlobCount(message: FrameEventsMessage): number {
+  let count = 0;
+
+  for (const event of message.events) {
+    if (event.name !== 'scene_change') {
+      continue;
+    }
+
+    const blobs = event.data.blobs;
+    if (!Array.isArray(blobs)) {
+      continue;
+    }
+
+    count += blobs.length;
+  }
+
+  return count;
 }
 
 function hasDebugOverlayGeometry(config: UiDebugOverlayConfig | undefined): boolean {
@@ -340,8 +378,6 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const [framesTimedOut, setFramesTimedOut] = React.useState(0);
   const [lastAckLatencyMs, setLastAckLatencyMs] = React.useState<number | null>(null);
   const [inFlightFrameId, setInFlightFrameId] = React.useState<string | null>(null);
-  const [lastDetectionsCount, setLastDetectionsCount] = React.useState(0);
-  const [lastDetectionsModel, setLastDetectionsModel] = React.useState<string | null>(null);
   const [recentEvents, setRecentEvents] = React.useState<EventFeedEntry[]>([]);
   const [latestInsight, setLatestInsight] = React.useState<InsightMessage | null>(null);
   const [debugOverlayEnabled, setDebugOverlayEnabled] = React.useState(false);
@@ -368,7 +404,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const seenTextOutputRequestIdsRef = React.useRef<string[]>([]);
   const inFlightRef = React.useRef<InFlightFrame | null>(null);
   const captureInProgressRef = React.useRef(false);
-  const latestDetectionsRef = React.useRef<DetectionsMessage | null>(null);
+  const sceneOverlayClearTimerRef = React.useRef<number | null>(null);
 
   const frameLoopTimerRef = React.useRef<number | null>(null);
   const framesSentRef = React.useRef(0);
@@ -404,7 +440,6 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         ts: formatTime(event.ts_ms),
         name: event.name,
         severity: event.severity,
-        trackId: event.track_id ?? null,
         summary: summarizeEventData(event.data),
       });
       nextEventIdRef.current += 1;
@@ -477,33 +512,36 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     clearOverlay(overlayCanvas);
   }, []);
 
-  const renderDetections = React.useCallback(
-    (message: DetectionsMessage) => {
+  const clearSceneOverlayTimer = React.useCallback(() => {
+    if (sceneOverlayClearTimerRef.current === null) {
+      return;
+    }
+
+    window.clearTimeout(sceneOverlayClearTimerRef.current);
+    sceneOverlayClearTimerRef.current = null;
+  }, []);
+
+  const renderSceneOverlay = React.useCallback(
+    (message: FrameEventsMessage) => {
       const videoElement = videoRef.current;
       const overlayCanvas = overlayCanvasRef.current;
       if (!videoElement || !overlayCanvas) {
         return;
       }
 
-      drawDetectionsOverlay(videoElement, overlayCanvas, message, {
+      drawSceneChangeOverlay(videoElement, overlayCanvas, message, {
         debugOverlayEnabled,
         debugOverlay: debugOverlayConfig,
       });
-      latestDetectionsRef.current = message;
-      setLastDetectionsCount(message.detections.length);
-      setLastDetectionsModel(message.model);
+
+      clearSceneOverlayTimer();
+      sceneOverlayClearTimerRef.current = window.setTimeout(() => {
+        sceneOverlayClearTimerRef.current = null;
+        clearOverlayCanvas();
+      }, SCENE_CHANGE_OVERLAY_TTL_MS);
     },
-    [debugOverlayConfig, debugOverlayEnabled],
+    [clearOverlayCanvas, clearSceneOverlayTimer, debugOverlayConfig, debugOverlayEnabled],
   );
-
-  React.useEffect(() => {
-    const lastDetections = latestDetectionsRef.current;
-    if (!lastDetections) {
-      return;
-    }
-
-    renderDetections(lastDetections);
-  }, [debugOverlayEnabled, renderDetections]);
 
   React.useEffect(() => {
     const speechClient = createSpeechClient({
@@ -594,7 +632,15 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   }, [revokeAlertAudioObjectUrl]);
 
   const runSpeechRequest = React.useCallback(
-    async ({ text, voice, source }: { text: string; voice: string; source: 'auto-chat' | 'manual' }): Promise<boolean> => {
+    async ({
+      text,
+      voice,
+      source,
+    }: {
+      text: string;
+      voice: string;
+      source: 'auto-chat' | 'auto-insight' | 'manual';
+    }): Promise<boolean> => {
       const speechClient = speechClientRef.current;
       if (!speechClient) {
         appendLog('system', 'Speech client is not ready yet.');
@@ -626,6 +672,8 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
         if (source === 'manual') {
           appendLog('system', `Test speech played using voice ${voice}.`);
+        } else if (source === 'auto-insight') {
+          appendLog('system', 'Auto-speak played insight utterance.');
         } else {
           appendLog('system', 'Auto-speak played chat reply.');
         }
@@ -641,7 +689,10 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
           setAudioLocked(true);
         }
 
-        appendLog('system', `${source === 'auto-chat' ? 'Auto-speak' : 'Test speech'} failed: ${message}`);
+        const sourceLabel =
+          source === 'manual' ? 'Test speech' : source === 'auto-insight' ? 'Insight auto-speak' : 'Auto-speak';
+
+        appendLog('system', `${sourceLabel} failed: ${message}`);
         return false;
       } finally {
         if (activeSpeechAbortControllerRef.current === controller) {
@@ -656,6 +707,14 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const maybeAutoSpeakTextOutput = React.useCallback(
     (textOutput: TextOutputMessage): void => {
       if (!speechConfig.enabled || !autoSpeakEnabled) {
+        return;
+      }
+
+      const triggerKind = getTextOutputTriggerKind(textOutput);
+      const isInsightUtterance = triggerKind === 'insight';
+      const isUserChatReply = isUserChatReplyTextOutput(textOutput);
+
+      if (!isInsightUtterance && !isUserChatReply) {
         return;
       }
 
@@ -683,7 +742,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       void runSpeechRequest({
         text: speechText,
         voice,
-        source: 'auto-chat',
+        source: isInsightUtterance ? 'auto-insight' : 'auto-chat',
       });
     },
     [autoSpeakEnabled, runSpeechRequest, speechConfig, speechVoice],
@@ -698,20 +757,23 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       onClose: () => {
         setStatus('disconnected');
         dropInFlight('Dropped in-flight frame: socket disconnected');
+        clearSceneOverlayTimer();
+        clearOverlayCanvas();
         appendLog('system', 'Disconnected from Eva WebSocket endpoint.');
       },
       onMessage: (message) => {
         const inFlight = inFlightRef.current;
-        const detectionsMessage = isDetectionsMessage(message) ? message : null;
+        const frameEventsMessage = isFrameEventsMessage(message) ? message : null;
         const insightMessage = isInsightMessage(message) ? message : null;
         const textOutputMessage = isTextOutputMessage(message) ? message : null;
         const speechOutputMessage = isSpeechOutputMessage(message) ? message : null;
 
-        if (detectionsMessage) {
-          renderDetections(detectionsMessage);
+        if (frameEventsMessage && frameEventsMessage.events.length > 0) {
+          appendEvents(frameEventsMessage.events);
 
-          if (detectionsMessage.events && detectionsMessage.events.length > 0) {
-            appendEvents(detectionsMessage.events);
+          const sceneChangeBlobCount = getSceneChangeBlobCount(frameEventsMessage);
+          if (sceneChangeBlobCount > 0) {
+            renderSceneOverlay(frameEventsMessage);
           }
         }
 
@@ -728,7 +790,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
           void playSpeechOutputAlert(speechOutputMessage);
         }
 
-        if (detectionsMessage && inFlight && detectionsMessage.frame_id === inFlight.frameId) {
+        if (frameEventsMessage && inFlight && frameEventsMessage.frame_id === inFlight.frameId) {
           window.clearTimeout(inFlight.timeoutId);
           inFlightRef.current = null;
           setInFlightFrameId(null);
@@ -739,7 +801,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
           setLastAckLatencyMs(latencyMs);
 
           const shouldLogAck =
-            shouldSampleFrameLog(framesAckedRef.current) || (detectionsMessage.events?.length ?? 0) > 0;
+            shouldSampleFrameLog(framesAckedRef.current) || frameEventsMessage.events.length > 0;
 
           if (shouldLogAck) {
             appendLog('incoming', summarizeMessage(message));
@@ -772,18 +834,20 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     appendEvents,
     appendLog,
     appendTextOutputMessage,
+    clearOverlayCanvas,
+    clearSceneOverlayTimer,
     connectionAttempt,
     dropInFlight,
     evaWsUrl,
     maybeAutoSpeakTextOutput,
     playSpeechOutputAlert,
-    renderDetections,
+    renderSceneOverlay,
   ]);
 
   const handleSendTestMessage = React.useCallback(() => {
     const payload = {
       type: 'ui_test',
-      v: 1,
+      v: 2,
       ts_ms: Date.now(),
       payload: 'hello-from-ui',
     };
@@ -800,7 +864,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const handleTriggerInsightTest = React.useCallback(() => {
     const payload = {
       type: 'command',
-      v: 1,
+      v: 2,
       name: 'insight_test',
     };
 
@@ -974,10 +1038,8 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       const stream = await startCamera(videoElement);
       streamRef.current = stream;
 
+      clearSceneOverlayTimer();
       clearOverlayCanvas();
-      latestDetectionsRef.current = null;
-      setLastDetectionsCount(0);
-      setLastDetectionsModel(null);
 
       setCameraStatus('running');
       appendLog('system', 'Camera started successfully.');
@@ -987,7 +1049,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       setCameraError(message);
       appendLog('system', `Failed to start camera: ${message}`);
     }
-  }, [appendLog, cameraStatus, cameraSupported, clearOverlayCanvas]);
+  }, [appendLog, cameraStatus, cameraSupported, clearOverlayCanvas, clearSceneOverlayTimer]);
 
   const handleStopCamera = React.useCallback(() => {
     setStreamingEnabled(false);
@@ -1000,15 +1062,13 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       videoRef.current.srcObject = null;
     }
 
+    clearSceneOverlayTimer();
     clearOverlayCanvas();
-    latestDetectionsRef.current = null;
-    setLastDetectionsCount(0);
-    setLastDetectionsModel(null);
 
     setCameraStatus('idle');
     setCameraError(null);
     appendLog('system', 'Camera stopped.');
-  }, [appendLog, clearOverlayCanvas, dropInFlight]);
+  }, [appendLog, clearOverlayCanvas, clearSceneOverlayTimer, dropInFlight]);
 
   const handleToggleStreaming = React.useCallback(() => {
     if (!streamingEnabled) {
@@ -1024,8 +1084,10 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
     setStreamingEnabled(false);
     dropInFlight('Dropped in-flight frame: streaming paused');
+    clearSceneOverlayTimer();
+    clearOverlayCanvas();
     appendLog('system', 'Frame streaming paused.');
-  }, [appendLog, cameraStatus, dropInFlight, streamingEnabled]);
+  }, [appendLog, cameraStatus, clearOverlayCanvas, clearSceneOverlayTimer, dropInFlight, streamingEnabled]);
 
   const trySendFrame = React.useCallback(async () => {
     if (!streamingEnabled || cameraStatus !== 'running') {
@@ -1058,7 +1120,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       const frameId = crypto.randomUUID();
       const frameMeta: FrameBinaryMeta = {
         type: 'frame_binary',
-        v: 1,
+        v: 2,
         frame_id: frameId,
         ts_ms: Date.now(),
         mime: capturedFrame.mime,
@@ -1148,9 +1210,10 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
       stopCamera(streamRef.current);
       streamRef.current = null;
+      clearSceneOverlayTimer();
       clearOverlayCanvas();
     };
-  }, [clearOverlayCanvas]);
+  }, [clearOverlayCanvas, clearSceneOverlayTimer]);
 
   // Insights are rendered silently (no spoken line).
 
@@ -1316,14 +1379,8 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         <canvas ref={captureCanvasRef} style={{ display: 'none' }} />
         <p style={{ marginTop: 8 }}>
           Frames sent: <strong>{framesSent}</strong> · acknowledged: <strong>{framesAcked}</strong> · timed out:{' '}
-          <strong>{framesTimedOut}</strong> · in-flight: <strong>{inFlightFrameId ? 'yes' : 'no'}</strong> · detections:{' '}
-          <strong>{lastDetectionsCount}</strong> · events in feed: <strong>{recentEvents.length}</strong>
-          {lastDetectionsModel ? (
-            <>
-              {' '}
-              · model: <strong>{lastDetectionsModel}</strong>
-            </>
-          ) : null}
+          <strong>{framesTimedOut}</strong> · in-flight: <strong>{inFlightFrameId ? 'yes' : 'no'}</strong> · events in feed:{' '}
+          <strong>{recentEvents.length}</strong>
           {lastAckLatencyMs !== null ? (
             <>
               {' '}
@@ -1395,18 +1452,13 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
           }}
         >
           {recentEvents.length === 0 ? (
-            <p style={{ margin: 0 }}>No detector events yet.</p>
+            <p style={{ margin: 0 }}>No scene-change events yet.</p>
           ) : (
             <ul style={{ margin: 0, paddingLeft: 20 }}>
               {recentEvents.map((event) => (
                 <li key={event.id}>
                   <code>{event.ts}</code> <strong>{event.name}</strong>{' '}
                   <strong style={{ color: SEVERITY_COLOR[event.severity] }}>[{event.severity}]</strong>{' '}
-                  {event.trackId !== null ? (
-                    <>
-                      track_id=<code>{event.trackId}</code> ·{' '}
-                    </>
-                  ) : null}
                   {event.summary}
                 </li>
               ))}

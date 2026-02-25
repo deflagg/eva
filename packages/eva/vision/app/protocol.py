@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-PROTOCOL_VERSION: Literal[1] = 1
+PROTOCOL_VERSION: Literal[2] = 2
 RoleType = Literal["ui", "eva", "vision"]
 InsightSeverity = Literal["low", "medium", "high"]
 
@@ -25,14 +25,14 @@ class ProtocolMessage(BaseModel):
 
 class HelloMessage(ProtocolMessage):
     type: Literal["hello"] = "hello"
-    v: Literal[1] = PROTOCOL_VERSION
+    v: Literal[2] = PROTOCOL_VERSION
     role: RoleType
     ts_ms: int = Field(ge=0)
 
 
 class ErrorMessage(ProtocolMessage):
     type: Literal["error"] = "error"
-    v: Literal[1] = PROTOCOL_VERSION
+    v: Literal[2] = PROTOCOL_VERSION
     frame_id: str | None = None
     code: str = Field(min_length=1)
     message: str = Field(min_length=1)
@@ -40,13 +40,13 @@ class ErrorMessage(ProtocolMessage):
 
 class CommandMessage(ProtocolMessage):
     type: Literal["command"] = "command"
-    v: Literal[1] = PROTOCOL_VERSION
+    v: Literal[2] = PROTOCOL_VERSION
     name: str = Field(min_length=1)
 
 
 class FrameBinaryMetaMessage(ProtocolMessage):
     type: Literal["frame_binary"] = "frame_binary"
-    v: Literal[1] = PROTOCOL_VERSION
+    v: Literal[2] = PROTOCOL_VERSION
     frame_id: str = Field(min_length=1)
     ts_ms: int = Field(ge=0)
     mime: Literal["image/jpeg"] = "image/jpeg"
@@ -61,36 +61,26 @@ class BinaryFrameEnvelope:
     image_payload: bytes
 
 
-class DetectionEntry(BaseModel):
-    cls: int = Field(ge=0)
-    name: str = Field(min_length=1)
-    conf: float = Field(ge=0, le=1)
-    box: tuple[float, float, float, float]
-    track_id: int | None = None
-
-
 class EventEntry(BaseModel):
     name: str = Field(min_length=1)
     ts_ms: int = Field(ge=0)
     severity: InsightSeverity
-    track_id: int | None = None
     data: dict[str, Any]
 
 
-class DetectionsMessage(ProtocolMessage):
-    type: Literal["detections"] = "detections"
-    v: Literal[1] = PROTOCOL_VERSION
+class FrameEventsMessage(ProtocolMessage):
+    type: Literal["frame_events"] = "frame_events"
+    v: Literal[2] = PROTOCOL_VERSION
     frame_id: str = Field(min_length=1)
     ts_ms: int = Field(ge=0)
     width: int = Field(ge=1)
     height: int = Field(ge=1)
-    model: str = Field(min_length=1)
-    detections: list[DetectionEntry]
-    events: list[EventEntry] | None = None
+    events: list[EventEntry]
 
 
 class InsightSummary(BaseModel):
     one_liner: str = Field(min_length=1)
+    tts_response: str = Field(min_length=1)
     what_changed: list[str]
     severity: InsightSeverity
     tags: list[str]
@@ -104,7 +94,7 @@ class InsightUsage(BaseModel):
 
 class InsightMessage(ProtocolMessage):
     type: Literal["insight"] = "insight"
-    v: Literal[1] = PROTOCOL_VERSION
+    v: Literal[2] = PROTOCOL_VERSION
     clip_id: str = Field(min_length=1)
     trigger_frame_id: str = Field(min_length=1)
     ts_ms: int = Field(ge=0)

@@ -28,12 +28,7 @@ DEFAULT_INSIGHT_ASSETS_MAX_CLIPS = 200
 DEFAULT_INSIGHT_ASSETS_MAX_AGE_HOURS = 24
 FRAME_ID_FILENAME_SANITIZE_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
 DEFAULT_SURPRISE_WEIGHTS = {
-    "abandoned_object": 5.0,
-    "near_collision": 5.0,
-    "roi_dwell": 3.0,
-    "line_cross": 3.0,
-    "sudden_motion": 1.5,
-    "track_stop": 1.5,
+    "scene_change": 5.0,
 }
 
 
@@ -168,6 +163,7 @@ class InsightBuffer:
 
         summary_payload = {
             "one_liner": insight.summary.one_liner,
+            "tts_response": insight.summary.tts_response,
             "what_changed": list(insight.summary.what_changed),
             "severity": insight.summary.severity,
             "tags": list(insight.summary.tags),

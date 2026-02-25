@@ -3,7 +3,7 @@
 This repository hosts four components:
 
 - `packages/eva` — TypeScript daemon (HTTP/WebSocket gateway)
-- `packages/eva/vision` — Python FastAPI daemon (vision inference service; formerly QuickVision)
+- `packages/eva/vision` — Python FastAPI daemon (**scene-change detector**)
 - `packages/eva/executive` — Node daemon (insight/text model service)
 - `packages/ui` — Vite + React web client
 
@@ -105,12 +105,10 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 90**.
+Implemented through **Iteration 127**.
 
 Key current behavior:
-- Insight protocol/UI is **silent + factual** (`one_liner`, `what_changed`, `tags`, severity/ids/usage).
-- Narration text is internal-only working memory (`wm_insight.narration`, executive single-writer path).
-- UI auto-speaks **chat replies** (`text_output.text`) via `/speech`.
-- Executive supports hot-toggleable local LLM trace logging (`packages/eva/llm_logs/config.json`) with redaction/truncation safeguards.
-
-> **Hard cutover note:** Long-term memory is now LanceDB. Existing JSON long-term memory is not used.
+- Vision emits per-frame `frame_events` (scene-change events + blob metadata).
+- Eva routes frame-scoped responses by `frame_id` and forwards events to Agent `/events`.
+- UI ACKs frames on `frame_events`, renders scene-change blob overlays, and maintains event feed.
+- Insights remain clip-based and optional, triggered from event surprise/cooldown rules.
