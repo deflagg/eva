@@ -18,6 +18,7 @@ const InsightConfigSchema = z.object({
   cooldownMs: z.number().int().nonnegative().default(5_000),
   maxFrames: z.number().int().min(1).max(HARD_MAX_FRAMES).default(HARD_MAX_FRAMES),
   maxBodyBytes: z.number().int().positive().default(8_388_608),
+  ttsStyle: z.enum(['clean', 'spicy']).default('clean'),
 });
 
 const AgentConfigSchema = z.object({
@@ -35,6 +36,7 @@ const AgentConfigSchema = z.object({
     cooldownMs: 5_000,
     maxFrames: HARD_MAX_FRAMES,
     maxBodyBytes: 8_388_608,
+    ttsStyle: 'clean',
   }),
   secretsFile: z.string().trim().min(1),
 });

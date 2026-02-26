@@ -256,6 +256,15 @@ function isUserChatReplyTextOutput(textOutput: TextOutputMessage): boolean {
   return !sessionId.startsWith('system-');
 }
 
+function shouldAutoSpeakTextOutput(textOutput: TextOutputMessage): boolean {
+  const triggerKind = getTextOutputTriggerKind(textOutput);
+  if (triggerKind === 'insight') {
+    return true;
+  }
+
+  return isUserChatReplyTextOutput(textOutput);
+}
+
 function decodeBase64ToArrayBuffer(base64: string): ArrayBuffer {
   const binary = window.atob(base64);
   const bytes = new Uint8Array(binary.length);
@@ -712,9 +721,9 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
       const triggerKind = getTextOutputTriggerKind(textOutput);
       const isInsightUtterance = triggerKind === 'insight';
-      const isUserChatReply = isUserChatReplyTextOutput(textOutput);
 
-      if (!isInsightUtterance && !isUserChatReply) {
+      // Iteration 136 guardrail: auto-speak only user chat replies or insight-triggered utterances.
+      if (!shouldAutoSpeakTextOutput(textOutput)) {
         return;
       }
 
@@ -967,7 +976,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const handleToggleAutoSpeak = React.useCallback(() => {
     setAutoSpeakEnabled((prev) => {
       const next = !prev;
-      appendLog('system', `Chat auto-speak ${next ? 'enabled' : 'disabled'}.`);
+      appendLog('system', `Auto-speak ${next ? 'enabled' : 'disabled'}.`);
       return next;
     });
   }, [appendLog]);
@@ -1243,7 +1252,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       <p>
         Eva HTTP base: <code>{evaHttpBaseUrl}</code> · Text endpoint: <code>{textEndpointUrl}</code> · Speech endpoint:{' '}
         <code>{speechEndpointUrl}</code> · Speech: <strong>{speechConfig.enabled ? 'enabled' : 'disabled'}</strong> ·
-        Chat Auto Speak: <strong>{autoSpeakEnabled ? 'on' : 'off'}</strong> · Audio unlock:{' '}
+        Auto Speak: <strong>{autoSpeakEnabled ? 'on' : 'off'}</strong> · Audio unlock:{' '}
         <strong style={{ color: audioLocked ? '#b91c1c' : '#166534' }}>{audioLocked ? 'required' : 'ready'}</strong>
       </p>
 
@@ -1268,7 +1277,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
           Trigger insight test
         </button>
         <button type="button" onClick={handleToggleAutoSpeak} disabled={!speechConfig.enabled}>
-          Chat Auto Speak: {autoSpeakEnabled ? 'on' : 'off'}
+          Auto Speak: {autoSpeakEnabled ? 'on' : 'off'}
         </button>
         <button type="button" onClick={() => void handleEnableAudio()} disabled={!speechConfig.enabled || speechBusy}>
           Enable Audio
@@ -1410,7 +1419,9 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
                 </strong>{' '}
                 · {latestInsight.summary.one_liner}
               </p>
-              {/* Iteration 78: no spoken-line rendering for insights. */}
+              <p style={{ marginTop: 0, marginBottom: 8, color: '#374151' }}>
+                <strong>Spoken line:</strong> {latestInsight.summary.tts_response}
+              </p>
               <p style={{ marginTop: 0, marginBottom: 8 }}>
                 Tags:{' '}
                 {latestInsight.summary.tags.length > 0 ? (

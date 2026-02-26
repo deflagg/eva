@@ -2154,7 +2154,7 @@ async function generateInsight(
   ];
 
   const context = {
-    systemPrompt: buildInsightSystemPrompt(config.insight.maxFrames),
+    systemPrompt: buildInsightSystemPrompt(config.insight.maxFrames, config.insight.ttsStyle),
     messages: [
       {
         role: 'user',

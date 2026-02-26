@@ -2,7 +2,7 @@
 
 React + Vite client for webcam streaming, scene-change visualization, and chat/speech controls.
 
-## Current behavior (Iteration 131)
+## Current behavior (Iteration 136)
 
 - Loads runtime config from:
   - `/config.local.json` first (if present)
@@ -23,13 +23,14 @@ React + Vite client for webcam streaming, scene-change visualization, and chat/s
   - shows recent event feed entries from `frame_events.events[]`
 - Insight panel:
   - shows latest `insight` summary/usage
-  - no spoken insight narration line
+  - shows `summary.tts_response` as a visible “Spoken line” secondary row
 - Chat + speech:
   - sends text via `POST /text`
   - renders `text_output` replies
   - auto-speak is limited to:
     - user chat replies, or
     - insight-triggered system utterances (`text_output.meta.trigger_kind === "insight"`)
+  - all other system `text_output` messages are intentionally not auto-spoken
   - raw frame/event traffic is not auto-spoken
   - manual speech test remains available
 

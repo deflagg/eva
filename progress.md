@@ -6443,3 +6443,238 @@
 ### Notes
 - This is a minimal guardrail change; no refactor of UI speech subsystem.
 - Iterations 128–131 are now complete.
+
+## Iteration 132 — Executive prompt hardening: no gender + higher opener variety + expanded person examples
+
+**Status:** ✅ Completed (2026-02-24)
+
+### Completed
+- Updated Executive insight system prompt in:
+  - `packages/eva/executive/src/prompts/insight.ts`
+- Kept hard constraints intact:
+  - model must call `submit_insight` exactly once
+  - no plain text outside the tool call
+- Reworked `tts_response` guidance with explicit hard rules:
+  - human reaction structure (quick opener + grounded hedged guess + follow-up question)
+  - no gendered language (`he/she/him/her/his/...`) and neutral alternatives only
+  - opener/question variety requirements to reduce repetitive phrasing
+- Added explicit false-alarm policy for no meaningful visual change:
+  - `one_liner`: "No significant change detected."
+  - `what_changed`: include "No meaningful visual change across frames."
+  - `severity`: `low`
+  - `tags`: include `no_change` (or `uncertain`)
+  - `tts_response`: rotate across natural false-alarm variants
+- Expanded style examples (tone-only) to include more person-focused reactions, plus objects/environment, animals, and blur/occlusion scenarios.
+
+### Files changed
+- `packages/eva/executive/src/prompts/insight.ts`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/executive && npm run build` ✅ passes.
+
+### Manual run instructions
+1. Start Vision, Eva, UI, and Executive with your normal local dev flow.
+2. Trigger multiple insights across varied scenes (person-visible, object movement, animal, blur/occlusion, and no-change clips).
+3. Confirm generated `summary.tts_response` behavior:
+   - no gendered pronouns/terms
+   - opener variety (not repeatedly the same opener)
+   - person-oriented phrasing appears when a person is visible
+   - no-change clips produce natural false-alarm style speech.
+
+### Notes
+- This iteration is prompt-only; runtime transport/relay behavior is unchanged.
+- Next iteration (133) introduces configurable `ttsStyle` (`clean|spicy`) and threads it into the prompt builder.
+
+## Iteration 133 — Executive configurable `ttsStyle` dial (`clean|spicy`)
+
+**Status:** ✅ Completed (2026-02-24)
+
+### Completed
+- Added new validated insight config option in:
+  - `packages/eva/executive/src/config.ts`
+  - `insight.ttsStyle: "clean" | "spicy"` with default `"clean"`.
+- Threaded style dial into the insight prompt call path:
+  - updated `buildInsightSystemPrompt(maxFrames, ttsStyle)` signature in:
+    - `packages/eva/executive/src/prompts/insight.ts`
+  - updated call site in:
+    - `packages/eva/executive/src/server.ts`
+- Added explicit prompt guidance for style mode behavior:
+  - `clean`: softened language (e.g., "what the heck", "what was that") and avoid profanity
+  - `spicy`: allows occasional mild profanity for emphasis, not constant
+  - both modes keep strict prohibition on slurs/harassment.
+- Updated Executive config/docs defaults to expose the new dial:
+  - `packages/eva/executive/agent.config.json`
+  - `packages/eva/executive/README.md`
+
+### Files changed
+- `packages/eva/executive/src/config.ts`
+- `packages/eva/executive/src/prompts/insight.ts`
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/agent.config.json`
+- `packages/eva/executive/README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/executive && npm run build` ✅ passes.
+
+### Manual run instructions
+1. Start Vision, Eva, UI, and Executive with your normal local dev flow.
+2. Keep `insight.ttsStyle` as `"clean"` and trigger several insights:
+   - confirm softened language (no profanity).
+3. Switch `insight.ttsStyle` to `"spicy"`, restart Executive, and trigger several insights:
+   - confirm occasional stronger reactions are allowed but not constant.
+4. In both modes, verify output still avoids slurs/harassment and follows existing safety constraints.
+
+### Notes
+- This iteration adds a style-intensity dial only; transport/schema behavior is unchanged.
+- Next iteration (134) validates and confirms `summary.tts_response` carriage across Vision → Eva → UI surfaces.
+
+## Iteration 134 — Ensure `summary.tts_response` is carried end-to-end and visible
+
+**Status:** ✅ Completed (2026-02-24)
+
+### Completed
+- Confirmed Vision protocol and insight packaging preserve `tts_response`:
+  - `packages/eva/vision/app/protocol.py` (`InsightSummary.tts_response` required)
+  - `packages/eva/vision/app/insights.py` (`summary_payload` includes `tts_response`)
+- Confirmed Eva protocol validation preserves `tts_response`:
+  - `packages/eva/src/protocol.ts` (`InsightSummarySchema.tts_response` required)
+- Confirmed UI protocol types preserve `tts_response`:
+  - `packages/ui/src/types.ts` (`InsightSummary.tts_response: string`)
+- Made `tts_response` explicitly visible in the UI "Latest insight" panel:
+  - `packages/ui/src/main.tsx`
+  - added secondary line: `Spoken line: <summary.tts_response>`
+
+### Files changed
+- `packages/ui/src/main.tsx`
+- `progress.md`
+
+### Verification
+- `cd packages/eva && npm run build` ✅ passes.
+- `cd packages/ui && npm run build` ✅ passes.
+- `cd packages/eva/vision && python3 -m compileall app` ✅ passes.
+
+### Manual run instructions
+1. Start Vision:
+   - `cd packages/eva/vision`
+   - `python -m app.run`
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Start UI:
+   - `cd packages/ui`
+   - `npm run dev`
+4. Trigger `insight_test` from UI (or any automatic insight trigger).
+5. Confirm UI receives an `insight` payload with `summary.tts_response` and displays it as:
+   - `Spoken line: ...` in the **Latest insight** panel.
+
+### Notes
+- Vision/Eva/UI `tts_response` schema plumbing was already in place from earlier iterations; this iteration verifies continuity and makes UI visibility explicit.
+- Next iteration (135) keeps Eva utterances insight-only and removes any remaining event-based speaking path if present.
+
+## Iteration 135 — Eva speaks only on Insight; no event-based speaking paths
+
+**Status:** ✅ Completed (2026-02-24)
+
+### Completed
+- Audited `packages/eva/src/server.ts` Vision inbound handling to confirm:
+  - raw `frame_events` path performs agent `/events` forwarding only
+  - no direct event-based `text_output` or `speech_output` emission remains
+- Confirmed/retained insight-only utterance behavior on inbound `insight`:
+  - emits one `text_output` using `summary.tts_response` (fallback to `summary.one_liner`)
+  - sets `session_id = "system-insights"`
+  - includes `meta.trigger_kind = "insight"` and `meta.trigger_id = clip_id`
+  - dedupes utterances by `clip_id`
+- Added explicit guardrail comment in `server.ts` documenting insight-only utterance policy.
+
+### Files changed
+- `packages/eva/src/server.ts`
+- `progress.md`
+
+### Verification
+- `cd packages/eva && npm run build` ✅ passes.
+
+### Manual run instructions
+1. Start Vision, Eva, and UI.
+2. Stream frames that produce raw `frame_events` but no insight trigger:
+   - confirm no assistant conversational utterance is emitted.
+3. Trigger an insight (`insight_test` or automatic insight):
+   - confirm exactly one assistant `text_output` utterance is emitted for that `clip_id`.
+4. Replay or re-deliver the same `clip_id` insight payload:
+   - confirm duplicate utterance is suppressed by `clip_id` dedupe.
+
+### Notes
+- Event forwarding to agent `/events` remains intact and unchanged.
+- Next iteration (136) tightens UI guardrail/docs so auto-speak only plays insight utterances (and user chat replies).
+
+## Iteration 136 — UI auto-speak guardrail (insight + chat replies only) + docs
+
+**Status:** ✅ Completed (2026-02-24)
+
+### Completed
+- Tightened/clarified UI auto-speak guardrail in:
+  - `packages/ui/src/main.tsx`
+  - added `shouldAutoSpeakTextOutput(...)` helper and routed auto-speak gating through it.
+  - guardrail remains explicit: auto-speak only when `text_output` is either:
+    - an insight-triggered utterance (`meta.trigger_kind === "insight"`), or
+    - a user chat reply (non-system chat reply path).
+- Added inline code comment in auto-speak path documenting the Iteration 136 guardrail intent.
+- Updated UI wording for clarity (no behavior change):
+  - "Chat Auto Speak" labels/log text renamed to "Auto Speak" to reflect both chat and insight utterances.
+- Updated UI docs:
+  - `packages/ui/README.md`
+  - bumped current behavior marker to Iteration 136
+  - documented visible insight spoken line (`summary.tts_response`)
+  - documented auto-speak rule and explicit suppression of other system `text_output` messages.
+
+### Files changed
+- `packages/ui/src/main.tsx`
+- `packages/ui/README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/ui && npm run build` ✅ passes.
+
+### Manual run instructions
+1. Start Vision, Eva, and UI.
+2. Enable Auto Speak in UI.
+3. Send a chat message via UI `POST /text` path and confirm chat reply auto-speaks.
+4. Trigger an insight utterance (`text_output.meta.trigger_kind === "insight"`) and confirm it auto-speaks.
+5. Emit non-chat/non-insight `text_output` (if available in your environment) and confirm UI does not auto-speak it.
+6. Confirm raw `frame_events` traffic is never auto-spoken.
+
+### Notes
+- This iteration is a UI guardrail/documentation hardening pass with minimal code movement.
+- Iterations 132–136 are now complete.
+
+## Iteration 137 — Executive prompt: direct-address people in view (speak *to* them, not *about* them)
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Updated Executive insight prompt guidance in:
+  - `packages/eva/executive/src/prompts/insight.ts`
+- Added explicit hard rules for person-present scenes:
+  - when one or more people are visible, use direct second-person address
+  - prefer `you` (single) and `you all`/`you two` (multiple) when natural
+  - avoid third-person phrasing like "their expression changed" while person is in view
+- Added explicit no-gender hard rule reinforcement for spoken output.
+- Updated scene-aware policy to require direct address when people are visible.
+- Rewrote people style examples to second-person phrasing and added a multi-person example.
+
+### Files changed
+- `packages/eva/executive/src/prompts/insight.ts`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/executive && npm run build` ✅ passes.
+
+### Manual run instructions
+1. Start Vision, Eva, UI, and Executive with your normal local flow.
+2. Stand in front of camera and trigger multiple insights.
+3. Confirm `summary.tts_response` addresses person(s) in view directly (e.g., "you ...") instead of third-person wording.
+4. Verify no gendered terms appear.
+
+### Notes
+- This is prompt-only behavior shaping; runtime transport/relay components are unchanged.

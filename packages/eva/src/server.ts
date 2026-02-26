@@ -198,6 +198,7 @@ interface TextOutputMessage {
 }
 
 // Legacy high-severity push-alert message types were removed in Iteration 130.
+// Iteration 135 keeps utterance emission insight-only (never directly from raw frame events).
 
 function setSpeechCorsHeaders(res: ServerResponse): void {
   res.setHeader('Access-Control-Allow-Origin', '*');

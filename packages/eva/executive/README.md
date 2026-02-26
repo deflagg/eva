@@ -78,11 +78,16 @@ Default config (`agent.config.json`):
   "insight": {
     "cooldownMs": 5000,
     "maxFrames": 6,
-    "maxBodyBytes": 8388608
+    "maxBodyBytes": 8388608,
+    "ttsStyle": "clean"
   },
   "secretsFile": "agent.secrets.local.json"
 }
 ```
+
+`insight.ttsStyle` controls reaction intensity for generated `summary.tts_response`:
+- `clean` (default): soft language (for example: "what the heck", "what was that")
+- `spicy`: allows occasional mild profanity for emphasis (never slurs/harassment)
 
 ## Secrets
 

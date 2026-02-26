@@ -12,7 +12,8 @@
   "insight": {
     "cooldownMs": 5000,
     "maxFrames": 6,
-    "maxBodyBytes": 8388608
+    "maxBodyBytes": 8388608,
+    "ttsStyle": "spicy"
   },
   "secretsFile": "agent.secrets.local.json"
 }
