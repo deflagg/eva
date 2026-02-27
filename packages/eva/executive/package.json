@@ -8,6 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check:respond-prompt": "tsx ./scripts/check-respond-prompt-regressions.ts",
+    "check:job-naming": "tsx ./scripts/check-job-naming-regressions.ts",
+    "check:respond-retrieval": "tsx ./scripts/check-respond-retrieval-regressions.ts",
     "mem:reset:working": "node ./scripts/reset-working.mjs",
     "mem:reset:session": "node ./scripts/reset-session.mjs",
     "mem:reset:all": "node ./scripts/reset-all.mjs"
@@ -17,6 +19,7 @@
     "@mariozechner/pi-ai": "^0.52.12",
     "@sinclair/typebox": "^0.34.41",
     "cosmiconfig": "^9.0.0",
+    "cron": "^4.3.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {

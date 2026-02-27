@@ -87,6 +87,7 @@ export function resolveMemoryPathsOrThrow() {
     cacheDir: path.join(memoryDir, 'cache'),
     toneCachePath: path.join(memoryDir, 'cache', 'personality_tone.json'),
     longTermMemoryDbDir: path.join(memoryDir, 'long_term_memory_db'),
+    workingMemoryAssetsDir: path.join(memoryDir, 'working_memory_assets'),
   };
 }
 

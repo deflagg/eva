@@ -15,5 +15,18 @@
     "maxBodyBytes": 8388608,
     "ttsStyle": "spicy"
   },
+  "jobs": {
+    "enabled": true,
+    "timezone": "UTC",
+    "compaction": {
+      "enabled": true,
+      "cron": "* * * * *",
+      "windowMs": 60000
+    },
+    "promotion": {
+      "enabled": true,
+      "cron": "15 3 * * *"
+    }
+  },
   "secretsFile": "agent.secrets.local.json"
 }

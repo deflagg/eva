@@ -1,5 +1,120 @@
 # Progress
 
+## Iteration 153 — Config schema for compaction split age (`jobs.compaction.windowMs`)
+
+**Status:** ✅ Completed (2026-02-26)
+
+### Completed
+- Updated `packages/eva/executive/src/config.ts` to add configurable compaction split window:
+  - `jobs.compaction.windowMs`
+  - default: `3600000` (60 minutes)
+  - validation bounds: min `300000` (5 minutes), max `604800000` (7 days)
+- Updated default job config objects so parsed runtime config always exposes `jobs.compaction.windowMs`.
+- Updated committed config `packages/eva/executive/agent.config.json` to include explicit:
+  - `"jobs.compaction.windowMs": 3600000`
+
+### Verification
+- `cd packages/eva/executive && npm run build` passes.
+
+### Manual test steps
+1. Start with config omitting `jobs.compaction.windowMs`; verify runtime still loads with default `3600000`.
+2. Set invalid values (e.g., `0`, `299999`, non-integer, or very large > `604800000`) and verify clear zod validation errors.
+
+### Notes
+- Iteration 153 intentionally changes config schema only.
+- Compaction runtime still uses the existing hardcoded split constant until Iteration 154.
+
+## Iteration 154 — Wire compaction cutoff to configured split window
+
+**Status:** ✅ Completed (2026-02-26)
+
+### Completed
+- Updated compaction runtime in `packages/eva/executive/src/server.ts` to use
+  `config.jobs.compaction.windowMs` instead of a hardcoded 60-minute constant.
+- Extended `runCompactionJob(...)` parameters with `compactionWindowMs` and changed cutoff calculation to:
+  - `cutoffMs = nowMs - compactionWindowMs`
+- Wired `runCompactionJobAt(...)` to pass the configured value:
+  - `compactionWindowMs: config.jobs.compaction.windowMs`
+- Added compaction start log with effective values for observability:
+  - `run_at_ms`, `window_ms`, `cutoff_ms`
+
+### Verification
+- `cd packages/eva/executive && npm run build` passes.
+
+### Manual test steps
+1. Keep default config (`windowMs: 3600000`) and run:
+   - `POST /jobs/run` with `{ "job": "compaction" }`
+   - verify behavior matches prior 60-minute split.
+2. Set a custom value (for example `windowMs: 1800000`) in local config and rerun compaction.
+3. Confirm logs show updated `window_ms` and derived `cutoff_ms`.
+
+### Notes
+- `now_ms` override behavior is unchanged; this iteration only changes split-window source.
+
+## Iteration 155 — Expose and document effective compaction window
+
+**Status:** ✅ Completed (2026-02-26)
+
+### Completed
+- Updated `/health` jobs payload in `packages/eva/executive/src/server.ts` to expose:
+  - `jobs.compaction.window_ms` (from `config.jobs.compaction.windowMs`).
+- Updated `packages/eva/executive/README.md` to document configurable split age:
+  - added `jobs.compaction.windowMs` to default config example
+  - documented cutoff semantics (`cutoff_ms = now_ms - windowMs`)
+  - clarified default (`3600000`)
+  - added non-default scheduler example (`windowMs: 1800000`)
+- Updated operational checklist expectations in README:
+  - config shape includes `jobs.compaction.windowMs`
+  - `/health` expectations include `jobs.compaction.window_ms`
+  - scheduler observability section includes `compaction.window_ms`.
+
+### Verification
+- `cd packages/eva/executive && npm run build` passes.
+
+### Manual test steps
+1. Start Executive and run:
+   - `curl -sS http://127.0.0.1:8791/health`
+2. Confirm JSON includes:
+   - `jobs.compaction.window_ms`
+3. Set local override for `jobs.compaction.windowMs` and restart.
+4. Re-run `/health` and verify reported `window_ms` matches configured value.
+
+### Notes
+- Iteration 155 is observability + documentation only; compaction runtime behavior was wired in Iteration 154.
+
+## Iteration 156 — Regression guard for configurable compaction split age
+
+**Status:** ✅ Completed (2026-02-26)
+
+### Completed
+- Extended regression script `packages/eva/executive/scripts/check-job-naming-regressions.ts` to cover compaction split-age guardrails.
+- Added assertions for config surface:
+  - `jobs.compaction.windowMs` exists and has a default
+  - min/max guardrail constants exist for compaction window validation
+- Added assertions for server surface:
+  - compaction runtime uses `config.jobs.compaction.windowMs`
+  - `/health` exposes `jobs.compaction.window_ms`
+  - hardcoded `WORKING_MEMORY_WINDOW_MS` constant is absent
+- Added assertions for docs surface:
+  - README documents `jobs.compaction.windowMs`
+  - README documents `/health` key `jobs.compaction.window_ms`
+- Updated script PASS message to reflect expanded scope:
+  - `PASS: job naming + compaction window regression checks`
+
+### Verification
+- `cd packages/eva/executive && npm run build && npm run check:job-naming` passes.
+
+### Manual test steps
+1. Run:
+   - `cd packages/eva/executive`
+   - `npm run check:job-naming`
+2. Temporarily remove one required surface (for example README mention of `jobs.compaction.windowMs`) and rerun.
+3. Confirm regression script fails with a clear assertion error, then revert and confirm PASS.
+
+### Notes
+- Reused existing `check:job-naming` script instead of creating a new npm command, keeping checks centralized.
+
+
 ## Iteration 0 — Scaffold + protocol docs + build scripts
 
 **Status:** ✅ Completed (2026-02-15)
@@ -6678,3 +6793,1005 @@
 
 ### Notes
 - This is prompt-only behavior shaping; runtime transport/relay components are unchanged.
+
+## Iteration 137 (plan 137–144 track) — Add in-daemon cron scheduler plumbing (no functional job changes)
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Added scheduler dependency to Executive:
+  - `packages/eva/executive/package.json`
+  - added `cron` runtime dependency.
+- Extended Executive config schema/defaults in `packages/eva/executive/src/config.ts` with new jobs block:
+  - `jobs.enabled` (default `false`)
+  - `jobs.timezone` (default `"UTC"`)
+  - `jobs.hourly.enabled` + `jobs.hourly.cron` (default `"0 * * * *"`)
+  - `jobs.daily.enabled` + `jobs.daily.cron` (default `"15 3 * * *"`)
+- Updated committed defaults in `packages/eva/executive/agent.config.json`:
+  - added `jobs` block with `enabled: false`.
+- Added new scheduler module:
+  - `packages/eva/executive/src/jobs/scheduler.ts`
+  - exports `startScheduler({ config, runHourly, runDaily })`
+  - uses `CronJob` with `timeZone: config.jobs.timezone`
+  - includes per-job in-flight overlap guards (skip overlapping ticks with one warning while in-flight).
+- Wired scheduler into Executive startup in `packages/eva/executive/src/server.ts`:
+  - added shared internal queued job runners:
+    - `runHourlyMemoryJobAt(...)`
+    - `runDailyMemoryJobAt(...)`
+  - endpoints `/jobs/hourly` and `/jobs/daily` now use those same internal runners
+  - when `config.jobs.enabled` is true, `startScheduler(...)` is started with callbacks that call the same internal queued runners
+  - scheduled runs use the existing `workingMemoryWriteQueue` serialization path (same queue used by endpoints)
+  - scheduler stop hook added on server close.
+
+### Files changed
+- `packages/eva/executive/package.json`
+- `packages/eva/executive/package-lock.json`
+- `packages/eva/executive/src/config.ts`
+- `packages/eva/executive/agent.config.json`
+- `packages/eva/executive/src/jobs/scheduler.ts` (new)
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+
+### Manual test steps
+1. Fast scheduler check (hourly every minute):
+   - temporary local config set:
+     - `jobs.enabled = true`
+     - `jobs.hourly.cron = "*/1 * * * *"`
+   - start Executive (`npm run dev`)
+   - observed logs:
+     - `scheduler: running hourly job...`
+     - `scheduler: hourly job completed ...`
+2. Disabled-path check:
+   - temporary local config set `jobs.enabled = false`
+   - start Executive (`npm run dev`)
+   - observed normal startup logs and no scheduler crash.
+
+### Notes
+- This iteration is plumbing-only: hourly/daily job algorithms are unchanged.
+- Next iteration in this track is Iteration 138 (`POST /jobs/run` dispatcher + wrappers).
+
+## Iteration 138 (plan 137–144 track) — Add generic job runner endpoint (`POST /jobs/run`) + make scheduler use dispatcher internally
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Added run-job request schema in `packages/eva/executive/src/server.ts`:
+  - `RunJobRequestSchema` with:
+    - `job: "hourly" | "daily"`
+    - `now_ms?: number`
+- Added internal dispatcher in `server.ts`:
+  - `runJob(jobName, runAtMs)`
+  - dispatches to shared queued runners:
+    - hourly -> `runHourlyMemoryJobAt(...)`
+    - daily -> `runDailyMemoryJobAt(...)`
+  - both continue running under `workingMemoryWriteQueue.run(...)` via those queued runners.
+- Added shared job-response builders in `server.ts` so all entry points return consistent payload shapes.
+- Added new endpoint:
+  - `POST /jobs/run`
+  - validates request via `RunJobRequestSchema`
+  - executes internal dispatcher
+  - returns same per-job payload shape as existing hourly/daily endpoints.
+- Kept legacy endpoints as wrappers (non-breaking):
+  - `POST /jobs/hourly`
+  - `POST /jobs/daily`
+  - both now call `runJob(...)` and return:
+    - same payload as `/jobs/run`
+    - plus `{ deprecated: true, preferred: "/jobs/run" }`
+- Updated scheduler callbacks to use dispatcher directly (not HTTP):
+  - scheduler hourly callback -> `runJob('hourly', Date.now())`
+  - scheduler daily callback -> `runJob('daily', Date.now())`
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+
+### Manual test steps
+1. Start Executive and run dispatcher endpoint:
+   - `curl -sS -X POST http://127.0.0.1:8791/jobs/run -H 'content-type: application/json' -d '{"job":"hourly"}'`
+   - `curl -sS -X POST http://127.0.0.1:8791/jobs/run -H 'content-type: application/json' -d '{"job":"daily"}'`
+2. Verify legacy wrappers still work and mark deprecation:
+   - `curl -sS -X POST http://127.0.0.1:8791/jobs/hourly -H 'content-type: application/json' -d '{"now_ms":1772080000000}'`
+   - `curl -sS -X POST http://127.0.0.1:8791/jobs/daily -H 'content-type: application/json' -d '{"now_ms":1772080000000}'`
+   - confirm wrapper responses include:
+     - `deprecated: true`
+     - `preferred: "/jobs/run"`
+
+### Notes
+- Scheduler and manual admin triggers now share one internal dispatcher path.
+- Next iteration in this track is Iteration 139 (hourly LLM compaction + deterministic fallback).
+
+## Iteration 139 (plan 137–144 track) — Hourly job: LLM-based compaction (working -> short-term SQLite) with deterministic fallback
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Added new hourly compaction tool schema:
+  - `packages/eva/executive/src/tools/hourly_compaction.ts`
+  - tool name: `commit_hourly_compaction`
+  - output: `{ bullets: string[] }`
+  - enforced constraints:
+    - 3-7 bullets
+    - each bullet max 220 chars
+- Added new hourly compaction prompt builder:
+  - `packages/eva/executive/src/prompts/hourly_compaction.ts`
+  - accepts compact rendered older working-memory records
+  - prioritizes:
+    - stable preferences / trait signals
+    - decisions / plans / open loops
+    - notable insight activity
+    - unusual high-surprise chat outputs
+- Wired LLM compaction into hourly job in `packages/eva/executive/src/server.ts`:
+  - added compact stable working-memory render path for model input
+  - added model-call compaction flow using `complete(...)` + `validateToolCall(...)`
+  - added post-validation/sanitization for bullet quality (trim, dedupe, telemetry-like output rejection)
+  - on model-call/tool-output failure, hourly job now falls back to existing `summarizeEntriesToBullets(...)`
+- Added concise hourly compaction logging in `server.ts`:
+  - model path success line with bullet count
+  - fallback path line with reason
+
+### Files changed
+- `packages/eva/executive/src/tools/hourly_compaction.ts` (new)
+- `packages/eva/executive/src/prompts/hourly_compaction.ts` (new)
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+
+### Manual test steps
+1. Seeded older working-memory entries and ran:
+   - `POST /jobs/run {"job":"hourly"}`
+   - confirmed short-term DB received higher-quality compaction bullets (for example preference + continuity-oriented bullets).
+2. Broke model call path by temporarily using a bad API key and ran:
+   - `POST /jobs/run {"job":"hourly"}`
+   - confirmed hourly job still succeeded, wrote summary rows, and trimmed working log.
+   - confirmed fallback warning log emitted with reason.
+
+### Notes
+- Hourly compaction now prefers model summarization but remains deterministic under failure via heuristic fallback.
+- Next iteration in this track is Iteration 140 (semantic SQLite long-term characteristics DB).
+
+## Iteration 140 (plan 137–144 track) — Add long-term semantic SQLite DB (characteristics live here)
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Added new semantic DB module:
+  - `packages/eva/executive/src/memcontext/long_term/semantic_db.ts`
+- Implemented required exported functions:
+  - `initializeSemanticDb(dbPath)`
+  - `upsertSemanticItems(dbPath, items)`
+  - `selectTopSemanticItems(dbPath, limit, orderBy)`
+- Implemented semantic SQLite schema (v1) in `semantic_db.ts`:
+  - table: `semantic_items`
+  - columns:
+    - `id TEXT PRIMARY KEY`
+    - `kind TEXT`
+    - `text TEXT`
+    - `confidence REAL`
+    - `support_count INTEGER`
+    - `first_seen_ms INTEGER`
+    - `last_seen_ms INTEGER`
+    - `source_summary_ids_json TEXT`
+    - `updated_at_ms INTEGER`
+  - plus supporting indexes for recent/support query paths.
+- Added startup wiring in `packages/eva/executive/src/server.ts`:
+  - semantic DB path resolved to:
+    - `packages/eva/memory/long_term_memory_db/semantic_memory.db`
+  - semantic DB initialized at startup alongside short-term DB init.
+- Updated health response in `server.ts`:
+  - `GET /health` now exposes `memory.semanticMemoryDbPath`.
+- Added startup observability log:
+  - `semantic memory db: <path>`.
+
+### Files changed
+- `packages/eva/executive/src/memcontext/long_term/semantic_db.ts` (new)
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+
+### Manual test steps
+1. Start Executive.
+2. Check health payload and semantic DB path:
+   - `curl -s http://127.0.0.1:8791/health`
+   - confirm `memory.semanticMemoryDbPath` is present.
+3. Verify file exists on disk after startup:
+   - `packages/eva/memory/long_term_memory_db/semantic_memory.db`.
+
+### Notes
+- This iteration introduces semantic DB plumbing only; daily promotion into semantic DB is next in Iteration 141.
+
+## Iteration 141 (plan 137–144 track) — Daily job: write characteristics to semantic SQLite; experiences remain in LanceDB
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Updated daily promotion logic in `packages/eva/executive/src/server.ts`:
+  - kept experience upsert path in LanceDB (`long_term_experiences`)
+  - stopped writing new personality rows to LanceDB (`long_term_personality` remains intact but unused for new writes)
+  - added semantic promotion path using existing heuristic classifier:
+    - gate: `shouldPromoteToPersonality(...)`
+    - kind mapping:
+      - `preference` when summary text includes `prefer*`
+      - otherwise `trait`
+  - semantic rows are now upserted via:
+    - `upsertSemanticItems(semanticMemoryDbPath, items)`
+- Added semantic-item construction helpers in `server.ts`:
+  - stable semantic item id hash (`sha256(kind|normalized_text)`)
+  - per-run dedupe/aggregation by id with support-count/source-summary rollup.
+- Added semantic core-personality cache generation:
+  - replaced vector-derived personality cache writer with semantic-derived writer
+  - `core_personality.json` now comes from semantic DB top recent rows and includes:
+    - `kind`
+    - `confidence`
+    - `support_count`
+    - `text`
+- Added semantic DB counting helper in:
+  - `packages/eva/executive/src/memcontext/long_term/semantic_db.ts`
+  - `countSemanticItems(dbPath)`
+  - used by daily job for cache metadata + result totals.
+- Daily job response payload now includes:
+  - `semantic_memory_db` path.
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/src/memcontext/long_term/semantic_db.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+
+### Manual test steps
+1. Ensured short-term DB had rows (hourly compaction already populated rows).
+2. Ran daily job through dispatcher with deterministic `now_ms` (next-day window):
+   - `POST /jobs/run {"job":"daily","now_ms":<tomorrow_ms>}`
+3. Confirmed outputs:
+   - `semantic_memory.db` contains new rows (`semantic_items_count > 0`)
+   - `core_personality.json` updated from semantic rows and includes required fields (`kind`, `confidence`, `support_count`, `text`)
+   - LanceDB experiences still upserted (`experience_upsert_count > 0`).
+
+### Notes
+- Personality characteristics now live in semantic SQLite for precision memory.
+- LanceDB personality table is retained for compatibility, but daily writes no longer target it.
+- Next iteration in this track is Iteration 142 (`/respond` long-term memory prompt injection: traits + relevant experiences).
+
+## Iteration 142 (plan 137–144 track) — `/respond`: inject long-term memory into system prompt (traits + relevant experiences)
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Added long-term respond memory-context builder module:
+  - `packages/eva/executive/src/memcontext/respond_long_term_context.ts`
+- Implemented:
+  - `buildRespondLongTermContext({ semanticDbPath, lancedbDir, userText, tokenBudget })`
+- Builder behavior:
+  - constructs `Traits (long-term):` block from semantic SQLite (`semantic_items`)
+    - top compact items (recent/high-support ordering)
+  - constructs `Relevant experiences (retrieved):` block from LanceDB similarity retrieval (`long_term_experiences`)
+  - enforces bounded output using approx token budgeting (`char/4` heuristic)
+  - degrades gracefully with fallback lines when semantic/LanceDB retrieval is unavailable.
+- Updated respond prompt template in:
+  - `packages/eva/executive/src/prompts/respond.ts`
+- Added optional prompt input:
+  - `memoryContext?: string`
+- Added system prompt section:
+  - `Long-term memory context (reference only):`
+  - includes explicit rule that memory may be stale/fallible and must never override `CURRENT_USER_REQUEST`.
+- Wired memory-context builder into `/respond` generation path in:
+  - `packages/eva/executive/src/server.ts`
+  - `generateRespond(...)` now builds long-term memory context per request and passes it into `buildRespondSystemPrompt(...)`.
+- Updated docs/checks:
+  - `packages/eva/executive/README.md`
+    - replaced old checklist item that asserted no derived memory section
+    - added checklist expectations that long-term memory section exists and is bounded
+    - updated behavior docs for semantic traits + relevant experiences injection
+  - `packages/eva/executive/scripts/check-respond-prompt-regressions.ts`
+    - added assertions ensuring long-term memory header/sections + fallible-memory/CURRENT_USER_REQUEST rules are present.
+
+### Files changed
+- `packages/eva/executive/src/memcontext/respond_long_term_context.ts` (new)
+- `packages/eva/executive/src/prompts/respond.ts`
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/README.md`
+- `packages/eva/executive/scripts/check-respond-prompt-regressions.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+- Prompt regression check passes:
+  - `cd packages/eva/executive && npm run check:respond-prompt`
+
+### Manual test steps
+1. Ensured long-term stores were seeded (daily job already populated semantic DB + LanceDB experiences).
+2. Called `/respond` with a memory-relevant question:
+   - `POST /respond {"text":"What should I focus on next?","session_id":"iter142-check"}`
+3. Inspected latest respond request trace (`packages/eva/llm_logs/openai-requests.log`) and confirmed:
+   - system prompt contains `Long-term memory context (reference only):`
+   - memory section includes both:
+     - `Traits (long-term):`
+     - `Relevant experiences (retrieved):`
+   - stale/fallible-memory + `CURRENT_USER_REQUEST` priority rules are present
+   - prompt remains bounded/compact (no unbounded memory dump).
+
+### Notes
+- `/respond` now blends replay context with bounded long-term memory injection in the system prompt.
+- Next iteration in this track is Iteration 143 (scheduler default path + `/health` job observability).
+
+## Iteration 143 (plan 137–144 track) — Make scheduler the default path; keep endpoints as admin tools + docs alignment
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Added scheduler observability to `GET /health` in:
+  - `packages/eva/executive/src/server.ts`
+- Health payload now includes `jobs` block with:
+  - `jobs.enabled`
+  - `jobs.timezone`
+  - `jobs.hourly.enabled`, `jobs.hourly.cron`
+  - `jobs.daily.enabled`, `jobs.daily.cron`
+  - per-job last-run runtime state (in-memory):
+    - `last_requested_run_at_ms`
+    - `last_started_at_ms`
+    - `last_completed_at_ms`
+    - `last_failed_at_ms`
+    - `last_error`
+- Added in-memory job runtime state tracking in `server.ts`:
+  - state kept per job (`hourly`, `daily`)
+  - updated by shared internal dispatcher `runJob(...)`
+  - scheduler path and manual admin endpoints now both flow through the same state updates.
+- Docs alignment in `packages/eva/executive/README.md`:
+  - updated to Iteration 143 behavior marker
+  - added scheduler enablement section with `agent.config.local.json` example (`jobs.enabled=true`, timezone, cron values)
+  - documented that scheduler is preferred runtime path
+  - documented manual admin trigger preference:
+    - `POST /jobs/run` (preferred)
+    - `/jobs/hourly` and `/jobs/daily` as deprecated wrappers
+  - documented `/health` scheduler observability fields.
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/README.md`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva && npm run build`
+
+### Manual test steps
+1. Start Executive and fetch initial health:
+   - `curl -s http://127.0.0.1:8791/health`
+   - confirm `jobs.enabled`, `jobs.timezone`, and cron strings are present.
+2. Trigger a manual job run:
+   - `curl -sS -X POST http://127.0.0.1:8791/jobs/run -H 'content-type: application/json' -d '{"job":"hourly"}'`
+3. Fetch `/health` again and confirm `jobs.hourly.last_*` timestamps are populated.
+
+### Notes
+- Scheduler remains opt-in (`jobs.enabled=false` in committed defaults), but runtime/docs now treat scheduler as the default operational path once enabled.
+- Next iteration in this track is Iteration 144 (optional hard cutover removal of legacy `/jobs/hourly` + `/jobs/daily`).
+
+## Iteration 144 (plan 137–144 track) — Cleanup: remove legacy `/jobs/hourly` and `/jobs/daily` endpoints (hard cutover)
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Removed legacy endpoint handlers from:
+  - `packages/eva/executive/src/server.ts`
+  - removed:
+    - `POST /jobs/hourly`
+    - `POST /jobs/daily`
+- Kept manual job triggering via `POST /jobs/run` as the only jobs HTTP trigger.
+- Removed obsolete wrapper parsing helpers and schema remnants from `server.ts`:
+  - removed optional-body parser usage for legacy wrappers
+  - removed wrapper-specific request schema/types/parsers.
+- Updated startup logs in `server.ts`:
+  - removed legacy endpoint log lines
+  - jobs startup log now points only to `POST /jobs/run`.
+- Updated docs/curl examples in:
+  - `packages/eva/executive/README.md`
+  - removed wrapper usage references and examples
+  - manual trigger docs now use only `POST /jobs/run`.
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/README.md`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva/executive && npm run check:respond-prompt`
+  - `cd packages/eva && npm run build`
+
+### Manual test steps
+1. Start Executive.
+2. Confirm manual trigger still works:
+   - `curl -sS -X POST http://127.0.0.1:8791/jobs/run -H 'content-type: application/json' -d '{"job":"hourly"}'`
+3. Confirm removed endpoints are gone:
+   - `POST /jobs/hourly` returns `404 NOT_FOUND`
+   - `POST /jobs/daily` returns `404 NOT_FOUND`
+4. Confirm docs now reference only `POST /jobs/run` for manual job execution.
+
+### Notes
+- 137–144 track is now complete with hard cutover to scheduler + `/jobs/run` admin trigger path.
+
+## Iteration 145 (plan 145–152 track) — Introduce canonical internal job names (no external break yet)
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Updated `packages/eva/executive/src/server.ts` with canonical internal job vocabulary:
+  - added canonical job names: `compaction | promotion`
+  - added transition mapping helpers:
+    - legacy -> canonical: `hourly -> compaction`, `daily -> promotion`
+    - canonical -> legacy: `compaction -> hourly`, `promotion -> daily`
+- Migrated internal dispatcher typing/state to canonical names:
+  - `RunJobName` now uses canonical names internally
+  - `RunJobResult` now reports canonical job names internally
+  - `jobsRuntimeState` keys now use `compaction`/`promotion`
+- Kept external behavior unchanged for this iteration:
+  - `/jobs/run` request schema remains `{"job":"hourly"|"daily"}`
+  - `/jobs/run` response payload still reports legacy `job` values (`hourly`/`daily`)
+  - `/health` jobs surface remains `jobs.hourly` / `jobs.daily`
+  - existing failure code surface remains `HOURLY_JOB_FAILED` / `DAILY_JOB_FAILED`
+- Updated scheduler callback wiring to use canonical dispatcher names internally:
+  - scheduler `runHourly` now dispatches canonical `compaction`
+  - scheduler `runDaily` now dispatches canonical `promotion`
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Manual `/jobs/run` compatibility check (no external break):
+  1. Started Executive on a dedicated test port (`8891`) using built output:
+     - `cd packages/eva/executive`
+     - `node --input-type=module -e "import { loadAgentConfig, loadAgentSecrets } from './dist/config.js'; import { startAgentServer } from './dist/server.js'; const config = loadAgentConfig(); config.server.port = 8891; const secrets = loadAgentSecrets(config.secretsFilePath); startAgentServer({ config, secrets });"`
+  2. Ran legacy/manual trigger payloads:
+     - `POST /jobs/run {"job":"hourly","now_ms":0}` -> success, response `job:"hourly"`
+     - `POST /jobs/run {"job":"daily","now_ms":0}` -> success, response `job:"daily"`
+  3. Confirmed `/health` still exposes legacy surface and runtime state updates under:
+     - `jobs.hourly.last_*`
+     - `jobs.daily.last_*`
+
+### Notes
+- This iteration introduces canonical names only at internal dispatcher/runtime boundaries.
+- Public API/config vocabulary is intentionally unchanged here; external migration starts in subsequent iterations.
+
+## Iteration 146 (plan 145–152 track) — Rename compaction prompt/tool modules to purpose-based names
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Added purpose-based compaction prompt/tool modules:
+  - `packages/eva/executive/src/prompts/working_memory_compaction.ts`
+  - `packages/eva/executive/src/tools/working_memory_compaction.ts`
+- Moved existing compaction prompt/tool logic into the new modules with purpose-based symbols:
+  - prompt builders:
+    - `buildWorkingMemoryCompactionSystemPrompt(...)`
+    - `buildWorkingMemoryCompactionUserPrompt(...)`
+  - tool contract:
+    - `WORKING_MEMORY_COMPACTION_TOOL_NAME = "commit_working_memory_compaction"`
+    - `WORKING_MEMORY_COMPACTION_TOOL`
+    - `WorkingMemoryCompactionPayload`
+- Updated server imports/usages to the new purpose-based module paths in:
+  - `packages/eva/executive/src/server.ts`
+- Kept one-iteration transition shims to reduce migration risk:
+  - `packages/eva/executive/src/prompts/hourly_compaction.ts`
+  - `packages/eva/executive/src/tools/hourly_compaction.ts`
+  - both now thin deprecated re-exports to the new purpose-based modules.
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/src/prompts/working_memory_compaction.ts` (new)
+- `packages/eva/executive/src/tools/working_memory_compaction.ts` (new)
+- `packages/eva/executive/src/prompts/hourly_compaction.ts` (transition shim)
+- `packages/eva/executive/src/tools/hourly_compaction.ts` (transition shim)
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Manual compaction-path check (`/jobs/run` compatibility retained):
+  1. Started Executive on dedicated test port 8891 from built output.
+  2. Triggered compaction path through existing external request shape:
+     - `POST /jobs/run {"job":"hourly","now_ms":<now+2h>}`
+  3. Confirmed successful run and summary output:
+     - response included `job:"hourly"`
+     - `source_entry_count: 2`
+     - `summary_count: 3`
+
+### Notes
+- This iteration only migrates prompt/tool module naming and usage.
+- External `/jobs/run` and `/health` vocabulary intentionally remains legacy (`hourly`/`daily`) at this stage.
+
+## Iteration 147 (plan 145–152 track) — Rename internal compaction/promotion function and type names
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Updated internal job result/type naming in `packages/eva/executive/src/server.ts`:
+  - `HourlySummaryResult` -> `CompactionJobResult`
+  - `DailySummaryResult` -> `PromotionJobResult`
+- Renamed internal job runner function names:
+  - `runHourlyMemoryJob(...)` -> `runCompactionJob(...)`
+  - `runDailyMemoryJob(...)` -> `runPromotionJob(...)`
+- Renamed related internal helper/function names to remove schedule-coupled wording:
+  - `runHourlyMemoryJobAt(...)` -> `runCompactionJobAt(...)`
+  - `runDailyMemoryJobAt(...)` -> `runPromotionJobAt(...)`
+  - `buildHourlyJobResponsePayload(...)` -> `buildCompactionJobResponsePayload(...)`
+  - `buildDailyJobResponsePayload(...)` -> `buildPromotionJobResponsePayload(...)`
+  - `insertHourlySummaries(...)` -> `insertCompactionSummaries(...)`
+  - `renderWorkingMemoryEntriesForHourlyCompaction(...)` -> `renderWorkingMemoryEntriesForCompaction(...)`
+  - `normalizeHourlyCompactionBullets(...)` -> `normalizeCompactionBullets(...)`
+  - `buildHourlyCompactionRecordDetail(...)` -> `buildCompactionRecordDetail(...)`
+  - `buildSemanticItemsFromDailyRows(...)` -> `buildSemanticItemsFromPromotionRows(...)`
+- Renamed compaction prompt/summary constants to canonical purpose naming:
+  - `HOURLY_SUMMARY_*` -> `COMPACTION_SUMMARY_*`
+  - `HOURLY_COMPACTION_PROMPT_*` -> `COMPACTION_PROMPT_*`
+- Updated runtime log wording to canonical job terminology where internal behavior is described:
+  - compaction model/fallback logs now use `compaction`
+  - promotion pipeline logs now use `promotion`
+  - scheduler completion logs now use `compaction job completed` / `promotion job completed`
+  - manual jobs endpoint startup log now documents canonical internal dispatcher wording.
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Manual run checks (both jobs):
+  1. Started Executive (`cd packages/eva/executive && npm run dev`).
+  2. Ran manual dispatcher with unchanged external request values:
+     - `POST /jobs/run {"job":"hourly","now_ms":0}` -> success, response `job:"hourly"`
+     - `POST /jobs/run {"job":"daily","now_ms":0}` -> success, response `job:"daily"`
+  3. Confirmed behavior unchanged and canonical log wording appears in runtime logs, e.g.:
+     - `promotion job wrote long-term rows: ...`
+
+### Notes
+- This iteration is internal naming cleanup only.
+- External API/config shape remains unchanged in this step (`hourly`/`daily` still accepted externally).
+
+## Iteration 148 (plan 145–152 track) — Config schema migration to `jobs.compaction` / `jobs.promotion`
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Migrated Executive config schema in `packages/eva/executive/src/config.ts` to canonical job keys:
+  - `jobs.compaction`
+  - `jobs.promotion`
+- Added temporary legacy-config compatibility loader in `config.ts`:
+  - accepts legacy keys for this transition iteration:
+    - `jobs.hourly` -> `jobs.compaction` (when canonical key is absent)
+    - `jobs.daily` -> `jobs.promotion` (when canonical key is absent)
+  - emits clear deprecation warnings when legacy keys are present:
+    - `jobs.hourly is deprecated; use jobs.compaction`
+    - `jobs.daily is deprecated; use jobs.promotion`
+- Updated committed config file to canonical keys:
+  - `packages/eva/executive/agent.config.json`
+- Updated scheduler internals to consume canonical config keys:
+  - `packages/eva/executive/src/jobs/scheduler.ts`
+  - now schedules from `config.jobs.compaction` and `config.jobs.promotion`
+- Updated server observability surfaces to canonical config naming:
+  - `GET /health` now reports:
+    - `jobs.compaction`
+    - `jobs.promotion`
+  - scheduler startup log now reports:
+    - `compaction.cron=...`
+    - `promotion.cron=...`
+
+### Files changed
+- `packages/eva/executive/src/config.ts`
+- `packages/eva/executive/src/jobs/scheduler.ts`
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/agent.config.json`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Manual checks:
+  1. **Canonical config start path** (default local config without legacy job keys):
+     - `cd packages/eva/executive && npm run dev`
+     - success; startup log shows canonical scheduler keys:
+       - `compaction.cron="0 * * * *"`
+       - `promotion.cron="15 3 * * *"`
+     - `/health` confirms canonical jobs shape:
+       - `jobs.compaction`
+       - `jobs.promotion`
+  2. **Legacy key compatibility path** (temporary local config using `jobs.hourly/jobs.daily`):
+     - start succeeds
+     - deprecation warnings emitted:
+       - `jobs.hourly is deprecated; use jobs.compaction`
+       - `jobs.daily is deprecated; use jobs.promotion`
+     - `/health` still reports canonical jobs shape (`compaction`/`promotion`).
+
+### Notes
+- External `/jobs/run` request values are intentionally unchanged in this iteration (`hourly|daily`) and will migrate in a later iteration per plan.
+
+## Iteration 149 (plan 145–152 track) — `/jobs/run` request migration to canonical job values
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Updated `/jobs/run` request parsing in `packages/eva/executive/src/server.ts` to canonical vocabulary:
+  - canonical request values now accepted directly:
+    - `compaction`
+    - `promotion`
+- Kept temporary legacy request aliases for this transition iteration:
+  - `hourly` -> `compaction`
+  - `daily` -> `promotion`
+- Added alias deprecation hint fields in `/jobs/run` success responses when a legacy alias is used:
+  - `deprecated_alias_used`
+  - `preferred_job`
+- Migrated `/jobs/run` response `job` field to canonical values:
+  - canonical requests now return `job: "compaction" | "promotion"`
+  - alias requests are normalized and also return canonical `job` values plus deprecation hints.
+- Ensured scheduler continues to dispatch canonical internal names (`compaction`/`promotion`) only.
+- Updated docs/examples to canonical `/jobs/run` payloads in:
+  - `packages/eva/executive/README.md`
+  - includes temporary alias compatibility example and expected deprecation hint fields.
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/README.md`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Manual `/jobs/run` checks:
+  1. Canonical compaction request works:
+     - `POST /jobs/run {"job":"compaction","now_ms":0}` -> success (`job:"compaction"`).
+  2. Canonical promotion request works:
+     - `POST /jobs/run {"job":"promotion","now_ms":0}` -> success (`job:"promotion"`).
+  3. Legacy alias compatibility works with deprecation hints:
+     - `POST /jobs/run {"job":"hourly","now_ms":0}` -> success with:
+       - `job:"compaction"`
+       - `deprecated_alias_used:"hourly"`
+       - `preferred_job:"compaction"`
+     - `POST /jobs/run {"job":"daily","now_ms":0}` -> success with:
+       - `job:"promotion"`
+       - `deprecated_alias_used:"daily"`
+       - `preferred_job:"promotion"`
+
+### Notes
+- This iteration keeps alias compatibility intentionally; hard alias removal is planned for Iteration 150.
+
+## Iteration 150 (plan 145–152 track) — Hard cutover: remove legacy aliases from config + `/jobs/run`
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Removed legacy jobs config alias support in:
+  - `packages/eva/executive/src/config.ts`
+- Enforced hard config validation for jobs keys by making `JobsConfigSchema` strict:
+  - legacy keys `jobs.hourly` / `jobs.daily` now fail validation (`Unrecognized key(s) ...`).
+- Removed legacy `/jobs/run` alias handling in:
+  - `packages/eva/executive/src/server.ts`
+  - removed temporary alias parser/schema path (`hourly|daily` -> canonical mapping).
+- `/jobs/run` now accepts only canonical request values:
+  - `compaction`
+  - `promotion`
+- Removed temporary alias deprecation response fields from `/jobs/run` responses:
+  - `deprecated_alias_used`
+  - `preferred_job`
+- Updated startup/log wording and docs to reflect hard cutover:
+  - `packages/eva/executive/src/server.ts`
+  - `packages/eva/executive/README.md`
+
+### Files changed
+- `packages/eva/executive/src/config.ts`
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/README.md`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Manual API checks:
+  1. Canonical values succeed:
+     - `POST /jobs/run {"job":"compaction","now_ms":0}` -> `200`
+     - `POST /jobs/run {"job":"promotion","now_ms":0}` -> `200`
+  2. Legacy values now fail fast with validation errors:
+     - `POST /jobs/run {"job":"hourly","now_ms":0}` -> `400 INVALID_REQUEST`
+     - `POST /jobs/run {"job":"daily","now_ms":0}` -> `400 INVALID_REQUEST`
+- Manual config validation checks:
+  1. Canonical/default config starts successfully.
+  2. Local config using legacy keys (`jobs.hourly/jobs.daily`) now fails fast at startup with clear error:
+     - `jobs: Unrecognized key(s) in object: 'hourly', 'daily'`.
+
+### Notes
+- This iteration completes hard cutover for config + `/jobs/run` aliases.
+- Remaining historical naming cleanups (for example shim files and other legacy wording) are scheduled for Iteration 151.
+
+## Iteration 151 (plan 145–152 track) — Cleanup sweep: remove legacy naming leftovers in source/docs
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Removed Iteration 146 temporary shim files:
+  - `packages/eva/executive/src/prompts/hourly_compaction.ts`
+  - `packages/eva/executive/src/tools/hourly_compaction.ts`
+- Completed source-level naming cleanup in Executive:
+  - updated remaining schedule-coupled failure code constants in `server.ts`:
+    - `HOURLY_JOB_FAILED` -> `COMPACTION_JOB_FAILED`
+    - `DAILY_JOB_FAILED` -> `PROMOTION_JOB_FAILED`
+- Swept active docs and kept canonical naming in active surfaces:
+  - `packages/eva/executive/README.md` (updated current-iteration marker to 151)
+  - reviewed root/Eva docs surfaces (`README.md`, `packages/eva/README.md`) and confirmed no purpose-critical `hourly_compaction` or `jobs.hourly/jobs.daily` references.
+- Historical references remain only in historical plan/progress docs as intended.
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/src/prompts/hourly_compaction.ts` (deleted)
+- `packages/eva/executive/src/tools/hourly_compaction.ts` (deleted)
+- `packages/eva/executive/README.md`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Naming regression grep on active source/docs:
+  - `grep -RIn "hourly_compaction|jobs\.hourly|jobs\.daily" packages/eva/executive/src packages/eva/executive/README.md packages/eva/README.md README.md`
+  - result: no matches.
+
+### Notes
+- This iteration removes remaining purpose-critical schedule-coupled leftovers from active Executive source/docs.
+- Final guardrail script/checklist work is next in Iteration 152.
+
+## Iteration 152 (plan 145–152 track) — Add naming regression guard + operational checklist
+
+**Status:** ✅ Completed (2026-02-25)
+
+### Completed
+- Added lightweight naming regression script:
+  - `packages/eva/executive/scripts/check-job-naming-regressions.ts`
+  - checks canonical job/config vocabulary on prompt/server/config/scheduler surfaces.
+  - asserts:
+    - canonical files/modules exist (`working_memory_compaction.*`)
+    - deprecated shim files are absent (`hourly_compaction.*`)
+    - canonical request/config naming is present (`compaction` / `promotion`)
+    - schedule-coupled leftovers are absent in active Executive surfaces.
+- Added npm script in Executive package:
+  - `packages/eva/executive/package.json`
+  - new command: `check:job-naming`
+- Updated Executive README with an operational checklist section for canonical naming validation:
+  - added `npm run check:job-naming` usage
+  - added Iteration 152 checklist covering:
+    1. config shape check (`jobs.compaction` / `jobs.promotion`)
+    2. `/jobs/run` canonical payload checks (`compaction` / `promotion`)
+    3. `/health` canonical jobs shape check (`jobs.compaction` / `jobs.promotion`)
+
+### Files changed
+- `packages/eva/executive/scripts/check-job-naming-regressions.ts` (new)
+- `packages/eva/executive/package.json`
+- `packages/eva/executive/README.md`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Naming regression check passes:
+  - `cd packages/eva/executive && npm run check:job-naming`
+
+### Notes
+- Iterations 145–152 migration track is now complete.
+- Canonical naming is enforced operationally via `check:job-naming` to prevent backslide.
+
+## Iteration 157 (plan 145–160 track) — Extract and stabilize short-term retrieval context helper
+
+**Status:** ✅ Completed (2026-02-26)
+
+### Completed
+- Added dedicated short-term respond-context module:
+  - `packages/eva/executive/src/memcontext/respond_short_term_context.ts`
+- Implemented `buildRespondShortTermContext(...)` with an explicit contract:
+  - deterministic section order:
+    - memory-context header
+    - recent observations
+    - recent short-term summaries
+  - bounded token-budget formatting (approximation)
+  - tag-filtered summary selection with fallback rows
+  - structured debug metadata for observability:
+    - `queryTags`
+    - `candidateShortTermRowsCount`
+    - `selectedShortTermRowsCount`
+    - `shortTermSelectionMode`
+    - `debugRecentInsightsRaw`
+- Normalized/moved short-term context assembly usage in server helper path:
+  - `buildRespondMemoryContext(...)` now calls `buildRespondShortTermContext(...)`
+  - removed in-file duplicate short-term row selection helper from `server.ts`
+- Extended `RespondMemoryContextResult` debug metadata to carry short-term selection summary fields.
+
+### Files changed
+- `packages/eva/executive/src/memcontext/respond_short_term_context.ts` (new)
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Manual helper path check (non-empty context with existing SQLite rows):
+  - `cd packages/eva/executive && node --input-type=module - <<'NODE' ... buildRespondShortTermContext(...) ... NODE`
+  - observed:
+    - `candidateShortTermRowsCount: 6`
+    - `selectedShortTermRowsCount: 3`
+    - `shortTermSelectionMode: "fallback"`
+    - context preview includes `short_term#6`, `short_term#5`, `short_term#4` lines.
+
+### Notes
+- This iteration only extracts/stabilizes the short-term context utility and metadata surface.
+- Wiring short-term context into the active `/respond` model path is planned for Iteration 158.
+
+## Iteration 158 (plan 145–160 track) — Wire short-term retrieval into `/respond` model context
+
+**Status:** ✅ Completed (2026-02-26)
+
+### Completed
+- Wired short-term retrieval context into active `/respond` execution path in `generateRespond(...)`:
+  - Added `shortTermMemoryDbPath` to respond memory-source inputs.
+  - Built short-term context via `buildRespondShortTermContext(...)` with explicit budget + selection parameters.
+  - Preserved existing long-term retrieval path via `buildRespondLongTermContext(...)` and retained long-term token budget behavior.
+- Added explicit bounded composition of memory context:
+  - combined prompt context now includes:
+    - short-term section (recent + compacted summaries)
+    - long-term section (semantic/Lance retrieval)
+- Added resilient fallback behavior:
+  - if short-term context build fails, `/respond` logs a warning and continues with long-term-only context.
+- Added respond request-trace observability for retrieval attachment:
+  - `memory_context_debug` now logged in request trace payload with:
+    - short-term inclusion/error,
+    - token budgets + approx tokens,
+    - char/byte lengths,
+    - query tags,
+    - candidate/selected short-term row counts,
+    - selection mode,
+    - combined context size/tokens.
+- Prompt wording update to reflect combined memory input:
+  - `buildRespondSystemPrompt(...)` now labels this section as
+    `Memory context (short-term + long-term; reference only)`.
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/src/prompts/respond.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Manual `/respond` end-to-end check (running local server):
+  - `POST /respond {"text":"what is my name?"}` succeeds.
+  - LLM request trace confirms short-term context inclusion and debug stats in payload:
+    - `memory_context_debug.short_term.included = true`
+    - `memory_context_debug.short_term.candidate_rows = 6`
+    - `memory_context_debug.short_term.selected_rows = 3`
+    - `memory_context_debug.short_term.selection_mode = "fallback"`
+    - combined `systemPrompt` contains:
+      - `Short-term memory context (recent + compacted; reference only):`
+      - `Long-term memory context (reference only):`
+
+### Notes
+- Retrieval wiring is now active in `/respond`; compacted short-term rows are included in model context before promotion runs.
+- Model answer quality on identity recall may still depend on summary phrasing/tags and prompt weighting; this will be refined in follow-up iterations.
+
+## Iteration 159 (plan 145–160 track) — Update docs + observability for retrieval wiring
+
+**Status:** ✅ Completed (2026-02-26)
+
+### Completed
+- Updated Executive docs to reflect active short-term + long-term retrieval flow:
+  - `packages/eva/executive/README.md`
+  - changed current behavior marker to Iteration 159
+  - documented retrieval pipeline:
+    - working memory writes
+    - compaction -> SQLite `short_term_summaries`
+    - `/respond` short-term retrieval
+    - promotion -> semantic SQLite + LanceDB
+    - `/respond` long-term retrieval
+- Added practical Iteration 159 verification runbook to README, including:
+  - generating turns,
+  - running compaction,
+  - verifying SQLite rows,
+  - calling `/respond` with related query,
+  - checking trace/runtime retrieval indicators.
+- Updated existing `/respond` continuity checklist wording to match combined memory prompt sections.
+- Expanded `/respond` runtime debug logging in `server.ts`:
+  - emits one per-request retrieval selection summary line:
+    - candidate short-term row count
+    - selected row count
+    - selection mode
+    - fallback used/not used
+    - query tags
+- Expanded trace debug payload (`memory_context_debug.short_term`) with:
+  - `fallback_used` boolean alongside existing candidate/selected/selection_mode fields.
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/README.md`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva/executive && npm run build`
+- Manual runbook validation (end-to-end):
+  1. Sent turns via `/respond` (`"my name is dennis"`, `"remember that for later"`).
+  2. Triggered compaction with explicit `now_ms` override.
+  3. Verified new rows in `short_term_summaries` (including Dennis-related summaries).
+  4. Called `/respond` with `"what name did I tell you earlier?"` and received:
+     - `"You mentioned your name is Dennis earlier."`
+  5. Confirmed retrieval indicators:
+     - runtime log line present:
+       - `[agent] respond retrieval: short_term candidate_rows=8 selected_rows=3 selection_mode=fallback fallback_used=true query_tags=[chat]`
+     - trace payload present in `packages/eva/llm_logs/openai-requests.log`:
+       - `memory_context_debug.short_term.candidate_rows`
+       - `memory_context_debug.short_term.selected_rows`
+       - `memory_context_debug.short_term.selection_mode`
+       - `memory_context_debug.short_term.fallback_used`
+
+### Notes
+- Iteration 159 focuses on operator visibility and verification ergonomics.
+- Retrieval integration itself remains from Iteration 158; this iteration makes it auditable in docs/logs.
+
+## Iteration 160 (plan 145–160 track) — Regression guard for short-term retrieval integration
+
+**Status:** ✅ Completed (2026-02-26)
+
+### Completed
+- Added short-term retrieval regression script:
+  - `packages/eva/executive/scripts/check-respond-retrieval-regressions.ts`
+- New regression guard asserts:
+  1. `/respond` server path imports and calls `buildRespondShortTermContext(...)`.
+  2. short-term DB path (`shortTermMemoryDbPath`) is wired into context assembly.
+  3. combined memory context includes explicit short-term section header.
+  4. request trace payload includes `memory_context_debug` short-term selection fields.
+  5. runtime logs include short-term retrieval selection summary line.
+  6. short-term helper actually queries `short_term_summaries`.
+  7. README documents `/respond` retrieval pipeline and short-term verification fields.
+- Added npm command:
+  - `check:respond-retrieval` in `packages/eva/executive/package.json`
+- Updated docs/checklists:
+  - `packages/eva/executive/README.md`
+  - added dedicated “Respond retrieval regression check” command section.
+  - added runbook step to run `npm run check:respond-retrieval` first.
+- Aligned existing job-naming regression script with current compaction window validation policy (nonnegative default, no min/max hard-guard requirement), so `check:job-naming` remains usable after guardrail removal.
+
+### Files changed
+- `packages/eva/executive/scripts/check-respond-retrieval-regressions.ts` (new)
+- `packages/eva/executive/package.json`
+- `packages/eva/executive/README.md`
+- `packages/eva/executive/scripts/check-job-naming-regressions.ts`
+- `progress.md`
+
+### Verification
+- Build + regression checks pass:
+  - `cd packages/eva/executive && npm run build`
+  - `cd packages/eva/executive && npm run check:job-naming`
+  - `cd packages/eva/executive && npm run check:respond-retrieval`
+- All commands passed in this iteration.
+
+### Notes
+- This closes the 145–160 plan track with a dedicated guard against future disconnects between compaction outputs and `/respond` retrieval usage.

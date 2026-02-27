@@ -21,6 +21,35 @@ const InsightConfigSchema = z.object({
   ttsStyle: z.enum(['clean', 'spicy']).default('clean'),
 });
 
+const COMPACTION_WINDOW_MS_DEFAULT = 60 * 60 * 1000;
+
+const CompactionJobConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  cron: z.string().trim().min(1).default('0 * * * *'),
+  windowMs: z.number().int().nonnegative().default(COMPACTION_WINDOW_MS_DEFAULT),
+});
+
+const PromotionJobConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  cron: z.string().trim().min(1).default('15 3 * * *'),
+});
+
+const JobsConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    timezone: z.string().trim().min(1).default('UTC'),
+    compaction: CompactionJobConfigSchema.default({
+      enabled: true,
+      cron: '0 * * * *',
+      windowMs: COMPACTION_WINDOW_MS_DEFAULT,
+    }),
+    promotion: PromotionJobConfigSchema.default({
+      enabled: true,
+      cron: '15 3 * * *',
+    }),
+  })
+  .strict();
+
 const AgentConfigSchema = z.object({
   server: z.object({
     port: z.number().int().min(1).max(65_535),
@@ -37,6 +66,19 @@ const AgentConfigSchema = z.object({
     maxFrames: HARD_MAX_FRAMES,
     maxBodyBytes: 8_388_608,
     ttsStyle: 'clean',
+  }),
+  jobs: JobsConfigSchema.default({
+    enabled: false,
+    timezone: 'UTC',
+    compaction: {
+      enabled: true,
+      cron: '0 * * * *',
+      windowMs: COMPACTION_WINDOW_MS_DEFAULT,
+    },
+    promotion: {
+      enabled: true,
+      cron: '15 3 * * *',
+    },
   }),
   secretsFile: z.string().trim().min(1),
 });

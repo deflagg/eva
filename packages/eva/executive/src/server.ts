@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -19,38 +19,66 @@ import {
   saveToneStateAtomic,
   updateToneForSession,
 } from './memcontext/tone.js';
-import { formatInsightsForDebug, formatInsightsForPrompt, retrieveRecentInsights } from './memcontext/retrieve_recent_insights.js';
 import { replayWorkingMemoryLog } from './memcontext/working_memory_replay.js';
+import { buildRespondLongTermContext } from './memcontext/respond_long_term_context.js';
+import { buildRespondShortTermContext, type ShortTermSelectionMode } from './memcontext/respond_short_term_context.js';
 import { logLlmTrace } from './llm_log.js';
+import { startScheduler } from './jobs/scheduler.js';
 import type { AgentConfig, AgentSecrets } from './config.js';
+import {
+  buildWorkingMemoryCompactionSystemPrompt,
+  buildWorkingMemoryCompactionUserPrompt,
+} from './prompts/working_memory_compaction.js';
 import { buildInsightSystemPrompt, buildInsightUserPrompt } from './prompts/insight.js';
 import { buildCurrentUserRequestMessage, buildRespondSystemPrompt } from './prompts/respond.js';
+import {
+  WORKING_MEMORY_COMPACTION_BULLET_MAX,
+  WORKING_MEMORY_COMPACTION_BULLET_MAX_CHARS,
+  WORKING_MEMORY_COMPACTION_BULLET_MIN,
+  WORKING_MEMORY_COMPACTION_TOOL,
+  WORKING_MEMORY_COMPACTION_TOOL_NAME,
+  type WorkingMemoryCompactionPayload,
+} from './tools/working_memory_compaction.js';
 import { INSIGHT_TOOL, INSIGHT_TOOL_NAME, type InsightSummary } from './tools/insight.js';
 import { RESPOND_TOOL, RESPOND_TOOL_NAME, type RespondPayload } from './tools/respond.js';
 import { deriveLanceDbDir, getOrCreateTable, mergeUpsertById, openDb, queryTopK } from './memcontext/long_term/lancedb.js';
+import {
+  SEMANTIC_ITEM_KINDS,
+  countSemanticItems,
+  initializeSemanticDb,
+  selectTopSemanticItems,
+  upsertSemanticItems,
+  type SemanticItemInput,
+  type SemanticItemKind,
+  type SemanticItemRecord,
+} from './memcontext/long_term/semantic_db.js';
 
 const HARD_MAX_FRAMES = 6;
 const WORKING_MEMORY_LOG_FILENAME = 'working_memory.log';
 const WORKING_MEMORY_ASSETS_DIRNAME = 'working_memory_assets';
 const SHORT_TERM_MEMORY_DB_FILENAME = 'short_term_memory.db';
+const SEMANTIC_MEMORY_DB_FILENAME = 'semantic_memory.db';
 const LEGACY_LONG_TERM_MEMORY_DIRNAME = ['vector', 'db'].join('_');
 const LONG_TERM_MEMORY_DB_DIRNAME = 'long_term_memory_db';
-const WORKING_MEMORY_WINDOW_MS = 60 * 60 * 1000;
 const DAY_WINDOW_MS = 24 * 60 * 60 * 1000;
-const HOURLY_SUMMARY_MIN_BULLETS = 3;
-const HOURLY_SUMMARY_MAX_BULLETS = 5;
+const COMPACTION_SUMMARY_MIN_BULLETS = 3;
+const COMPACTION_SUMMARY_MAX_BULLETS = 5;
 const VECTOR_EMBEDDING_DIMENSIONS = 64;
 const CORE_EXPERIENCES_CACHE_LIMIT = 16;
 const CORE_PERSONALITY_CACHE_LIMIT = 12;
-const RESPOND_MEMORY_MAX_TOKENS = 900;
+const RESPOND_SHORT_TERM_MEMORY_TOKEN_BUDGET = 320;
 const RESPOND_SHORT_TERM_MAX_ROWS = 8;
 const RESPOND_LONG_TERM_TOP_K = 6;
 const RESPOND_CORE_CACHE_ITEMS = 4;
 const RESPOND_RECENT_INSIGHTS_WINDOW_MS = 2 * 60 * 1000;
 const RESPOND_RECENT_INSIGHTS_MAX_ITEMS = 10;
+const RESPOND_LONG_TERM_MEMORY_TOKEN_BUDGET = 320;
 const WM_EVENT_SUMMARY_MAX_CHARS = 180;
 const WM_EVENT_SUMMARY_MAX_DATA_FIELDS = 4;
 const WM_EVENT_SUMMARY_MAX_VALUE_CHARS = 48;
+const COMPACTION_PROMPT_MAX_ENTRIES = 240;
+const COMPACTION_PROMPT_MAX_LINE_CHARS = 220;
+const COMPACTION_PROMPT_MAX_TEXT_CHARS = 180;
 
 const VECTOR_STORE_KINDS = {
   experiences: 'long_term_experiences',
@@ -136,14 +164,9 @@ const RespondRequestSchema = z
   })
   .strict();
 
-const HourlyJobRequestSchema = z
+const RunJobRequestSchema = z
   .object({
-    now_ms: z.number().int().nonnegative().optional(),
-  })
-  .strict();
-
-const DailyJobRequestSchema = z
-  .object({
+    job: z.enum(['compaction', 'promotion']),
     now_ms: z.number().int().nonnegative().optional(),
   })
   .strict();
@@ -189,8 +212,7 @@ const ShortTermSummaryRowSchema = z
 
 type InsightRequest = z.infer<typeof InsightRequestSchema>;
 type RespondRequest = z.infer<typeof RespondRequestSchema>;
-type HourlyJobRequest = z.infer<typeof HourlyJobRequestSchema>;
-type DailyJobRequest = z.infer<typeof DailyJobRequestSchema>;
+type RunJobRequest = z.infer<typeof RunJobRequestSchema>;
 type EventsIngestRequest = z.infer<typeof EventsIngestRequestSchema>;
 type WmEventSeverity = z.infer<typeof WmEventSeveritySchema>;
 
@@ -317,7 +339,7 @@ type WorkingMemoryRecord = {
   [key: string]: unknown;
 };
 
-interface HourlySummaryResult {
+interface CompactionJobResult {
   runAtMs: number;
   cutoffMs: number;
   sourceEntryCount: number;
@@ -334,7 +356,7 @@ interface ShortTermSummaryRow {
   source_entry_count: number;
 }
 
-interface DailySummaryResult {
+interface PromotionJobResult {
   runAtMs: number;
   windowStartMs: number;
   windowEndMs: number;
@@ -344,6 +366,31 @@ interface DailySummaryResult {
   totalExperienceCount: number;
   totalPersonalityCount: number;
 }
+
+type CanonicalRunJobName = RunJobRequest['job'];
+type RunJobName = CanonicalRunJobName;
+
+type RunJobResult =
+  | {
+      job: 'compaction';
+      result: CompactionJobResult;
+    }
+  | {
+      job: 'promotion';
+      result: PromotionJobResult;
+    };
+
+type ParsedRunJobRequest = RunJobRequest;
+
+interface JobRuntimeState {
+  lastRequestedRunAtMs: number | null;
+  lastStartedAtMs: number | null;
+  lastCompletedAtMs: number | null;
+  lastFailedAtMs: number | null;
+  lastError: string | null;
+}
+
+type JobsRuntimeState = Record<RunJobName, JobRuntimeState>;
 
 interface RespondMemorySources {
   workingMemoryLogPath: string;
@@ -359,6 +406,9 @@ interface RespondMemoryContextResult {
   tokenBudget: number;
   recentInsightsCount: number;
   debugRecentInsightsRaw: string;
+  candidateShortTermRowsCount: number;
+  selectedShortTermRowsCount: number;
+  shortTermSelectionMode: ShortTermSelectionMode;
 }
 
 interface RetrievedVectorHit {
@@ -399,6 +449,16 @@ class SerialTaskQueue {
 
     return runPromise;
   }
+}
+
+function createEmptyJobRuntimeState(): JobRuntimeState {
+  return {
+    lastRequestedRunAtMs: null,
+    lastStartedAtMs: null,
+    lastCompletedAtMs: null,
+    lastFailedAtMs: null,
+    lastError: null,
+  };
 }
 
 function sendJson(res: ServerResponse, statusCode: number, payload: unknown): void {
@@ -456,52 +516,6 @@ async function readJsonBody(req: IncomingMessage, maxBodyBytes: number): Promise
       const rawBody = Buffer.concat(chunks).toString('utf8');
       if (rawBody.trim().length === 0) {
         reject(new HttpRequestError(400, 'EMPTY_BODY', 'Request body is required.'));
-        return;
-      }
-
-      try {
-        resolve(JSON.parse(rawBody) as unknown);
-      } catch {
-        reject(new HttpRequestError(400, 'INVALID_JSON', 'Request body must be valid JSON.'));
-      }
-    });
-
-    req.on('error', (error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      reject(new HttpRequestError(400, 'READ_ERROR', `Failed to read request body: ${message}`));
-    });
-  });
-}
-
-async function readOptionalJsonBody(req: IncomingMessage, maxBodyBytes: number): Promise<unknown | undefined> {
-  return await new Promise((resolve, reject) => {
-    let totalBytes = 0;
-    let tooLarge = false;
-    const chunks: Buffer[] = [];
-
-    req.on('data', (chunk: Buffer | string) => {
-      const bufferChunk = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
-      totalBytes += bufferChunk.length;
-
-      if (totalBytes > maxBodyBytes) {
-        tooLarge = true;
-        return;
-      }
-
-      chunks.push(bufferChunk);
-    });
-
-    req.on('end', () => {
-      if (tooLarge) {
-        reject(
-          new HttpRequestError(413, 'PAYLOAD_TOO_LARGE', `Request body exceeds maxBodyBytes (${maxBodyBytes} bytes).`),
-        );
-        return;
-      }
-
-      const rawBody = Buffer.concat(chunks).toString('utf8');
-      if (rawBody.trim().length === 0) {
-        resolve(undefined);
         return;
       }
 
@@ -610,29 +624,15 @@ function isExplicitToneChangeRequest(text: string): boolean {
   return EXPLICIT_TONE_CHANGE_PATTERNS.some((pattern) => pattern.test(candidate));
 }
 
-function parseHourlyJobRequest(payload: unknown | undefined): HourlyJobRequest {
-  if (payload === undefined) {
-    return {};
-  }
-
-  const parsed = HourlyJobRequestSchema.safeParse(payload);
+function parseRunJobRequest(payload: unknown): ParsedRunJobRequest {
+  const parsed = RunJobRequestSchema.safeParse(payload);
   if (!parsed.success) {
     const details = parsed.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`).join('; ');
-    throw new HttpRequestError(400, 'INVALID_REQUEST', `Invalid hourly job payload: ${details}`);
-  }
-
-  return parsed.data;
-}
-
-function parseDailyJobRequest(payload: unknown | undefined): DailyJobRequest {
-  if (payload === undefined) {
-    return {};
-  }
-
-  const parsed = DailyJobRequestSchema.safeParse(payload);
-  if (!parsed.success) {
-    const details = parsed.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`).join('; ');
-    throw new HttpRequestError(400, 'INVALID_REQUEST', `Invalid daily job payload: ${details}`);
+    throw new HttpRequestError(
+      400,
+      'INVALID_REQUEST',
+      `Invalid run job payload: ${details}. job must be one of: compaction, promotion.`,
+    );
   }
 
   return parsed.data;
@@ -1126,13 +1126,13 @@ function summarizeEntriesToBullets(entries: WorkingMemoryRecord[]): string[] {
       pushBullet(`Vision insight: ${truncateText(candidate)}`);
     }
 
-    if (bullets.length >= HOURLY_SUMMARY_MAX_BULLETS) {
+    if (bullets.length >= COMPACTION_SUMMARY_MAX_BULLETS) {
       break;
     }
   }
 
   for (const entry of entries) {
-    if (bullets.length >= HOURLY_SUMMARY_MAX_BULLETS) {
+    if (bullets.length >= COMPACTION_SUMMARY_MAX_BULLETS) {
       break;
     }
 
@@ -1161,7 +1161,7 @@ function summarizeEntriesToBullets(entries: WorkingMemoryRecord[]): string[] {
 
   const textOutputs = entries.filter((entry) => entry.type === 'text_output').slice(-2);
   for (const entry of textOutputs) {
-    if (bullets.length >= HOURLY_SUMMARY_MAX_BULLETS) {
+    if (bullets.length >= COMPACTION_SUMMARY_MAX_BULLETS) {
       break;
     }
 
@@ -1182,17 +1182,17 @@ function summarizeEntriesToBullets(entries: WorkingMemoryRecord[]): string[] {
   const textOutputCount = entries.filter((entry) => entry.type === 'text_output').length;
   const insightCount = entries.filter((entry) => entry.type === 'vision_insight' || entry.type === 'insight').length;
 
-  pushBullet(`Hourly rollup: ${entries.length} entries processed from working memory.`);
+  pushBullet(`Compaction rollup: ${entries.length} entries processed from working memory.`);
   pushBullet(`Chat turns: ${textInputCount} inputs and ${textOutputCount} outputs summarized.`);
   if (insightCount > 0) {
     pushBullet(`Vision highlights observed: ${insightCount} insight events.`);
   }
 
-  while (bullets.length < HOURLY_SUMMARY_MIN_BULLETS) {
+  while (bullets.length < COMPACTION_SUMMARY_MIN_BULLETS) {
     pushBullet(`Memory maintenance note: retained recent context window and archived older activity.`);
   }
 
-  return bullets.slice(0, HOURLY_SUMMARY_MAX_BULLETS);
+  return bullets.slice(0, COMPACTION_SUMMARY_MAX_BULLETS);
 }
 
 function initializeShortTermMemoryDb(dbPath: string): void {
@@ -1205,7 +1205,7 @@ function initializeShortTermMemoryDb(dbPath: string): void {
   }
 }
 
-function insertHourlySummaries(
+function insertCompactionSummaries(
   dbPath: string,
   params: {
     createdAtMs: number;
@@ -1253,20 +1253,261 @@ function insertHourlySummaries(
   }
 }
 
-async function runHourlyMemoryJob(
-  workingMemoryLogPath: string,
-  shortTermMemoryDbPath: string,
-  nowMs: number,
-): Promise<HourlySummaryResult> {
-  const cutoffMs = nowMs - WORKING_MEMORY_WINDOW_MS;
-  const entries = await readWorkingMemoryLog(workingMemoryLogPath);
+function toStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function compactForPrompt(text: string, maxLength: number): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function buildCompactionRecordDetail(entry: WorkingMemoryRecord): string {
+  const record = asRecord(entry);
+  if (!record) {
+    return 'detail=unavailable';
+  }
+
+  if (entry.type === 'text_input') {
+    const text = getStringField(record, 'text') ?? '';
+    return `user_input="${compactForPrompt(text, COMPACTION_PROMPT_MAX_TEXT_CHARS)}"`;
+  }
+
+  if (entry.type === 'text_output') {
+    const text = getStringField(record, 'text') ?? '';
+    const parts = [`assistant_output="${compactForPrompt(text, COMPACTION_PROMPT_MAX_TEXT_CHARS)}"`];
+
+    const meta = asRecord(record.meta);
+    const tone = meta ? getStringField(meta, 'tone') : null;
+    const surprise = meta ? getNumberField(meta, 'surprise') : null;
+
+    if (tone) {
+      parts.push(`tone=${tone}`);
+    }
+
+    if (surprise !== null) {
+      parts.push(`surprise=${surprise.toFixed(2)}`);
+    }
+
+    return parts.join(' ');
+  }
+
+  if (entry.type === 'wm_insight') {
+    const oneLiner = getStringField(record, 'one_liner') ?? '';
+    const severity = getStringField(record, 'severity') ?? 'unknown';
+    const tags = toStringList(record.tags).slice(0, 4);
+    const changed = toStringList(record.what_changed).slice(0, 2);
+
+    const parts = [
+      `insight="${compactForPrompt(oneLiner, COMPACTION_PROMPT_MAX_TEXT_CHARS)}"`,
+      `severity=${severity}`,
+    ];
+
+    if (tags.length > 0) {
+      parts.push(`tags=${tags.join(',')}`);
+    }
+
+    if (changed.length > 0) {
+      parts.push(`what_changed="${compactForPrompt(changed.join(' | '), COMPACTION_PROMPT_MAX_TEXT_CHARS)}"`);
+    }
+
+    return parts.join(' ');
+  }
+
+  if (entry.type === 'wm_event') {
+    const source = getStringField(record, 'source') ?? 'unknown';
+    const name = getStringField(record, 'name') ?? 'unknown';
+    const severity = getStringField(record, 'severity') ?? 'unknown';
+    const summary = getStringField(record, 'summary') ?? '';
+
+    return [
+      `event=${name}`,
+      `source=${source}`,
+      `severity=${severity}`,
+      `summary="${compactForPrompt(summary, COMPACTION_PROMPT_MAX_TEXT_CHARS)}"`,
+    ].join(' ');
+  }
+
+  const summary = getStringField(record, 'summary') ?? getStringField(record, 'text');
+  if (summary) {
+    return `summary="${compactForPrompt(summary, COMPACTION_PROMPT_MAX_TEXT_CHARS)}"`;
+  }
+
+  const keys = Object.keys(record).sort();
+  return keys.length > 0 ? `fields=${keys.slice(0, 6).join(',')}` : 'fields=none';
+}
+
+function renderWorkingMemoryEntriesForCompaction(entries: WorkingMemoryRecord[]): string {
+  const selectedEntries = entries.slice(-COMPACTION_PROMPT_MAX_ENTRIES);
+  const omittedCount = entries.length - selectedEntries.length;
+  const startIndex = entries.length - selectedEntries.length;
+
+  const lines: string[] = [];
+
+  if (omittedCount > 0) {
+    lines.push(`NOTE: omitted ${omittedCount} oldest records to keep prompt bounded.`);
+  }
+
+  for (let index = 0; index < selectedEntries.length; index += 1) {
+    const entry = selectedEntries[index]!;
+    const line = `#${startIndex + index + 1} ts_ms=${entry.ts_ms} type=${entry.type} ${buildCompactionRecordDetail(entry)}`;
+    lines.push(compactForPrompt(line, COMPACTION_PROMPT_MAX_LINE_CHARS));
+  }
+
+  return lines.join('\n');
+}
+
+function isLikelyTelemetryDumpBullet(text: string): boolean {
+  if (/[{}]/.test(text)) {
+    return true;
+  }
+
+  if (/"[^"\n]+"\s*:/.test(text)) {
+    return true;
+  }
+
+  if (/\b(ts_ms|frame_id|request_id|track_id|asset_rel_path|wm_kind|wm_json|clip_id)\b/i.test(text)) {
+    return true;
+  }
+
+  return /\b[a-z_]+=[^\s]+\b.*\b[a-z_]+=[^\s]+\b/i.test(text);
+}
+
+function normalizeCompactionBullets(rawBullets: string[]): string[] {
+  const normalizedBullets: string[] = [];
+  const seen = new Set<string>();
+
+  for (const rawBullet of rawBullets) {
+    const withoutPrefix = rawBullet.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '');
+    const normalized = compactForPrompt(withoutPrefix, WORKING_MEMORY_COMPACTION_BULLET_MAX_CHARS);
+    if (!normalized) {
+      continue;
+    }
+
+    if (isLikelyTelemetryDumpBullet(normalized)) {
+      continue;
+    }
+
+    const dedupeKey = normalized.toLowerCase();
+    if (seen.has(dedupeKey)) {
+      continue;
+    }
+
+    seen.add(dedupeKey);
+    normalizedBullets.push(normalized);
+
+    if (normalizedBullets.length >= WORKING_MEMORY_COMPACTION_BULLET_MAX) {
+      break;
+    }
+  }
+
+  if (normalizedBullets.length < WORKING_MEMORY_COMPACTION_BULLET_MIN) {
+    throw new Error(
+      `model returned ${normalizedBullets.length} valid bullets; expected at least ${WORKING_MEMORY_COMPACTION_BULLET_MIN}.`,
+    );
+  }
+
+  return normalizedBullets;
+}
+
+async function summarizeEntriesToBulletsWithModel(params: {
+  entries: WorkingMemoryRecord[];
+  windowStartMs: number;
+  windowEndMs: number;
+  config: AgentConfig;
+  secrets: AgentSecrets;
+}): Promise<string[]> {
+  const model = getModel(params.config.model.provider as never, params.config.model.id as never);
+
+  const context = {
+    systemPrompt: buildWorkingMemoryCompactionSystemPrompt(),
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: buildWorkingMemoryCompactionUserPrompt({
+              windowStartMs: params.windowStartMs,
+              windowEndMs: params.windowEndMs,
+              sourceEntryCount: params.entries.length,
+              recordsText: renderWorkingMemoryEntriesForCompaction(params.entries),
+            }),
+          },
+        ],
+      },
+    ],
+    tools: [WORKING_MEMORY_COMPACTION_TOOL],
+  };
+
+  let assistantMessage: any;
+  try {
+    assistantMessage = await complete(model as never, context as never, { apiKey: params.secrets.openaiApiKey });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`compaction model call failed: ${message}`);
+  }
+
+  if (assistantMessage?.stopReason === 'error' || assistantMessage?.stopReason === 'aborted') {
+    const message =
+      typeof assistantMessage?.errorMessage === 'string' && assistantMessage.errorMessage.length > 0
+        ? assistantMessage.errorMessage
+        : 'model returned an error response';
+    throw new Error(`compaction model response error: ${message}`);
+  }
+
+  const toolCall = Array.isArray(assistantMessage?.content)
+    ? assistantMessage.content.find(
+        (block: any) => block?.type === 'toolCall' && block.name === WORKING_MEMORY_COMPACTION_TOOL_NAME,
+      )
+    : undefined;
+
+  if (!toolCall) {
+    throw new Error(`model did not call required tool: ${WORKING_MEMORY_COMPACTION_TOOL_NAME}`);
+  }
+
+  let payload: WorkingMemoryCompactionPayload;
+  try {
+    payload = validateToolCall([WORKING_MEMORY_COMPACTION_TOOL], toolCall as never) as WorkingMemoryCompactionPayload;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`invalid compaction tool payload: ${message}`);
+  }
+
+  return normalizeCompactionBullets(payload.bullets);
+}
+
+async function runCompactionJob(params: {
+  workingMemoryLogPath: string;
+  shortTermMemoryDbPath: string;
+  nowMs: number;
+  compactionWindowMs: number;
+  config: AgentConfig;
+  secrets: AgentSecrets;
+}): Promise<CompactionJobResult> {
+  const cutoffMs = params.nowMs - params.compactionWindowMs;
+  console.log(
+    `[agent] compaction: run_at_ms=${params.nowMs} window_ms=${params.compactionWindowMs} cutoff_ms=${cutoffMs}`,
+  );
+  const entries = await readWorkingMemoryLog(params.workingMemoryLogPath);
 
   const olderEntries = entries.filter((entry) => entry.ts_ms < cutoffMs);
   const keptEntries = entries.filter((entry) => entry.ts_ms >= cutoffMs);
 
   if (olderEntries.length === 0) {
     return {
-      runAtMs: nowMs,
+      runAtMs: params.nowMs,
       cutoffMs,
       sourceEntryCount: 0,
       keptEntryCount: keptEntries.length,
@@ -1274,21 +1515,35 @@ async function runHourlyMemoryJob(
     };
   }
 
-  const bullets = summarizeEntriesToBullets(olderEntries);
+  let bullets: string[];
+  try {
+    bullets = await summarizeEntriesToBulletsWithModel({
+      entries: olderEntries,
+      windowStartMs: olderEntries[0]?.ts_ms ?? cutoffMs,
+      windowEndMs: cutoffMs,
+      config: params.config,
+      secrets: params.secrets,
+    });
+    console.log(`[agent] compaction: model path success bullet_count=${bullets.length}.`);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`[agent] compaction: fallback path used (${reason}).`);
+    bullets = summarizeEntriesToBullets(olderEntries);
+  }
 
-  await ensureParentDir(shortTermMemoryDbPath);
-  const insertedCount = insertHourlySummaries(shortTermMemoryDbPath, {
-    createdAtMs: nowMs,
+  await ensureParentDir(params.shortTermMemoryDbPath);
+  const insertedCount = insertCompactionSummaries(params.shortTermMemoryDbPath, {
+    createdAtMs: params.nowMs,
     bucketStartMs: olderEntries[0]?.ts_ms ?? cutoffMs,
     bucketEndMs: cutoffMs,
     sourceEntryCount: olderEntries.length,
     bullets,
   });
 
-  await rewriteWorkingMemoryLogAtomic(workingMemoryLogPath, keptEntries);
+  await rewriteWorkingMemoryLogAtomic(params.workingMemoryLogPath, keptEntries);
 
   return {
-    runAtMs: nowMs,
+    runAtMs: params.nowMs,
     cutoffMs,
     sourceEntryCount: olderEntries.length,
     keptEntryCount: keptEntries.length,
@@ -1367,6 +1622,67 @@ function shouldPromoteToPersonality(summaryText: string): boolean {
   return /\b(should|must|need|please|prefer|avoid|don't|do not)\b/i.test(normalized);
 }
 
+function deriveSemanticKind(summaryText: string): SemanticItemKind {
+  if (/\bprefer\w*\b/i.test(summaryText)) {
+    return 'preference';
+  }
+
+  return 'trait';
+}
+
+function deriveSemanticItemId(kind: SemanticItemKind, text: string): string {
+  const normalizedText = text.trim().toLowerCase();
+  const hash = createHash('sha256').update(`${kind}|${normalizedText}`).digest('hex');
+  return hash;
+}
+
+function buildSemanticItemsFromPromotionRows(rows: ShortTermSummaryRow[], nowMs: number): SemanticItemInput[] {
+  const byId = new Map<string, SemanticItemInput>();
+
+  for (const row of rows) {
+    if (!shouldPromoteToPersonality(row.summary_text)) {
+      continue;
+    }
+
+    const kind = deriveSemanticKind(row.summary_text);
+    const text = row.summary_text.trim();
+    if (!text) {
+      continue;
+    }
+
+    const id = deriveSemanticItemId(kind, text);
+    const confidence = kind === 'preference' ? 0.82 : 0.7;
+
+    const existing = byId.get(id);
+    if (!existing) {
+      byId.set(id, {
+        id,
+        kind,
+        text,
+        confidence,
+        supportCount: 1,
+        firstSeenMs: row.created_at_ms,
+        lastSeenMs: row.created_at_ms,
+        sourceSummaryIds: [row.id],
+        updatedAtMs: nowMs,
+      });
+      continue;
+    }
+
+    existing.supportCount += 1;
+    existing.confidence = Math.max(existing.confidence, confidence);
+    existing.firstSeenMs = Math.min(existing.firstSeenMs, row.created_at_ms);
+    existing.lastSeenMs = Math.max(existing.lastSeenMs, row.created_at_ms);
+    if (!existing.sourceSummaryIds.includes(row.id)) {
+      existing.sourceSummaryIds.push(row.id);
+      existing.sourceSummaryIds.sort((a, b) => a - b);
+    }
+    existing.updatedAtMs = nowMs;
+  }
+
+  return Array.from(byId.values());
+}
+
 function buildExperienceVectorEntry(
   row: ShortTermSummaryRow,
   nowMs: number,
@@ -1377,7 +1693,7 @@ function buildExperienceVectorEntry(
     EXPERIENCE_TAG_RULES,
     tagWhitelist,
     tagWhitelist.fallbackTag,
-    'daily experience tags',
+    'promotion experience tags',
   );
 
   const embeddingInput = `${row.summary_text}\n${tags.join(' ')}`;
@@ -1404,7 +1720,7 @@ function buildPersonalityVectorEntry(
     PERSONALITY_TAG_RULES,
     tagWhitelist,
     personalityFallbackTag,
-    'daily personality tags',
+    'promotion personality tags',
   );
 
   const embeddingInput = `${row.summary_text}\n${tags.join(' ')}`;
@@ -1576,25 +1892,41 @@ function buildCoreExperiencesCache(vectorStore: VectorStoreFile, nowMs: number):
   };
 }
 
-function buildCorePersonalityCache(vectorStore: VectorStoreFile, nowMs: number): Record<string, unknown> {
-  const recentEntries = [...vectorStore.entries]
-    .sort((a, b) => b.source_created_at_ms - a.source_created_at_ms || b.id.localeCompare(a.id))
+function buildCorePersonalityCacheFromSemantic(
+  items: SemanticItemRecord[],
+  nowMs: number,
+  totalItemCount = items.length,
+): Record<string, unknown> {
+  const recentItems = [...items]
+    .sort((a, b) => b.lastSeenMs - a.lastSeenMs || b.updatedAtMs - a.updatedAtMs || b.id.localeCompare(a.id))
     .slice(0, CORE_PERSONALITY_CACHE_LIMIT)
-    .map((entry) => ({
-      id: entry.id,
-      source_summary_id: entry.source_summary_id,
-      source_created_at_ms: entry.source_created_at_ms,
-      tags: entry.tags,
-      signal: truncateText(entry.text, 220),
+    .map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      confidence: item.confidence,
+      support_count: item.supportCount,
+      text: truncateText(item.text, 220),
+      first_seen_ms: item.firstSeenMs,
+      last_seen_ms: item.lastSeenMs,
     }));
+
+  const kindCountsEntries: Array<[SemanticItemKind, number]> = [];
+
+  for (const kind of SEMANTIC_ITEM_KINDS) {
+    const count = items.filter((item) => item.kind === kind).length;
+    if (count > 0) {
+      kindCountsEntries.push([kind, count]);
+    }
+  }
+
+  const kindCounts = Object.fromEntries(kindCountsEntries);
 
   return {
     updated_at_ms: nowMs,
-    store_kind: vectorStore.kind,
-    dimensions: vectorStore.dimensions,
-    total_entries: vectorStore.entries.length,
-    trait_counts: summarizeTagCounts(vectorStore.entries, 10),
-    signals: recentEntries,
+    source: 'semantic_memory_db',
+    total_entries: totalItemCount,
+    kind_counts: kindCounts,
+    items: recentItems,
   };
 }
 
@@ -1638,7 +1970,7 @@ function selectShortTermSummariesForWindow(
     for (const row of rows) {
       const parsed = ShortTermSummaryRowSchema.safeParse(row);
       if (!parsed.success) {
-        console.warn('[agent] skipping invalid short-term summary row while running daily job');
+        console.warn('[agent] skipping invalid short-term summary row while running promotion job');
         continue;
       }
 
@@ -1651,57 +1983,40 @@ function selectShortTermSummariesForWindow(
   }
 }
 
-async function runDailyMemoryJob(params: {
+async function runPromotionJob(params: {
   shortTermMemoryDbPath: string;
+  semanticMemoryDbPath: string;
   lancedbDir: string;
   coreExperiencesCachePath: string;
   corePersonalityCachePath: string;
   nowMs: number;
   tagWhitelist: ExperienceTagWhitelist;
-}): Promise<DailySummaryResult> {
+}): Promise<PromotionJobResult> {
   const { windowStartMs, windowEndMs } = getYesterdayBounds(params.nowMs);
 
   await ensureParentDir(params.shortTermMemoryDbPath);
-  const dailyRows = selectShortTermSummariesForWindow(params.shortTermMemoryDbPath, windowStartMs, windowEndMs);
+  const promotionRows = selectShortTermSummariesForWindow(params.shortTermMemoryDbPath, windowStartMs, windowEndMs);
 
-  const experienceEntries = dailyRows.map((row) => buildExperienceVectorEntry(row, params.nowMs, params.tagWhitelist));
-  const personalityEntries = dailyRows
-    .filter((row) => shouldPromoteToPersonality(row.summary_text))
-    .map((row) => buildPersonalityVectorEntry(row, params.nowMs, params.tagWhitelist));
+  const experienceEntries = promotionRows.map((row) => buildExperienceVectorEntry(row, params.nowMs, params.tagWhitelist));
+  const semanticItems = buildSemanticItemsFromPromotionRows(promotionRows, params.nowMs);
 
   const db = await openDb(params.lancedbDir);
   let experienceTable: Awaited<ReturnType<typeof getOrCreateTable>> | null = null;
-  let personalityTable: Awaited<ReturnType<typeof getOrCreateTable>> | null = null;
 
   try {
     const tableSchema = getLanceTableSchema();
 
     experienceTable = await getOrCreateTable(db, VECTOR_STORE_KINDS.experiences, tableSchema);
-    personalityTable = await getOrCreateTable(db, VECTOR_STORE_KINDS.personality, tableSchema);
 
-    const [experienceMergeResult, personalityMergeResult] = await Promise.all([
-      mergeUpsertById(
-        experienceTable,
-        experienceEntries.map((entry) => vectorEntryToLanceRow(entry)),
-      ),
-      mergeUpsertById(
-        personalityTable,
-        personalityEntries.map((entry) => vectorEntryToLanceRow(entry)),
-      ),
-    ]);
+    const experienceMergeResult = await mergeUpsertById(
+      experienceTable,
+      experienceEntries.map((entry) => vectorEntryToLanceRow(entry)),
+    );
 
-    const [experienceRowsRaw, personalityRowsRaw] = await Promise.all([
-      experienceTable.query().toArray(),
-      personalityTable.query().toArray(),
-    ]);
+    const experienceRowsRaw = await experienceTable.query().toArray();
 
     const experienceEntriesFromLance = experienceRowsRaw
       .map((row) => normalizeLanceRow(row, VECTOR_STORE_KINDS.experiences))
-      .filter((entry): entry is VectorStoreEntry => entry !== null)
-      .sort((a, b) => a.source_created_at_ms - b.source_created_at_ms || a.id.localeCompare(b.id));
-
-    const personalityEntriesFromLance = personalityRowsRaw
-      .map((row) => normalizeLanceRow(row, VECTOR_STORE_KINDS.personality))
       .filter((entry): entry is VectorStoreEntry => entry !== null)
       .sort((a, b) => a.source_created_at_ms - b.source_created_at_ms || a.id.localeCompare(b.id));
 
@@ -1712,12 +2027,13 @@ async function runDailyMemoryJob(params: {
       entries: experienceEntriesFromLance,
     };
 
-    const personalityStoreForCache: VectorStoreFile = {
-      version: 1,
-      kind: VECTOR_STORE_KINDS.personality,
-      dimensions: VECTOR_EMBEDDING_DIMENSIONS,
-      entries: personalityEntriesFromLance,
-    };
+    const semanticUpsertCount = upsertSemanticItems(params.semanticMemoryDbPath, semanticItems);
+    const semanticItemsForCache = selectTopSemanticItems(
+      params.semanticMemoryDbPath,
+      CORE_PERSONALITY_CACHE_LIMIT,
+      'recent',
+    );
+    const totalSemanticItems = countSemanticItems(params.semanticMemoryDbPath);
 
     await Promise.all([
       writeJsonAtomic(
@@ -1726,7 +2042,7 @@ async function runDailyMemoryJob(params: {
       ),
       writeJsonAtomic(
         params.corePersonalityCachePath,
-        buildCorePersonalityCache(personalityStoreForCache, params.nowMs),
+        buildCorePersonalityCacheFromSemantic(semanticItemsForCache, params.nowMs, totalSemanticItems),
       ),
     ]);
 
@@ -1734,21 +2050,16 @@ async function runDailyMemoryJob(params: {
       runAtMs: params.nowMs,
       windowStartMs,
       windowEndMs,
-      sourceRowCount: dailyRows.length,
+      sourceRowCount: promotionRows.length,
       experienceUpsertCount:
         (experienceMergeResult?.numInsertedRows ?? 0) + (experienceMergeResult?.numUpdatedRows ?? 0),
-      personalityUpsertCount:
-        (personalityMergeResult?.numInsertedRows ?? 0) + (personalityMergeResult?.numUpdatedRows ?? 0),
+      personalityUpsertCount: semanticUpsertCount,
       totalExperienceCount: experienceEntriesFromLance.length,
-      totalPersonalityCount: personalityEntriesFromLance.length,
+      totalPersonalityCount: totalSemanticItems,
     };
   } finally {
     if (experienceTable) {
       experienceTable.close();
-    }
-
-    if (personalityTable) {
-      personalityTable.close();
     }
 
     db.close();
@@ -1811,44 +2122,6 @@ function haveTagOverlap(left: string[], right: string[]): boolean {
 
   const rightSet = new Set(right);
   return left.some((tag) => rightSet.has(tag));
-}
-
-function selectRecentShortTermSummaries(dbPath: string, limit: number): ShortTermSummaryRow[] {
-  const db = new DatabaseSync(dbPath);
-
-  try {
-    db.exec(SHORT_TERM_MEMORY_SCHEMA_SQL);
-
-    const statement = db.prepare(`
-      SELECT
-        id,
-        created_at_ms,
-        bucket_start_ms,
-        bucket_end_ms,
-        summary_text,
-        source_entry_count
-      FROM short_term_summaries
-      ORDER BY created_at_ms DESC, id DESC
-      LIMIT ?
-    `);
-
-    const rows = statement.all(limit) as unknown[];
-    const normalizedRows: ShortTermSummaryRow[] = [];
-
-    for (const row of rows) {
-      const parsed = ShortTermSummaryRowSchema.safeParse(row);
-      if (!parsed.success) {
-        console.warn('[agent] skipping invalid short-term summary row while building respond memory context');
-        continue;
-      }
-
-      normalizedRows.push(parsed.data);
-    }
-
-    return normalizedRows;
-  } finally {
-    db.close();
-  }
 }
 
 function dotProduct(left: number[], right: number[]): number {
@@ -1914,83 +2187,32 @@ async function buildRespondMemoryContext(params: {
 }): Promise<RespondMemoryContextResult> {
   const { request, memorySources, tagWhitelist } = params;
 
-  const budget = {
-    usedTokens: 0,
-    maxTokens: RESPOND_MEMORY_MAX_TOKENS,
-  };
+  const shortTermContext = await buildRespondShortTermContext({
+    requestText: request.text,
+    shortTermMemoryDbPath: memorySources.shortTermMemoryDbPath,
+    workingMemoryLogPath: memorySources.workingMemoryLogPath,
+    tokenBudget: RESPOND_SHORT_TERM_MEMORY_TOKEN_BUDGET,
+    maxShortTermRows: RESPOND_SHORT_TERM_MAX_ROWS,
+    recentInsightsWindowMs: RESPOND_RECENT_INSIGHTS_WINDOW_MS,
+    recentInsightsMaxItems: RESPOND_RECENT_INSIGHTS_MAX_ITEMS,
+    deriveQueryTags: (text) => {
+      const tags = deriveAllowedTagsFromText(text, [...EXPERIENCE_TAG_RULES, ...PERSONALITY_TAG_RULES], tagWhitelist.allowedTagSet);
+      if (tags.length === 0 && tagWhitelist.allowedTagSet.has('chat')) {
+        tags.push('chat');
+      }
 
-  const queryTags = deriveAllowedTagsFromText(
-    request.text,
-    [...EXPERIENCE_TAG_RULES, ...PERSONALITY_TAG_RULES],
-    tagWhitelist.allowedTagSet,
-  );
-  if (queryTags.length === 0 && tagWhitelist.allowedTagSet.has('chat')) {
-    queryTags.push('chat');
-  }
-
-  const lines: string[] = [];
-  appendLineWithinBudget(lines, 'Retrieved EVA memory context (bounded by token budget).', budget);
-  appendLineWithinBudget(
-    lines,
-    `Context budget: ~${RESPOND_MEMORY_MAX_TOKENS} tokens (approximation); used tags for filtering: ${
-      queryTags.length > 0 ? queryTags.join(', ') : 'none'
-    }.`,
-    budget,
-  );
-
-  const nowTsMs = Date.now();
-  const recentInsights = await retrieveRecentInsights({
-    logPath: memorySources.workingMemoryLogPath,
-    sinceTsMs: nowTsMs - RESPOND_RECENT_INSIGHTS_WINDOW_MS,
-    untilTsMs: nowTsMs,
-    limit: RESPOND_RECENT_INSIGHTS_MAX_ITEMS,
+      return tags;
+    },
+    deriveSummaryTags: (text) => deriveAllowedTagsFromText(text, EXPERIENCE_TAG_RULES, tagWhitelist.allowedTagSet),
   });
 
-  const debugRecentInsightsRaw =
-    recentInsights.length === 0
-      ? '- none'
-      : formatInsightsForDebug(recentInsights, {
-          maxItems: RESPOND_RECENT_INSIGHTS_MAX_ITEMS,
-          maxWhatChangedItems: 2,
-          maxLineChars: 180,
-        });
+  const budget = {
+    usedTokens: shortTermContext.approxTokens,
+    maxTokens: shortTermContext.tokenBudget,
+  };
 
-  appendLineWithinBudget(lines, 'Recent observations:', budget);
-  if (recentInsights.length === 0) {
-    appendLineWithinBudget(lines, '- Nothing notable was observed in the last ~2 minutes.', budget);
-  } else {
-    const formattedInsights = formatInsightsForPrompt(recentInsights, {
-      maxItems: RESPOND_RECENT_INSIGHTS_MAX_ITEMS,
-      maxWhatChangedItems: 2,
-      maxLineChars: 180,
-    });
-
-    for (const line of formattedInsights.split('\n')) {
-      if (!appendLineWithinBudget(lines, line, budget)) {
-        break;
-      }
-    }
-  }
-
-  const recentRows = selectRecentShortTermSummaries(memorySources.shortTermMemoryDbPath, RESPOND_SHORT_TERM_MAX_ROWS);
-  const recentRowsWithTags = recentRows.map((row) => ({
-    row,
-    tags: deriveAllowedTagsFromText(row.summary_text, EXPERIENCE_TAG_RULES, tagWhitelist.allowedTagSet),
-  }));
-
-  let filteredRecentRows = recentRowsWithTags.filter((item) => haveTagOverlap(item.tags, queryTags));
-  if (filteredRecentRows.length === 0) {
-    filteredRecentRows = recentRowsWithTags.slice(0, Math.min(3, recentRowsWithTags.length));
-  }
-
-  appendLineWithinBudget(lines, 'Recent short-term summaries (tag-filtered):', budget);
-  for (const item of filteredRecentRows) {
-    const tagsText = item.tags.length > 0 ? item.tags.join(',') : 'none';
-    const line = `- short_term#${item.row.id} tags=[${tagsText}] ${truncateText(item.row.summary_text, 180)}`;
-    if (!appendLineWithinBudget(lines, line, budget)) {
-      break;
-    }
-  }
+  const queryTags = [...shortTermContext.queryTags];
+  const lines = [...shortTermContext.lines];
 
   const queryEmbedding = buildHashedEmbedding(`${request.text}\n${queryTags.join(' ')}`);
 
@@ -2121,8 +2343,11 @@ async function buildRespondMemoryContext(params: {
     text: lines.join('\n'),
     approxTokens: budget.usedTokens,
     tokenBudget: budget.maxTokens,
-    recentInsightsCount: recentInsights.length,
-    debugRecentInsightsRaw,
+    recentInsightsCount: shortTermContext.recentInsightsCount,
+    debugRecentInsightsRaw: shortTermContext.debugRecentInsightsRaw,
+    candidateShortTermRowsCount: shortTermContext.candidateShortTermRowsCount,
+    selectedShortTermRowsCount: shortTermContext.selectedShortTermRowsCount,
+    shortTermSelectionMode: shortTermContext.shortTermSelectionMode,
   };
 }
 
@@ -2257,7 +2482,12 @@ async function generateRespond(
   secrets: AgentSecrets,
   tagWhitelist: ExperienceTagWhitelist,
   personaPrompt: PersonaPrompt,
-  workingMemoryLogPath: string,
+  memorySources: {
+    workingMemoryLogPath: string;
+    shortTermMemoryDbPath: string;
+    semanticMemoryDbPath: string;
+    lancedbDir: string;
+  },
   toneContext: {
     sessionKey: string;
     currentTone: string;
@@ -2266,8 +2496,94 @@ async function generateRespond(
   const model = getModel(config.model.provider as never, config.model.id as never);
 
   const replayedWorkingMemory = await replayWorkingMemoryLog({
-    logPath: workingMemoryLogPath,
+    logPath: memorySources.workingMemoryLogPath,
   });
+
+  const longTermContext = await buildRespondLongTermContext({
+    semanticDbPath: memorySources.semanticMemoryDbPath,
+    lancedbDir: memorySources.lancedbDir,
+    userText: request.text,
+    tokenBudget: RESPOND_LONG_TERM_MEMORY_TOKEN_BUDGET,
+  });
+
+  let shortTermContext: Awaited<ReturnType<typeof buildRespondShortTermContext>> | null = null;
+  let shortTermContextError: string | null = null;
+
+  try {
+    shortTermContext = await buildRespondShortTermContext({
+      requestText: request.text,
+      shortTermMemoryDbPath: memorySources.shortTermMemoryDbPath,
+      workingMemoryLogPath: memorySources.workingMemoryLogPath,
+      tokenBudget: RESPOND_SHORT_TERM_MEMORY_TOKEN_BUDGET,
+      maxShortTermRows: RESPOND_SHORT_TERM_MAX_ROWS,
+      recentInsightsWindowMs: RESPOND_RECENT_INSIGHTS_WINDOW_MS,
+      recentInsightsMaxItems: RESPOND_RECENT_INSIGHTS_MAX_ITEMS,
+      deriveQueryTags: (text) => {
+        const tags = deriveAllowedTagsFromText(text, [...EXPERIENCE_TAG_RULES, ...PERSONALITY_TAG_RULES], tagWhitelist.allowedTagSet);
+        if (tags.length === 0 && tagWhitelist.allowedTagSet.has('chat')) {
+          tags.push('chat');
+        }
+
+        return tags;
+      },
+      deriveSummaryTags: (text) => deriveAllowedTagsFromText(text, EXPERIENCE_TAG_RULES, tagWhitelist.allowedTagSet),
+    });
+  } catch (error) {
+    shortTermContextError = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[agent] respond: short-term context unavailable; continuing with long-term context only (${shortTermContextError}).`,
+    );
+  }
+
+  const shortTermContextText = shortTermContext?.text.trim() ?? '';
+  const longTermContextText = longTermContext.trim();
+
+  const combinedMemoryContext = [
+    'Short-term memory context (recent + compacted; reference only):',
+    shortTermContextText.length > 0
+      ? shortTermContextText
+      : shortTermContextError
+        ? `- Unavailable this turn (${shortTermContextError}).`
+        : '- No short-term memory context available.',
+    '',
+    'Long-term memory context (reference only):',
+    longTermContextText.length > 0
+      ? longTermContextText
+      : 'Traits (long-term):\n- No long-term memory context available.\nRelevant experiences (retrieved):\n- No relevant long-term experiences found.',
+  ].join('\n');
+
+  const memoryContextDebug = {
+    short_term: {
+      included: shortTermContextText.length > 0,
+      token_budget: shortTermContext?.tokenBudget ?? RESPOND_SHORT_TERM_MEMORY_TOKEN_BUDGET,
+      approx_tokens: shortTermContext?.approxTokens ?? 0,
+      char_length: shortTermContextText.length,
+      byte_length: Buffer.byteLength(shortTermContextText, 'utf8'),
+      query_tags: shortTermContext?.queryTags ?? [],
+      recent_insights_count: shortTermContext?.recentInsightsCount ?? 0,
+      candidate_rows: shortTermContext?.candidateShortTermRowsCount ?? 0,
+      selected_rows: shortTermContext?.selectedShortTermRowsCount ?? 0,
+      selection_mode: shortTermContext?.shortTermSelectionMode ?? 'none',
+      fallback_used: shortTermContext?.shortTermSelectionMode === 'fallback',
+      error: shortTermContextError,
+    },
+    long_term: {
+      included: longTermContextText.length > 0,
+      token_budget: RESPOND_LONG_TERM_MEMORY_TOKEN_BUDGET,
+      approx_tokens: estimateTokens(longTermContextText),
+      char_length: longTermContextText.length,
+      byte_length: Buffer.byteLength(longTermContextText, 'utf8'),
+    },
+    combined: {
+      approx_tokens: estimateTokens(combinedMemoryContext),
+      char_length: combinedMemoryContext.length,
+      byte_length: Buffer.byteLength(combinedMemoryContext, 'utf8'),
+    },
+  };
+
+  console.log(
+    `[agent] respond retrieval: short_term candidate_rows=${memoryContextDebug.short_term.candidate_rows} selected_rows=${memoryContextDebug.short_term.selected_rows} selection_mode=${memoryContextDebug.short_term.selection_mode} fallback_used=${memoryContextDebug.short_term.fallback_used} query_tags=[${memoryContextDebug.short_term.query_tags.join(',') || 'none'}]`,
+  );
 
   const context = {
     systemPrompt: buildRespondSystemPrompt({
@@ -2277,6 +2593,7 @@ async function generateRespond(
       currentTone: toneContext.currentTone,
       toneSessionKey: toneContext.sessionKey,
       allowedTones: ALLOWED_TONES,
+      memoryContext: combinedMemoryContext,
     }),
     messages: [
       ...replayedWorkingMemory.messages,
@@ -2314,6 +2631,7 @@ async function generateRespond(
         session_id: request.session_id,
       },
       context,
+      memory_context_debug: memoryContextDebug,
       replay_stats: replayedWorkingMemory.stats,
     },
   });
@@ -2405,16 +2723,124 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
   const workingMemoryLogPath = path.resolve(config.memoryDirPath, WORKING_MEMORY_LOG_FILENAME);
   const assetsDirPath = path.join(config.memoryDirPath, WORKING_MEMORY_ASSETS_DIRNAME);
   const shortTermMemoryDbPath = path.resolve(config.memoryDirPath, SHORT_TERM_MEMORY_DB_FILENAME);
+  const semanticMemoryDbPath = path.resolve(config.memoryDirPath, LONG_TERM_MEMORY_DB_DIRNAME, SEMANTIC_MEMORY_DB_FILENAME);
   const personalityToneCachePath = path.resolve(config.memoryDirPath, 'cache', 'personality_tone.json');
   const coreExperiencesCachePath = path.resolve(config.memoryDirPath, 'cache', 'core_experiences.json');
   const corePersonalityCachePath = path.resolve(config.memoryDirPath, 'cache', 'core_personality.json');
   const lancedbDir = deriveLanceDbDir(config.memoryDirPath);
   const workingMemoryWriteQueue = new SerialTaskQueue();
+  const jobsRuntimeState: JobsRuntimeState = {
+    compaction: createEmptyJobRuntimeState(),
+    promotion: createEmptyJobRuntimeState(),
+  };
 
   mkdirSync(config.memoryDirPath, { recursive: true });
   mkdirSync(assetsDirPath, { recursive: true });
   migrateLegacyLongTermMemoryDir(config.memoryDirPath);
   initializeShortTermMemoryDb(shortTermMemoryDbPath);
+  initializeSemanticDb(semanticMemoryDbPath);
+
+  const runCompactionJobAt = async (runAtMs: number): Promise<CompactionJobResult> =>
+    await workingMemoryWriteQueue.run(async () =>
+      runCompactionJob({
+        workingMemoryLogPath,
+        shortTermMemoryDbPath,
+        nowMs: runAtMs,
+        compactionWindowMs: config.jobs.compaction.windowMs,
+        config,
+        secrets,
+      }),
+    );
+
+  const runPromotionJobAt = async (runAtMs: number): Promise<PromotionJobResult> =>
+    await workingMemoryWriteQueue.run(async () =>
+      runPromotionJob({
+        shortTermMemoryDbPath,
+        semanticMemoryDbPath,
+        lancedbDir,
+        coreExperiencesCachePath,
+        corePersonalityCachePath,
+        nowMs: runAtMs,
+        tagWhitelist,
+      }),
+    );
+
+  const buildCompactionJobResponsePayload = (result: CompactionJobResult): Record<string, unknown> => ({
+    job: 'compaction',
+    run_at_ms: result.runAtMs,
+    cutoff_ms: result.cutoffMs,
+    source_entry_count: result.sourceEntryCount,
+    kept_entry_count: result.keptEntryCount,
+    summary_count: result.summaryCount,
+    short_term_memory_db: shortTermMemoryDbPath,
+    working_memory_log: workingMemoryLogPath,
+  });
+
+  const buildPromotionJobResponsePayload = (result: PromotionJobResult): Record<string, unknown> => ({
+    job: 'promotion',
+    run_at_ms: result.runAtMs,
+    window_start_ms: result.windowStartMs,
+    window_end_ms: result.windowEndMs,
+    source_row_count: result.sourceRowCount,
+    experience_upsert_count: result.experienceUpsertCount,
+    personality_upsert_count: result.personalityUpsertCount,
+    total_experience_count: result.totalExperienceCount,
+    total_personality_count: result.totalPersonalityCount,
+    short_term_memory_db: shortTermMemoryDbPath,
+    semantic_memory_db: semanticMemoryDbPath,
+    lancedb: {
+      dir: lancedbDir,
+      tables: {
+        experiences: VECTOR_STORE_KINDS.experiences,
+        personality: VECTOR_STORE_KINDS.personality,
+      },
+    },
+    cache: {
+      core_experiences: coreExperiencesCachePath,
+      core_personality: corePersonalityCachePath,
+    },
+  });
+
+  const buildRunJobResponsePayload = (runJobResult: RunJobResult): Record<string, unknown> => {
+    return runJobResult.job === 'compaction'
+      ? buildCompactionJobResponsePayload(runJobResult.result)
+      : buildPromotionJobResponsePayload(runJobResult.result);
+  };
+
+  const runJob = async (jobName: RunJobName, runAtMs: number): Promise<RunJobResult> => {
+    const runtimeState = jobsRuntimeState[jobName];
+    runtimeState.lastRequestedRunAtMs = runAtMs;
+    runtimeState.lastStartedAtMs = Date.now();
+
+    try {
+      if (jobName === 'compaction') {
+        const result = await runCompactionJobAt(runAtMs);
+        runtimeState.lastCompletedAtMs = Date.now();
+        runtimeState.lastFailedAtMs = null;
+        runtimeState.lastError = null;
+        return {
+          job: 'compaction',
+          result,
+        };
+      }
+
+      const result = await runPromotionJobAt(runAtMs);
+      runtimeState.lastCompletedAtMs = Date.now();
+      runtimeState.lastFailedAtMs = null;
+      runtimeState.lastError = null;
+      return {
+        job: 'promotion',
+        result,
+      };
+    } catch (error) {
+      runtimeState.lastFailedAtMs = Date.now();
+      runtimeState.lastError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
+  };
+
+  const toJobFailureCode = (jobName: RunJobName): string =>
+    jobName === 'compaction' ? 'COMPACTION_JOB_FAILED' : 'PROMOTION_JOB_FAILED';
 
   let lastInsightRequestAt: number | null = null;
 
@@ -2436,6 +2862,29 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
             maxFrames,
             maxBodyBytes: config.insight.maxBodyBytes,
           },
+          jobs: {
+            enabled: config.jobs.enabled,
+            timezone: config.jobs.timezone,
+            compaction: {
+              enabled: config.jobs.compaction.enabled,
+              cron: config.jobs.compaction.cron,
+              window_ms: config.jobs.compaction.windowMs,
+              last_requested_run_at_ms: jobsRuntimeState.compaction.lastRequestedRunAtMs,
+              last_started_at_ms: jobsRuntimeState.compaction.lastStartedAtMs,
+              last_completed_at_ms: jobsRuntimeState.compaction.lastCompletedAtMs,
+              last_failed_at_ms: jobsRuntimeState.compaction.lastFailedAtMs,
+              last_error: jobsRuntimeState.compaction.lastError,
+            },
+            promotion: {
+              enabled: config.jobs.promotion.enabled,
+              cron: config.jobs.promotion.cron,
+              last_requested_run_at_ms: jobsRuntimeState.promotion.lastRequestedRunAtMs,
+              last_started_at_ms: jobsRuntimeState.promotion.lastStartedAtMs,
+              last_completed_at_ms: jobsRuntimeState.promotion.lastCompletedAtMs,
+              last_failed_at_ms: jobsRuntimeState.promotion.lastFailedAtMs,
+              last_error: jobsRuntimeState.promotion.lastError,
+            },
+          },
           memory: {
             dir: config.memoryDirPath,
             experienceTagsPath: tagWhitelist.sourcePath,
@@ -2444,6 +2893,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
             workingMemoryLogPath,
             workingMemoryAssetsDirPath: assetsDirPath,
             shortTermMemoryDbPath,
+            semanticMemoryDbPath,
             personalityToneCachePath,
             coreExperiencesCachePath,
             corePersonalityCachePath,
@@ -2508,10 +2958,16 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
         return;
       }
 
-      if (method === 'POST' && requestUrl.pathname === '/jobs/hourly') {
-        let body: unknown | undefined;
+      if (method === 'POST' && requestUrl.pathname === '/jobs/run') {
+        const contentType = String(req.headers['content-type'] ?? '').toLowerCase();
+        if (!contentType.includes('application/json')) {
+          sendError(res, 415, 'UNSUPPORTED_CONTENT_TYPE', 'Content-Type must be application/json.');
+          return;
+        }
+
+        let body: unknown;
         try {
-          body = await readOptionalJsonBody(req, config.insight.maxBodyBytes);
+          body = await readJsonBody(req, config.insight.maxBodyBytes);
         } catch (error) {
           if (error instanceof HttpRequestError) {
             sendError(res, error.statusCode, error.code, error.message, error.extra);
@@ -2523,9 +2979,9 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
           return;
         }
 
-        let parsedJobRequest: HourlyJobRequest;
+        let parsedRunJobRequest: ParsedRunJobRequest;
         try {
-          parsedJobRequest = parseHourlyJobRequest(body);
+          parsedRunJobRequest = parseRunJobRequest(body);
         } catch (error) {
           if (error instanceof HttpRequestError) {
             sendError(res, error.statusCode, error.code, error.message, error.extra);
@@ -2537,108 +2993,24 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
           return;
         }
 
-        const runAtMs = parsedJobRequest.now_ms ?? Date.now();
+        const runAtMs = parsedRunJobRequest.now_ms ?? Date.now();
 
-        let result: HourlySummaryResult;
+        let runJobResult: RunJobResult;
         try {
-          result = await workingMemoryWriteQueue.run(async () =>
-            runHourlyMemoryJob(workingMemoryLogPath, shortTermMemoryDbPath, runAtMs),
+          runJobResult = await runJob(parsedRunJobRequest.job, runAtMs);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(res, 500, toJobFailureCode(parsedRunJobRequest.job), message);
+          return;
+        }
+
+        if (runJobResult.job === 'promotion') {
+          console.log(
+            `[agent] promotion job wrote long-term rows: experiences=${runJobResult.result.experienceUpsertCount}, characteristics=${runJobResult.result.personalityUpsertCount}, lancedb=${lancedbDir}, semantic_db=${semanticMemoryDbPath}`,
           );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          sendError(res, 500, 'HOURLY_JOB_FAILED', message);
-          return;
         }
 
-        sendJson(res, 200, {
-          job: 'hourly',
-          run_at_ms: result.runAtMs,
-          cutoff_ms: result.cutoffMs,
-          source_entry_count: result.sourceEntryCount,
-          kept_entry_count: result.keptEntryCount,
-          summary_count: result.summaryCount,
-          short_term_memory_db: shortTermMemoryDbPath,
-          working_memory_log: workingMemoryLogPath,
-        });
-        return;
-      }
-
-      if (method === 'POST' && requestUrl.pathname === '/jobs/daily') {
-        let body: unknown | undefined;
-        try {
-          body = await readOptionalJsonBody(req, config.insight.maxBodyBytes);
-        } catch (error) {
-          if (error instanceof HttpRequestError) {
-            sendError(res, error.statusCode, error.code, error.message, error.extra);
-            return;
-          }
-
-          const message = error instanceof Error ? error.message : String(error);
-          sendError(res, 400, 'INVALID_BODY', message);
-          return;
-        }
-
-        let parsedJobRequest: DailyJobRequest;
-        try {
-          parsedJobRequest = parseDailyJobRequest(body);
-        } catch (error) {
-          if (error instanceof HttpRequestError) {
-            sendError(res, error.statusCode, error.code, error.message, error.extra);
-            return;
-          }
-
-          const message = error instanceof Error ? error.message : String(error);
-          sendError(res, 400, 'INVALID_REQUEST', message);
-          return;
-        }
-
-        const runAtMs = parsedJobRequest.now_ms ?? Date.now();
-
-        let result: DailySummaryResult;
-        try {
-          result = await workingMemoryWriteQueue.run(async () =>
-            runDailyMemoryJob({
-              shortTermMemoryDbPath,
-              lancedbDir,
-              coreExperiencesCachePath,
-              corePersonalityCachePath,
-              nowMs: runAtMs,
-              tagWhitelist,
-            }),
-          );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          sendError(res, 500, 'DAILY_JOB_FAILED', message);
-          return;
-        }
-
-        console.log(
-          `[agent] daily job wrote long-term rows: experiences=${result.experienceUpsertCount}, personality=${result.personalityUpsertCount}, lancedb=${lancedbDir}`,
-        );
-
-        sendJson(res, 200, {
-          job: 'daily',
-          run_at_ms: result.runAtMs,
-          window_start_ms: result.windowStartMs,
-          window_end_ms: result.windowEndMs,
-          source_row_count: result.sourceRowCount,
-          experience_upsert_count: result.experienceUpsertCount,
-          personality_upsert_count: result.personalityUpsertCount,
-          total_experience_count: result.totalExperienceCount,
-          total_personality_count: result.totalPersonalityCount,
-          short_term_memory_db: shortTermMemoryDbPath,
-          lancedb: {
-            dir: lancedbDir,
-            tables: {
-              experiences: VECTOR_STORE_KINDS.experiences,
-              personality: VECTOR_STORE_KINDS.personality,
-            },
-          },
-          cache: {
-            core_experiences: coreExperiencesCachePath,
-            core_personality: corePersonalityCachePath,
-          },
-        });
+        sendJson(res, 200, buildRunJobResponsePayload(runJobResult));
         return;
       }
 
@@ -2698,7 +3070,12 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
             secrets,
             tagWhitelist,
             personaPrompt,
-            workingMemoryLogPath,
+            {
+              workingMemoryLogPath,
+              shortTermMemoryDbPath,
+              semanticMemoryDbPath,
+              lancedbDir,
+            },
             {
               sessionKey: toneSessionKey,
               currentTone,
@@ -2857,12 +3234,37 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
     });
   });
 
+  const schedulerHandle = config.jobs.enabled
+    ? startScheduler({
+        config,
+        runCompaction: async () => {
+          const runJobResult = await runJob('compaction', Date.now());
+          if (runJobResult.job === 'compaction') {
+            console.log(
+              `[agent] scheduler: compaction job completed source_entry_count=${runJobResult.result.sourceEntryCount} summary_count=${runJobResult.result.summaryCount}.`,
+            );
+          }
+        },
+        runPromotion: async () => {
+          const runJobResult = await runJob('promotion', Date.now());
+          if (runJobResult.job === 'promotion') {
+            console.log(
+              `[agent] scheduler: promotion job completed source_row_count=${runJobResult.result.sourceRowCount} experience_upsert_count=${runJobResult.result.experienceUpsertCount} personality_upsert_count=${runJobResult.result.personalityUpsertCount}.`,
+            );
+          }
+        },
+      })
+    : null;
+
+  server.on('close', () => {
+    schedulerHandle?.stop();
+  });
+
   server.listen(config.server.port, () => {
     console.log(`[agent] listening on http://localhost:${config.server.port}`);
     console.log('[agent] health endpoint GET /health');
     console.log('[agent] events endpoint POST /events (wm_event ingest via serial write queue)');
-    console.log('[agent] jobs endpoint POST /jobs/hourly (working→sqlite rollup + trim)');
-    console.log('[agent] jobs endpoint POST /jobs/daily (sqlite→lancedb upsert + core cache refresh)');
+    console.log('[agent] jobs endpoint POST /jobs/run (canonical request values: compaction|promotion)');
     console.log('[agent] respond endpoint POST /respond (model tool-call + memory writes)');
     console.log('[agent] insight endpoint POST /insight');
     console.log(`[agent] model: ${config.model.provider}/${config.model.id}`);
@@ -2871,6 +3273,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
     console.log(`[agent] working memory log: ${workingMemoryLogPath}`);
     console.log(`[agent] working memory assets dir: ${assetsDirPath}`);
     console.log(`[agent] short-term memory db: ${shortTermMemoryDbPath}`);
+    console.log(`[agent] semantic memory db: ${semanticMemoryDbPath}`);
     console.log(`[agent] personality tone cache: ${personalityToneCachePath}`);
     console.log(`[agent] core experiences cache: ${coreExperiencesCachePath}`);
     console.log(`[agent] core personality cache: ${corePersonalityCachePath}`);
@@ -2878,6 +3281,9 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
     console.log(`[agent] lancedb table (experiences): ${VECTOR_STORE_KINDS.experiences}`);
     console.log(`[agent] lancedb table (personality): ${VECTOR_STORE_KINDS.personality}`);
     console.log(`[agent] experience tags: ${tagWhitelist.allowedTags.length} (${tagWhitelist.sourcePath})`);
+    console.log(
+      `[agent] scheduler: jobs.enabled=${config.jobs.enabled} timezone=${config.jobs.timezone} compaction.cron="${config.jobs.compaction.cron}" promotion.cron="${config.jobs.promotion.cron}"`,
+    );
   });
 
   return server;

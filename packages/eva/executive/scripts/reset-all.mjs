@@ -8,8 +8,9 @@ removePathIfExists(paths.workingLogPath);
 removePathIfExists(paths.shortTermDbPath);
 removePathIfExists(paths.cacheDir);
 removePathIfExists(paths.longTermMemoryDbDir);
+removePathIfExists(paths.workingMemoryAssetsDir);
 ensureDir(paths.cacheDir);
 ensureDir(paths.longTermMemoryDbDir);
 
-console.log('[mem-reset:all] removed working/session runtime files and long_term_memory_db/**');
+console.log('[mem-reset:all] removed working/session runtime files, working_memory_assets/**, and long_term_memory_db/**');
 console.log('[mem-reset:all] ensured cache/ and long_term_memory_db/ exist');
