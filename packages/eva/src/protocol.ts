@@ -49,6 +49,16 @@ export const FrameBinaryMetaSchema = z.object({
 
 export const InsightSeveritySchema = z.enum(['low', 'medium', 'high']);
 
+export const FrameReceivedMessageSchema = z.object({
+  type: z.literal('frame_received'),
+  v: z.literal(PROTOCOL_VERSION),
+  frame_id: z.string().min(1),
+  ts_ms: z.number().int().nonnegative(),
+  accepted: z.boolean(),
+  queue_depth: z.number().int().nonnegative(),
+  dropped: z.number().int().nonnegative(),
+});
+
 export const EventEntrySchema = z.object({
   name: z.string().min(1),
   ts_ms: z.number().int().nonnegative(),
@@ -101,6 +111,7 @@ export type HelloMessage = z.infer<typeof HelloMessageSchema>;
 export type ErrorMessage = z.infer<typeof ErrorMessageSchema>;
 export type CommandMessage = z.infer<typeof CommandMessageSchema>;
 export type FrameBinaryMeta = z.infer<typeof FrameBinaryMetaSchema>;
+export type FrameReceivedMessage = z.infer<typeof FrameReceivedMessageSchema>;
 export type EventEntry = z.infer<typeof EventEntrySchema>;
 export type FrameEventsMessage = z.infer<typeof FrameEventsMessageSchema>;
 export type InsightSummary = z.infer<typeof InsightSummarySchema>;
@@ -165,6 +176,25 @@ export function decodeBinaryFrameEnvelope(binaryPayload: Buffer): DecodedBinaryF
   return {
     meta: parsedMetadata.data,
     imageBytes,
+  };
+}
+
+export function makeFrameReceived(
+  frame_id: string,
+  options: {
+    accepted: boolean;
+    queue_depth: number;
+    dropped: number;
+  },
+): FrameReceivedMessage {
+  return {
+    type: 'frame_received',
+    v: PROTOCOL_VERSION,
+    frame_id,
+    ts_ms: Date.now(),
+    accepted: options.accepted,
+    queue_depth: options.queue_depth,
+    dropped: options.dropped,
   };
 }
 

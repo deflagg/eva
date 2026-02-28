@@ -1,0 +1,11 @@
+server:
+  host: 127.0.0.1
+  port: 8792
+
+caption:
+  enabled: true
+  model_id: Salesforce/blip-image-captioning-base
+  device: cuda
+  max_dim: 384
+  max_new_tokens: 24
+  max_body_bytes: 1048576

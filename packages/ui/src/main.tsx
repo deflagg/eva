@@ -15,6 +15,7 @@ import type {
   EventEntry,
   FrameBinaryMeta,
   FrameEventsMessage,
+  FrameReceivedMessage,
   InsightMessage,
   InsightSeverity,
   SpeechOutputMessage,
@@ -42,6 +43,11 @@ interface EventFeedEntry {
   name: string;
   severity: InsightSeverity;
   summary: string;
+}
+
+interface LatestCaption {
+  text: string;
+  ts: string;
 }
 
 type ChatMessageRole = 'user' | 'assistant';
@@ -146,6 +152,23 @@ function isFrameEventsMessage(message: unknown): message is FrameEventsMessage {
     typeof candidate.width === 'number' &&
     typeof candidate.height === 'number' &&
     Array.isArray(candidate.events)
+  );
+}
+
+function isFrameReceivedMessage(message: unknown): message is FrameReceivedMessage {
+  if (!message || typeof message !== 'object') {
+    return false;
+  }
+
+  const candidate = message as Record<string, unknown>;
+  return (
+    candidate.type === 'frame_received' &&
+    candidate.v === 2 &&
+    typeof candidate.frame_id === 'string' &&
+    typeof candidate.ts_ms === 'number' &&
+    typeof candidate.accepted === 'boolean' &&
+    typeof candidate.queue_depth === 'number' &&
+    typeof candidate.dropped === 'number'
   );
 }
 
@@ -315,6 +338,20 @@ function summarizeEventData(data: Record<string, unknown>): string {
     .join(', ');
 }
 
+function getSceneCaptionText(event: EventEntry): string | null {
+  if (event.name !== 'scene_caption') {
+    return null;
+  }
+
+  const textValue = event.data.text;
+  if (typeof textValue !== 'string') {
+    return null;
+  }
+
+  const normalizedText = textValue.trim();
+  return normalizedText.length > 0 ? normalizedText : null;
+}
+
 function getSceneChangeBlobCount(message: FrameEventsMessage): number {
   let count = 0;
 
@@ -384,10 +421,12 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
   const [framesSent, setFramesSent] = React.useState(0);
   const [framesAcked, setFramesAcked] = React.useState(0);
+  const [framesDroppedByBroker, setFramesDroppedByBroker] = React.useState(0);
   const [framesTimedOut, setFramesTimedOut] = React.useState(0);
   const [lastAckLatencyMs, setLastAckLatencyMs] = React.useState<number | null>(null);
   const [inFlightFrameId, setInFlightFrameId] = React.useState<string | null>(null);
   const [recentEvents, setRecentEvents] = React.useState<EventFeedEntry[]>([]);
+  const [latestCaption, setLatestCaption] = React.useState<LatestCaption | null>(null);
   const [latestInsight, setLatestInsight] = React.useState<InsightMessage | null>(null);
   const [debugOverlayEnabled, setDebugOverlayEnabled] = React.useState(false);
 
@@ -418,6 +457,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const frameLoopTimerRef = React.useRef<number | null>(null);
   const framesSentRef = React.useRef(0);
   const framesAckedRef = React.useRef(0);
+  const framesDroppedByBrokerRef = React.useRef(0);
   const framesTimedOutRef = React.useRef(0);
   const activeSpeechAbortControllerRef = React.useRef<AbortController | null>(null);
   const lastSpokenTextOutputRequestIdRef = React.useRef<string | null>(null);
@@ -444,12 +484,14 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
     for (let index = events.length - 1; index >= 0; index -= 1) {
       const event = events[index];
+      const sceneCaptionText = getSceneCaptionText(event);
+
       mapped.push({
         id: nextEventIdRef.current,
         ts: formatTime(event.ts_ms),
         name: event.name,
         severity: event.severity,
-        summary: summarizeEventData(event.data),
+        summary: sceneCaptionText ?? summarizeEventData(event.data),
       });
       nextEventIdRef.current += 1;
     }
@@ -772,12 +814,25 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       },
       onMessage: (message) => {
         const inFlight = inFlightRef.current;
+        const frameReceivedMessage = isFrameReceivedMessage(message) ? message : null;
         const frameEventsMessage = isFrameEventsMessage(message) ? message : null;
         const insightMessage = isInsightMessage(message) ? message : null;
         const textOutputMessage = isTextOutputMessage(message) ? message : null;
         const speechOutputMessage = isSpeechOutputMessage(message) ? message : null;
 
         if (frameEventsMessage && frameEventsMessage.events.length > 0) {
+          for (const event of frameEventsMessage.events) {
+            const sceneCaptionText = getSceneCaptionText(event);
+            if (!sceneCaptionText) {
+              continue;
+            }
+
+            setLatestCaption({
+              text: sceneCaptionText,
+              ts: formatTime(event.ts_ms),
+            });
+          }
+
           appendEvents(frameEventsMessage.events);
 
           const sceneChangeBlobCount = getSceneChangeBlobCount(frameEventsMessage);
@@ -799,24 +854,42 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
           void playSpeechOutputAlert(speechOutputMessage);
         }
 
-        if (frameEventsMessage && inFlight && frameEventsMessage.frame_id === inFlight.frameId) {
+        if (frameReceivedMessage && inFlight && frameReceivedMessage.frame_id === inFlight.frameId) {
           window.clearTimeout(inFlight.timeoutId);
           inFlightRef.current = null;
           setInFlightFrameId(null);
 
-          const latencyMs = Date.now() - inFlight.sentAt;
-          framesAckedRef.current += 1;
-          setFramesAcked(framesAckedRef.current);
-          setLastAckLatencyMs(latencyMs);
+          const receiptLatencyMs = Date.now() - inFlight.sentAt;
+          setLastAckLatencyMs(receiptLatencyMs);
 
-          const shouldLogAck =
-            shouldSampleFrameLog(framesAckedRef.current) || frameEventsMessage.events.length > 0;
+          if (!frameReceivedMessage.accepted) {
+            framesDroppedByBrokerRef.current += 1;
+            setFramesDroppedByBroker(framesDroppedByBrokerRef.current);
 
-          if (shouldLogAck) {
             appendLog('incoming', summarizeMessage(message));
-            appendLog('system', `Frame acknowledged in ${latencyMs}ms.`);
+            appendLog(
+              'system',
+              `Frame dropped by broker (queue_depth=${frameReceivedMessage.queue_depth}, dropped=${frameReceivedMessage.dropped}) in ${receiptLatencyMs}ms.`,
+            );
+            return;
           }
 
+          framesAckedRef.current += 1;
+          setFramesAcked(framesAckedRef.current);
+
+          const shouldLogReceipt = shouldSampleFrameLog(framesAckedRef.current);
+          if (shouldLogReceipt) {
+            appendLog('incoming', summarizeMessage(message));
+            appendLog('system', `Frame receipt acknowledged in ${receiptLatencyMs}ms.`);
+          }
+
+          return;
+        }
+
+        if (frameEventsMessage) {
+          if (frameEventsMessage.events.length > 0) {
+            appendLog('incoming', summarizeMessage(message));
+          }
           return;
         }
 
@@ -1387,15 +1460,25 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         </div>
         <canvas ref={captureCanvasRef} style={{ display: 'none' }} />
         <p style={{ marginTop: 8 }}>
-          Frames sent: <strong>{framesSent}</strong> · acknowledged: <strong>{framesAcked}</strong> · timed out:{' '}
-          <strong>{framesTimedOut}</strong> · in-flight: <strong>{inFlightFrameId ? 'yes' : 'no'}</strong> · events in feed:{' '}
-          <strong>{recentEvents.length}</strong>
+          Frames sent: <strong>{framesSent}</strong> · receipts: <strong>{framesAcked}</strong> · dropped by broker:{' '}
+          <strong>{framesDroppedByBroker}</strong> · timed out: <strong>{framesTimedOut}</strong> · in-flight:{' '}
+          <strong>{inFlightFrameId ? 'yes' : 'no'}</strong> · events in feed: <strong>{recentEvents.length}</strong>
           {lastAckLatencyMs !== null ? (
             <>
               {' '}
-              · last ack latency: <strong>{lastAckLatencyMs}ms</strong>
+              · last receipt latency: <strong>{lastAckLatencyMs}ms</strong>
             </>
           ) : null}
+        </p>
+        <p style={{ marginTop: 4, marginBottom: 0 }}>
+          <strong>Latest caption:</strong>{' '}
+          {latestCaption ? (
+            <>
+              {latestCaption.text} <small>(at {latestCaption.ts})</small>
+            </>
+          ) : (
+            <em>none yet</em>
+          )}
         </p>
       </section>
 

@@ -1,12 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.com/eva/protocol-v1.schema.json",
-  "title": "Eva Protocol v1",
-  "description": "JSON message schemas for Eva protocol control/detection/messages and binary-frame metadata.",
+  "$id": "https://example.com/eva/protocol-v2.schema.json",
+  "title": "Eva Protocol v2",
+  "description": "JSON message schemas for Eva protocol control/event/messages and binary-frame metadata.",
   "type": "object",
   "oneOf": [
     {
       "$ref": "#/$defs/frame_binary_meta"
+    },
+    {
+      "$ref": "#/$defs/frame_received"
     },
     {
       "$ref": "#/$defs/detections"
@@ -33,7 +36,7 @@
   "$defs": {
     "version": {
       "type": "integer",
-      "const": 1
+      "const": 2
     },
     "severity": {
       "type": "string",
@@ -86,6 +89,46 @@
         "image_bytes": {
           "type": "integer",
           "minimum": 1
+        }
+      }
+    },
+    "frame_received": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "v",
+        "frame_id",
+        "ts_ms",
+        "accepted",
+        "queue_depth",
+        "dropped"
+      ],
+      "properties": {
+        "type": {
+          "const": "frame_received"
+        },
+        "v": {
+          "$ref": "#/$defs/version"
+        },
+        "frame_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "accepted": {
+          "type": "boolean"
+        },
+        "queue_depth": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dropped": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },

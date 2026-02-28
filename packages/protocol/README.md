@@ -1,4 +1,4 @@
-# Eva Protocol (v1)
+# Eva Protocol (v2)
 
 Detections/control messages are JSON over WebSocket. Frame transport (UI -> Eva -> Vision) uses a binary envelope.
 
@@ -17,7 +17,7 @@ Metadata JSON shape:
 ```json
 {
   "type": "frame_binary",
-  "v": 1,
+  "v": 2,
   "frame_id": "550e8400-e29b-41d4-a716-446655440000",
   "ts_ms": 1700000000000,
   "mime": "image/jpeg",
@@ -31,12 +31,33 @@ Rules:
 - `image_bytes` must exactly match the binary JPEG payload size.
 - `mime` is currently fixed to `image/jpeg`.
 
-### 2) `detections` (Vision -> Eva -> UI) JSON
+### 2) `frame_received` (Eva -> UI) JSON
+
+Receipt ACK emitted by Eva as soon as a binary frame is accepted by Eva runtime ingress.
+
+```json
+{
+  "type": "frame_received",
+  "v": 2,
+  "frame_id": "550e8400-e29b-41d4-a716-446655440000",
+  "ts_ms": 1700000000001,
+  "accepted": true,
+  "queue_depth": 12,
+  "dropped": 0
+}
+```
+
+Notes:
+- This is a **receipt** signal, not a Vision processing completion signal.
+- `accepted=false` means Eva dropped/rejected the frame at ingress.
+- `queue_depth` and `dropped` are broker-facing observability counters.
+
+### 3) `detections` (Vision -> Eva -> UI) JSON
 
 ```json
 {
   "type": "detections",
-  "v": 1,
+  "v": 2,
   "frame_id": "550e8400-e29b-41d4-a716-446655440000",
   "ts_ms": 1700000000000,
   "width": 1280,
@@ -71,14 +92,14 @@ Notes:
 - `detections.events` is optional.
 - `events[].severity` is one of `low | medium | high`.
 
-### 3) `insight` (Vision -> Eva -> UI) JSON
+### 4) `insight` (Vision -> Eva -> UI) JSON
 
 > Important: insight messages do **not** include `frame_id`.
 
 ```json
 {
   "type": "insight",
-  "v": 1,
+  "v": 2,
   "clip_id": "2b84b71b-2db6-4781-bdc5-f2b35e643b1f",
   "trigger_frame_id": "550e8400-e29b-41d4-a716-446655440000",
   "ts_ms": 1700000000456,
@@ -103,14 +124,14 @@ Notes:
 Notes:
 - `summary.tts_response` is required and carries the conversational utterance string produced by the insight model.
 
-### 4) `text_output` (Eva -> UI) JSON
+### 5) `text_output` (Eva -> UI) JSON
 
 Used for immediate server-originated text replies/alerts.
 
 ```json
 {
   "type": "text_output",
-  "v": 1,
+  "v": 2,
   "request_id": "f53ef67c-70af-4b78-a2cb-5f49551de061",
   "session_id": "system-alerts",
   "ts_ms": 1700000001200,
@@ -124,7 +145,7 @@ Used for immediate server-originated text replies/alerts.
 }
 ```
 
-### 5) `speech_output` (Eva -> UI) JSON
+### 6) `speech_output` (Eva -> UI) JSON
 
 > Additive protocol extension for server-originated spoken output.
 >
@@ -133,7 +154,7 @@ Used for immediate server-originated text replies/alerts.
 ```json
 {
   "type": "speech_output",
-  "v": 1,
+  "v": 2,
   "request_id": "f53ef67c-70af-4b78-a2cb-5f49551de061",
   "session_id": "system-alerts",
   "ts_ms": 1700000001234,
@@ -150,36 +171,36 @@ Used for immediate server-originated text replies/alerts.
 }
 ```
 
-### 6) `command` (UI -> Eva -> Vision, debug) JSON
+### 7) `command` (UI -> Eva -> Vision, debug) JSON
 
 > Temporary debug command introduced in Iteration 13.
 
 ```json
 {
   "type": "command",
-  "v": 1,
+  "v": 2,
   "name": "insight_test"
 }
 ```
 
-### 7) `error` (any direction) JSON
+### 8) `error` (any direction) JSON
 
 ```json
 {
   "type": "error",
-  "v": 1,
+  "v": 2,
   "frame_id": "550e8400-e29b-41d4-a716-446655440000",
   "code": "SOME_CODE",
   "message": "Human-readable error"
 }
 ```
 
-### 8) Optional `hello` (debug) JSON
+### 9) Optional `hello` (debug) JSON
 
 ```json
 {
   "type": "hello",
-  "v": 1,
+  "v": 2,
   "role": "ui",
   "ts_ms": 1700000000000
 }
@@ -187,5 +208,5 @@ Used for immediate server-originated text replies/alerts.
 
 ## Notes
 
-- `v` is protocol version and is currently fixed at `1`.
+- `v` is protocol version and is currently fixed at `2`.
 - Detection `box` coordinates are in source-frame pixel space: `[x1, y1, x2, y2]`.

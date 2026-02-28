@@ -18,6 +18,16 @@ export interface FrameBinaryMeta {
   image_bytes: number;
 }
 
+export interface FrameReceivedMessage {
+  type: 'frame_received';
+  v: 2;
+  frame_id: string;
+  ts_ms: number;
+  accepted: boolean;
+  queue_depth: number;
+  dropped: number;
+}
+
 export interface ErrorMessage {
   type: 'error';
   v: 2;
@@ -114,6 +124,7 @@ export interface SpeechOutputMessage {
 
 export type ProtocolMessage =
   | HelloMessage
+  | FrameReceivedMessage
   | FrameEventsMessage
   | ErrorMessage
   | InsightMessage

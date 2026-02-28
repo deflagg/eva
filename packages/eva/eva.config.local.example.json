@@ -6,6 +6,27 @@
   "vision": {
     "wsUrl": "ws://localhost:8000/infer"
   },
+  "stream": {
+    "broker": {
+      "enabled": true,
+      "maxFrames": 200,
+      "maxAgeMs": 15000,
+      "maxBytes": 0
+    },
+    "visionForward": {
+      "enabled": true,
+      "sampleEveryN": 2
+    }
+  },
+  "caption": {
+    "enabled": true,
+    "baseUrl": "http://127.0.0.1:8792",
+    "timeoutMs": 1500,
+    "cooldownMs": 2000,
+    "periodicMs": 8000,
+    "dedupeWindowMs": 15000,
+    "minSceneSeverity": "medium"
+  },
   "insightRelay": {
     "enabled": true,
     "cooldownMs": 10000,

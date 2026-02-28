@@ -236,6 +236,8 @@ async function main(): Promise<void> {
       port: config.server.port,
       eyePath: config.server.eyePath,
       visionWsUrl: config.vision.wsUrl,
+      stream: config.stream,
+      caption: config.caption,
       insightRelay: config.insightRelay,
       agent: config.agent,
       text: config.text,

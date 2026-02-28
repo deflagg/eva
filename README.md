@@ -105,10 +105,29 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 127**.
+Implemented through **Iteration 170**.
 
 Key current behavior:
 - Vision emits per-frame `frame_events` (scene-change events + blob metadata).
-- Eva routes frame-scoped responses by `frame_id` and forwards events to Agent `/events`.
-- UI ACKs frames on `frame_events`, renders scene-change blob overlays, and maintains event feed.
-- Insights remain clip-based and optional, triggered from event surprise/cooldown rules.
+- Eva emits immediate receipt ACKs (`frame_received`) on frame ingress.
+- UI clears in-flight frames on `frame_received` (receipt), not on Vision processing messages.
+- Eva forwards Vision frames best-effort with sampling (`stream.visionForward.sampleEveryN`) and bounded broker guardrails.
+- Tier-1 captioning emits synthetic `scene_caption` events and persists caption events to Executive `/events` (`source: "caption"`).
+
+### Streaming ACK model: receipt ACK vs processing events
+
+- **`frame_received`** (Eva -> UI) means Eva accepted/rejected ingress for that frame.
+  - Clears UI in-flight slot.
+  - Drives receipt counters/latency.
+  - Includes broker metadata (`accepted`, `queue_depth`, `dropped`).
+- **`frame_events`** (Vision -> Eva -> UI) means Vision processing output for forwarded frames.
+  - Drives overlays + event feed.
+  - Does **not** control stream pacing.
+
+### Interpreting UI counters
+
+- `Frames sent`: binary frames attempted from UI.
+- `receipts`: frames accepted by Eva ingress (`frame_received.accepted=true`).
+- `dropped by broker`: ingress rejections (`frame_received.accepted=false`).
+- `timed out`: receipt not observed before UI timeout window.
+- `last receipt latency`: time from send -> receipt ACK (Eva ingress latency), not Vision inference latency.

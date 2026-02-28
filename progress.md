@@ -7795,3 +7795,658 @@
 
 ### Notes
 - This closes the 145–160 plan track with a dedicated guard against future disconnects between compaction outputs and `/respond` retrieval usage.
+
+## Iteration 161 (plan 161–170 track) — Protocol + runtime plumbing for `frame_received`
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Added protocol schema/documentation support for new Eva receipt ACK message `frame_received`:
+  - `packages/protocol/schema.json`
+    - added `$defs.frame_received`
+    - included `frame_received` in top-level `oneOf` union
+  - `packages/protocol/README.md`
+    - documented `frame_received` semantics and example payload
+    - clarified receipt-vs-processing ACK behavior
+- Updated Eva protocol typing in `packages/eva/src/protocol.ts`:
+  - added `FrameReceivedMessageSchema`
+  - added exported `FrameReceivedMessage` type
+  - added `makeFrameReceived(...)` helper for consistent Eva-generated receipt payloads
+- Updated UI protocol typing in `packages/ui/src/types.ts`:
+  - added `FrameReceivedMessage` interface
+  - included it in `ProtocolMessage` union
+- Wired Eva runtime receipt emission in `packages/eva/src/server.ts`:
+  - on successful binary frame envelope decode, Eva now immediately sends `frame_received`
+  - receipt currently reports:
+    - `accepted: true`
+    - `queue_depth: 0`
+    - `dropped: 0`
+  - if Vision is disconnected, Eva still emits `frame_received` and does not hard-fail the frame ingress path.
+
+### Files changed
+- `packages/protocol/schema.json`
+- `packages/protocol/README.md`
+- `packages/eva/src/protocol.ts`
+- `packages/eva/src/server.ts`
+- `packages/ui/src/types.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+- Manual smoke check (Vision intentionally unavailable):
+  - started Eva server via local script harness and sent one valid binary `frame_binary` envelope
+  - observed inbound UI messages:
+    - `hello`
+    - `frame_received`
+  - confirmed no ingress hard-fail error was emitted for that frame in this path.
+
+### Manual run steps
+1. Start Eva and UI as usual.
+2. Start camera + streaming in UI.
+3. Confirm incoming logs include `frame_received` payloads.
+4. Confirm streaming behavior is otherwise unchanged in this iteration (UI still clears in-flight on `frame_events`).
+
+### Notes
+- Iteration 161 intentionally adds receipt ACK plumbing only.
+- UI ACK source remains `frame_events` until Iteration 162.
+
+## Iteration 162 (plan 161–170 track) — UI switches ACK to `frame_received`
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Updated UI streaming ACK behavior in `packages/ui/src/main.tsx` to clear in-flight on receipt ACKs:
+  - added `isFrameReceivedMessage(...)` type guard
+  - in-flight frame now clears when:
+    - `frame_received.frame_id === inFlight.frameId`
+- Removed frame clear coupling to Vision processing events:
+  - `frame_events` messages no longer clear the in-flight frame slot
+  - overlays/event feed handling on `frame_events` remains intact
+- Added explicit broker-drop accounting for receipt rejections:
+  - new UI counter: `framesDroppedByBroker`
+  - when `frame_received.accepted === false`:
+    - increment dropped-by-broker counter
+    - clear in-flight without counting a timeout
+- Updated UI terminology to receipt semantics:
+  - status line now shows `receipts` and `last receipt latency`
+  - receipt log line text now uses `Frame receipt acknowledged ...`
+
+### Files changed
+- `packages/ui/src/main.tsx`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva && npm run build`
+- Static code-path verification:
+  - confirmed ACK clear path keys off `frame_received` match
+  - confirmed previous `frame_events` ACK clear condition is absent
+
+### Manual run steps
+1. Start Eva + UI.
+2. Start camera + streaming.
+3. Stop Vision and keep streaming active.
+4. Confirm UI receipt counter continues increasing and timeout counter does not storm.
+5. Restart Vision.
+6. Confirm `frame_events` still populate overlays/event feed while receipt-based streaming continues.
+
+### Notes
+- Iteration 162 decouples UI stream cadence from Vision response latency by ACKing on Eva receipt.
+- Broker `accepted=false` values are now modeled explicitly in UI state for upcoming broker/drop-policy iterations.
+
+## Iteration 163 (plan 161–170 track) — Eva bounded frame broker + drop policy
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Added new frame broker module:
+  - `packages/eva/src/broker/frameBroker.ts`
+  - implements bounded in-memory deque entries:
+    - `{ frame_id, ts_ms, width, height, jpegBytes, receivedAtMs }`
+  - eviction behaviors:
+    - evict expired entries older than `maxAgeMs`
+    - enforce `maxFrames` upper bound for queue shape
+    - optional `maxBytes` guard (`0` disables byte cap)
+  - push result surface:
+    - `accepted`
+    - `queueDepth`
+    - cumulative `dropped`
+- Added stream broker config surface:
+  - `packages/eva/src/config.ts`
+    - new schema:
+      - `stream.broker.enabled`
+      - `stream.broker.maxFrames`
+      - `stream.broker.maxAgeMs`
+      - `stream.broker.maxBytes`
+  - `packages/eva/eva.config.json`
+    - committed defaults:
+      ```json
+      "stream": {
+        "broker": { "enabled": true, "maxFrames": 200, "maxAgeMs": 15000, "maxBytes": 0 }
+      }
+      ```
+- Wired runtime broker path in Eva:
+  - `packages/eva/src/index.ts`
+    - passes `stream` config into `startServer(...)`
+  - `packages/eva/src/server.ts`
+    - instantiates `FrameBroker`
+    - on binary frame ingress:
+      1. push frame into broker
+      2. emit `frame_received` with broker-derived:
+         - `accepted`
+         - `queue_depth`
+         - `dropped`
+      3. if `accepted=false`, skip Vision forwarding for that frame
+    - added startup observability log for broker config values.
+
+### Files changed
+- `packages/eva/src/broker/frameBroker.ts` (new)
+- `packages/eva/src/config.ts`
+- `packages/eva/eva.config.json`
+- `packages/eva/src/index.ts`
+- `packages/eva/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+- Manual broker-capacity smoke test (local harness, `maxFrames=5`, Vision unavailable):
+  - sent 12 valid binary frames
+  - observed receipt summary:
+    - `acceptedCount: 5`
+    - `rejectedCount: 7`
+    - final receipt included:
+      - `accepted: false`
+      - `queue_depth: 5`
+      - `dropped: 7`
+  - confirms bounded stable behavior with explicit broker drop signaling.
+
+### Manual run steps
+1. Set small broker cap in local config (example):
+   ```json
+   "stream": { "broker": { "enabled": true, "maxFrames": 5, "maxAgeMs": 15000, "maxBytes": 0 } }
+   ```
+2. Start Eva + UI and stream frames.
+3. Confirm incoming `frame_received` shows `accepted=false` once queue saturates.
+4. Confirm UI remains stable (no crash/runaway memory) while drops are reported.
+
+### Notes
+- This iteration introduces bounded ingest storage and explicit drop reporting without changing UI rendering logic.
+- Vision forwarding remains direct best-effort for accepted frames; sampling policy is planned for Iteration 164.
+
+## Iteration 164 (plan 161–170 track) — Vision forwarding best-effort + sampling
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Added Vision forwarding sampling config:
+  - `packages/eva/src/config.ts`
+    - new schema:
+      - `stream.visionForward.enabled`
+      - `stream.visionForward.sampleEveryN`
+  - `packages/eva/eva.config.json`
+    - added committed defaults:
+      ```json
+      "stream": {
+        "visionForward": { "enabled": true, "sampleEveryN": 2 }
+      }
+      ```
+- Updated Eva runtime forwarding policy in `packages/eva/src/server.ts`:
+  - frame forward to Vision now requires all of:
+    1. broker accepted frame
+    2. `stream.visionForward.enabled === true`
+    3. sampling predicate passes (`forwardCounter % sampleEveryN === 0`)
+  - sampling counter increments over accepted ingress frames
+  - added startup observability log for forwarding policy:
+    - `vision forwarding enabled=<...> sampleEveryN=<...>`
+- Routing correctness hardening:
+  - `frameRouter.set(frame_id, ws)` now only runs for frames actually forwarded to Vision
+  - non-forwarded sampled-out frames do not register routes (expected)
+  - Vision responses for forwarded frames continue to resolve via `FrameRouter.take(frame_id)`.
+
+### Files changed
+- `packages/eva/src/config.ts`
+- `packages/eva/eva.config.json`
+- `packages/eva/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+- Manual sampling/routing smoke test (local harness with fake Vision WS):
+  - configured `sampleEveryN=2`
+  - sent 8 binary frames via UI WS client
+  - observed:
+    - `frame_received` receipts: 8
+    - Vision received forwarded frames: 4 (`1,3,5,7`)
+    - UI received `frame_events`: 4 with matching frame IDs
+    - forwarded frame IDs matched delivered event frame IDs exactly
+
+### Manual run steps
+1. Set local config:
+   ```json
+   "stream": {
+     "visionForward": { "enabled": true, "sampleEveryN": 2 }
+   }
+   ```
+2. Start Eva + Vision + UI.
+3. Start streaming in UI.
+4. Confirm stream stays smooth while overlays/events appear less frequently.
+5. Confirm logs do not spam route-miss warnings for normally forwarded frames.
+
+### Notes
+- Iteration 164 decouples Vision load from UI frame cadence via deterministic sampling on accepted frames.
+- Non-forwarded frames still receive immediate `frame_received` ACK, preserving continuous stream behavior.
+
+## Iteration 165 (plan 161–170 track) — Add captioner service skeleton (deterministic)
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Added new `packages/eva/captioner` service package:
+  - `packages/eva/captioner/app/main.py`
+  - `packages/eva/captioner/app/run.py`
+  - `packages/eva/captioner/app/settings.py`
+  - `packages/eva/captioner/app/__init__.py`
+  - `packages/eva/captioner/settings.yaml`
+  - `packages/eva/captioner/requirements.txt`
+  - `packages/eva/captioner/README.md`
+- Implemented required service endpoints:
+  - `GET /health`
+  - `POST /caption`
+- Implemented deterministic caption response contract:
+  - `POST /caption` returns:
+    - `{"text":"caption-stub","latency_ms":1,"model":"stub"}`
+- Implemented guardrails in `POST /caption`:
+  - strict content-type check (`Content-Type: image/jpeg` required)
+  - request body max-size enforcement from config (`caption.max_body_bytes`)
+  - clear structured error responses for:
+    - unsupported content-type (`415 UNSUPPORTED_CONTENT_TYPE`)
+    - oversized body (`413 PAYLOAD_TOO_LARGE`)
+    - empty body (`400 EMPTY_BODY`)
+- Added configurable defaults in `settings.yaml`:
+  - `server.host: 127.0.0.1`
+  - `server.port: 8792`
+  - `caption.enabled: true`
+  - `caption.model_id: stub`
+  - `caption.max_body_bytes: 1048576`
+
+### Files changed
+- `packages/eva/captioner/app/__init__.py` (new)
+- `packages/eva/captioner/app/main.py` (new)
+- `packages/eva/captioner/app/run.py` (new)
+- `packages/eva/captioner/app/settings.py` (new)
+- `packages/eva/captioner/settings.yaml` (new)
+- `packages/eva/captioner/requirements.txt` (new)
+- `packages/eva/captioner/README.md` (new)
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/captioner && python3 -m compileall app`
+- Manual endpoint checks pass:
+  1. Start service: `python -m app.run`
+  2. JPEG caption call:
+     - `curl -sS -X POST -H 'Content-Type: image/jpeg' --data-binary @/tmp/captioner-test.jpg http://127.0.0.1:8792/caption`
+     - observed: `{"text":"caption-stub","latency_ms":1,"model":"stub"}`
+  3. Guardrail spot checks:
+     - wrong content-type -> `415 UNSUPPORTED_CONTENT_TYPE`
+     - oversized body -> `413 PAYLOAD_TOO_LARGE`
+
+### Manual run steps
+1. `cd packages/eva/captioner`
+2. `python3 -m venv .venv`
+3. `source .venv/bin/activate`
+4. `pip install -r requirements.txt`
+5. `python -m app.run`
+6. In another shell:
+   - `printf '\xFF\xD8\xFF\xD9' > /tmp/captioner-test.jpg`
+   - `curl -sS -X POST -H 'Content-Type: image/jpeg' --data-binary @/tmp/captioner-test.jpg http://127.0.0.1:8792/caption`
+
+### Notes
+- Iteration 165 intentionally ships a deterministic stub response only (no ML model loading yet).
+- Real caption model loading/inference tuning is planned for Iteration 166.
+
+## Iteration 166 (plan 161–170 track) — Captioner real model inference + tuned defaults
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Upgraded captioner runtime from deterministic stub to real BLIP caption inference:
+  - `packages/eva/captioner/app/main.py`
+  - startup now loads model + processor once:
+    - `BlipProcessor.from_pretrained(model_id)`
+    - `BlipForConditionalGeneration.from_pretrained(model_id)`
+  - model is moved to resolved device and set to eval mode at startup.
+- Added caption model/device config fields and validation:
+  - `caption.device` (`auto|cuda|cpu`)
+  - `caption.max_dim`
+  - `caption.max_new_tokens`
+  - retained `caption.max_body_bytes`
+- Implemented device resolution policy (cuda-preferred when available):
+  - `auto` => `cuda` if available else `cpu`
+  - `cuda` requested but unavailable => logged fallback to `cpu`
+- Implemented real inference path in `POST /caption`:
+  - validates `Content-Type: image/jpeg`
+  - enforces max body bytes
+  - decodes JPEG with Pillow
+  - resizes image to `max_dim` preserving aspect ratio
+  - runs model generation with `max_new_tokens`
+  - returns:
+    - `text`
+    - `latency_ms`
+    - `model`
+- Preserved/extended guardrails and health surface:
+  - existing content-type/size/empty-body checks preserved
+  - `/health` now includes model/device/runtime metadata:
+    - `requested_device`
+    - `resolved_device`
+    - `model_loaded`
+    - `max_dim`
+    - `max_new_tokens`
+    - `last_latency_ms`
+- Updated captioner defaults to Tier-1 target settings:
+  - `packages/eva/captioner/settings.yaml`
+    ```yaml
+    caption:
+      enabled: true
+      model_id: Salesforce/blip-image-captioning-base
+      device: cuda
+      max_dim: 384
+      max_new_tokens: 24
+    ```
+- Updated captioner dependencies:
+  - `packages/eva/captioner/requirements.txt`
+    - added `torch`, `torchvision`, `transformers`, `Pillow`
+- Updated captioner docs:
+  - `packages/eva/captioner/README.md`
+    - now documents real model inference path and new config keys.
+
+### Files changed
+- `packages/eva/captioner/app/main.py`
+- `packages/eva/captioner/settings.yaml`
+- `packages/eva/captioner/requirements.txt`
+- `packages/eva/captioner/README.md`
+- `progress.md`
+
+### Verification
+- Compile checks pass:
+  - `cd packages/eva/captioner && python3 -m compileall app`
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+- Inference pipeline unit-style sanity (mocked model/runtime):
+  - executed `_generate_caption(...)` with:
+    - real JPEG bytes
+    - mock processor/model/torch runtime
+  - observed result:
+    - `{'text': 'mock-caption', 'latency_ms': 1}`
+
+### Manual run steps (GPU validation)
+1. `cd packages/eva/captioner`
+2. `python3 -m venv .venv`
+3. `source .venv/bin/activate`
+4. `pip install -r requirements.txt`
+5. `python -m app.run`
+6. Call `/caption` repeatedly with representative JPEGs (384px-scale) and confirm:
+   - low-latency responses
+   - stable memory behavior
+   - `model` reports `Salesforce/blip-image-captioning-base`
+7. Check `/health` for `resolved_device` (`cuda` on GTX 1080 host).
+
+### Notes
+- Iteration 166 upgrades captioner to real Tier-1 model inference while keeping request guardrails from Iteration 165.
+- Exact latency will vary by host/GPU/driver stack; defaults are tuned for reflex-speed Tier-1 captioning behavior.
+
+## Iteration 167 (plan 161–170 track) — Eva integrates Tier-1 captions (latest-wins + trigger policy + persistence)
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Added Eva caption config surface and defaults:
+  - `packages/eva/src/config.ts`
+    - new config schema:
+      - `caption.enabled`
+      - `caption.baseUrl`
+      - `caption.timeoutMs`
+      - `caption.cooldownMs`
+      - `caption.periodicMs`
+      - `caption.dedupeWindowMs`
+      - `caption.minSceneSeverity`
+  - `packages/eva/eva.config.json`
+    - committed defaults:
+      ```json
+      "caption": {
+        "enabled": true,
+        "baseUrl": "http://127.0.0.1:8792",
+        "timeoutMs": 1500,
+        "cooldownMs": 2000,
+        "periodicMs": 8000,
+        "dedupeWindowMs": 15000,
+        "minSceneSeverity": "medium"
+      }
+      ```
+  - `packages/eva/eva.config.local.example.json`
+    - added matching `caption` + `stream` examples for local overrides.
+- Wired caption config into server startup:
+  - `packages/eva/src/index.ts`
+    - passes `caption` config into `startServer(...)`
+- Added broker read API needed for caption scheduling:
+  - `packages/eva/src/broker/frameBroker.ts`
+    - new methods:
+      - `getByFrameId(frame_id)`
+      - `getLatest()`
+- Implemented caption scheduling/runtime policy in `packages/eva/src/server.ts`:
+  - added `callCaptionService(...)` (`POST {image/jpeg}` to captioner `/caption`, timeout-bound)
+  - latest-wins queue state:
+    - `inFlightCaption`
+    - `pendingCaptionFrameId`
+  - cooldown-aware queue drain + pending-frame overwrite behavior
+  - trigger sources:
+    1. Vision `frame_events` containing `scene_change` with severity >= `caption.minSceneSeverity`
+    2. periodic timer (`caption.periodicMs`) using broker latest frame while UI stream is active
+  - dedupe suppression:
+    - if caption text is unchanged within `caption.dedupeWindowMs`, suppress UI emission + persistence
+- Implemented synthetic caption delivery + persistence:
+  - emits synthetic `frame_events` to UI with single event:
+    - `name: "scene_caption"`
+    - `data: { text, model, latency_ms }`
+    - frame metadata sourced from broker (`frame_id`, `width`, `height`)
+  - persists caption event via Executive `/events` fire-and-forget path:
+    - payload source: `"caption"`
+    - includes `meta.frame_id`
+  - kept warning throttling semantics for persistence failures.
+- Added startup observability log for caption policy:
+  - caption enabled/baseUrl/timeout/cooldown/periodic/dedupe/minSeverity.
+
+### Files changed
+- `packages/eva/src/config.ts`
+- `packages/eva/eva.config.json`
+- `packages/eva/eva.config.local.example.json`
+- `packages/eva/src/index.ts`
+- `packages/eva/src/broker/frameBroker.ts`
+- `packages/eva/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build/compile checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva/captioner && python3 -m compileall app`
+- Scene-change trigger + dedupe + persistence harness (local fake Vision/captioner/agent):
+  - sent 3 frames with `scene_change` (severity `medium`) per frame
+  - observed summary:
+    - `captionRequests: 2` (latest-wins queue behavior)
+    - `uiSceneCaptionEvents: 1` (dedupe suppression active)
+    - `captionSourceEvents: 1` (persisted to Executive `/events` with `source="caption"`)
+- Periodic fallback harness (no scene_change events, periodic enabled):
+  - observed synthetic caption events/persistence continue on periodic trigger:
+    - `sceneCaptionCount: 4`
+    - `captionSourceEvents: 4`
+
+### Manual run steps
+1. Start captioner (`packages/eva/captioner`):
+   - `python -m app.run`
+2. Start Vision + Eva + UI.
+3. Stream camera frames in UI.
+4. Confirm `scene_caption` events appear shortly after qualifying scene changes.
+5. Keep streaming in a mostly static scene; confirm periodic `scene_caption` refresh still appears.
+6. Check Executive working-memory event log path for `source: "caption"` event ingress.
+
+### Notes
+- Iteration 167 adds Tier-1 caption semantics without changing existing Vision `frame_events` transport.
+- Raw Vision event persistence remains unchanged in this iteration; allowlist filtering is planned in Iteration 169.
+
+## Iteration 168 (plan 161–170 track) — UI promotes captions to current state
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Added explicit latest-caption UI state in `packages/ui/src/main.tsx`:
+  - new state: `latestCaption`
+  - updated whenever a `scene_caption` event arrives inside `frame_events`
+  - stores caption text + timestamp for display
+- Added persistent "Latest caption" UI line:
+  - rendered in camera preview section as:
+    - `Latest caption: <text> (at <time>)`
+  - shows fallback `none yet` before first caption event
+- Improved event-feed readability for captions:
+  - `appendEvents(...)` now special-cases caption events:
+    - when `event.name === "scene_caption"` and `data.text` is present,
+      event summary is set directly to `data.text`
+  - all other events keep existing summarized `key=value` rendering.
+
+### Files changed
+- `packages/ui/src/main.tsx`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva && npm run build`
+- Static UI-path checks:
+  - confirmed `latestCaption` state exists and is updated on `scene_caption`
+  - confirmed event summary path uses caption text directly for `scene_caption` entries
+
+### Manual run steps
+1. Start captioner + Vision + Eva + UI.
+2. Start streaming in UI.
+3. Trigger at least one caption event (scene-change or periodic caption path).
+4. Confirm:
+   - "Latest caption" line updates and remains visible
+   - Recent events shows caption text directly (not `text=...` key-value truncation)
+
+### Notes
+- Iteration 168 is presentation/state only; caption generation/scheduling behavior remains from Iteration 167.
+
+## Iteration 169 (plan 161–170 track) — Stop persisting raw `scene_change` telemetry
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Updated Eva Vision inbound persistence path in `packages/eva/src/server.ts`:
+  - added persistence filter helper:
+    - `filterPersistableVisionEvents(...)`
+  - filter currently allowlists only human-level Vision events:
+    - `scene_caption`
+- Changed Vision `frame_events` ingest forwarding behavior:
+  - before calling Executive `/events`, Eva now filters Vision event payload
+  - `scene_change` (and other low-level detector events) are no longer persisted from the Vision source path
+  - if filtered list is empty, Eva skips `/events` forward call entirely
+- Preserved UI behavior:
+  - full unfiltered `frame_events` payload still routes to UI unchanged
+  - overlays/event feed continue to receive `scene_change` and other low-level telemetry for visualization
+- Caption trigger behavior remains intact:
+  - `scene_change` severity checks still run on original unfiltered event list for caption scheduling.
+
+### Files changed
+- `packages/eva/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+- Manual persistence-filter harness (fake Vision + fake Agent ingest):
+  - Vision emitted a mixed event list:
+    - `scene_change`, `line_cross`, `scene_caption`
+  - observed UI event names (unchanged):
+    - `line_cross`, `scene_caption`, `scene_change`
+  - observed persisted Vision event names (`source: "vision"`):
+    - `scene_caption` only
+  - confirms `scene_change` telemetry remains UI-visible but is excluded from working-memory persistence.
+
+### Manual run steps
+1. Start Vision + Eva + UI with Executive running.
+2. Generate normal stream activity with scene-change telemetry.
+3. Confirm UI still shows `scene_change` overlays/events.
+4. Inspect Executive event ingestion/logs and confirm raw `scene_change` events are not persisted from `source:"vision"`.
+
+### Notes
+- Iteration 169 narrows persistence to human-level Vision events while keeping operator/UI observability intact.
+- Caption persistence (`source:"caption"`) from Iteration 167 remains unchanged.
+
+## Iteration 170 (plan 161–170 track) — Observability + regression guardrails
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Added Eva `/health` observability for stream/caption runtime in `packages/eva/src/server.ts`:
+  - `stream.broker` runtime snapshot now reports:
+    - config limits: `max_frames`, `max_age_ms`, `max_bytes`
+    - live state: `queue_depth`, `dropped`, `total_bytes`
+    - `enabled`
+  - caption runtime state now reports:
+    - `enabled`
+    - `in_flight`
+    - `pending_frame_id`
+    - `last_latency_ms`
+- Added broker stats accessor in `packages/eva/src/broker/frameBroker.ts`:
+  - new `getStats()` API returns current broker depth/drop/bytes plus configured limits.
+- Added UI ACK regression guard script:
+  - `packages/ui/scripts/check-frame-ack-regressions.ts`
+  - assertions ensure:
+    1. in-flight clear path is keyed off `frame_received`
+    2. legacy `frame_events` ACK-clear gate is absent
+    3. receipt latency log string is present
+- Wired npm command in UI package:
+  - `packages/ui/package.json`
+  - added script: `check:frame-ack`
+- Updated root docs for ACK model + counters:
+  - `README.md`
+  - documented:
+    - receipt ACK (`frame_received`) vs processing events (`frame_events`)
+    - interpretation of UI counters (`sent`, `receipts`, `dropped by broker`, `timed out`, `last receipt latency`).
+
+### Files changed
+- `packages/eva/src/server.ts`
+- `packages/eva/src/broker/frameBroker.ts`
+- `packages/ui/scripts/check-frame-ack-regressions.ts` (new)
+- `packages/ui/package.json`
+- `README.md`
+- `progress.md`
+
+### Verification
+- Acceptance checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build && npm run check:frame-ack`
+- Manual `/health` observability smoke check:
+  - started Eva with test config and called `GET /health`
+  - observed runtime payload includes broker depth/drop/limits and caption in-flight + last latency fields.
+
+### Manual run steps
+1. Start Eva.
+2. Call:
+   - `curl -sS http://127.0.0.1:8787/health`
+3. Confirm JSON includes:
+   - `stream.broker.{max_frames,max_age_ms,max_bytes,queue_depth,dropped,total_bytes}`
+   - `caption.{in_flight,last_latency_ms}`
+4. In UI package run:
+   - `npm run check:frame-ack`
+
+### Notes
+- This iteration closes the 161–170 track with explicit runtime visibility and a regression guard against accidental ACK-path recoupling.

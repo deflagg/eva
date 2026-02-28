@@ -118,6 +118,43 @@ const SubprocessesConfigSchema = z.object({
   }),
 });
 
+const StreamBrokerConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  maxFrames: z.number().int().positive().default(200),
+  maxAgeMs: z.number().int().positive().default(15_000),
+  maxBytes: z.number().int().nonnegative().default(0),
+});
+
+const StreamVisionForwardConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  sampleEveryN: z.number().int().positive().default(2),
+});
+
+const StreamConfigSchema = z.object({
+  broker: StreamBrokerConfigSchema.default({
+    enabled: true,
+    maxFrames: 200,
+    maxAgeMs: 15_000,
+    maxBytes: 0,
+  }),
+  visionForward: StreamVisionForwardConfigSchema.default({
+    enabled: true,
+    sampleEveryN: 2,
+  }),
+});
+
+const InsightSeveritySchema = z.enum(['low', 'medium', 'high']);
+
+const CaptionConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  baseUrl: HttpUrlSchema.default('http://127.0.0.1:8792'),
+  timeoutMs: PositiveTimeoutMsSchema.default(1_500),
+  cooldownMs: z.number().int().nonnegative().default(2_000),
+  periodicMs: z.number().int().nonnegative().default(8_000),
+  dedupeWindowMs: z.number().int().nonnegative().default(15_000),
+  minSceneSeverity: InsightSeveritySchema.default('medium'),
+});
+
 const EvaConfigSchema = z.object({
   server: z.object({
     port: z.number().int().min(1).max(65_535),
@@ -128,6 +165,27 @@ const EvaConfigSchema = z.object({
       .refine((value) => value.startsWith('/'), 'server.eyePath must start with "/"'),
   }),
   vision: VisionWsConfigSchema,
+  stream: StreamConfigSchema.default({
+    broker: {
+      enabled: true,
+      maxFrames: 200,
+      maxAgeMs: 15_000,
+      maxBytes: 0,
+    },
+    visionForward: {
+      enabled: true,
+      sampleEveryN: 2,
+    },
+  }),
+  caption: CaptionConfigSchema.default({
+    enabled: true,
+    baseUrl: 'http://127.0.0.1:8792',
+    timeoutMs: 1_500,
+    cooldownMs: 2_000,
+    periodicMs: 8_000,
+    dedupeWindowMs: 15_000,
+    minSceneSeverity: 'medium',
+  }),
   insightRelay: InsightRelayConfigSchema.default({
     enabled: true,
     cooldownMs: 10_000,
