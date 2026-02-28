@@ -16,6 +16,7 @@ import {
 import { createVisionClient } from './visionClient.js';
 import { FrameRouter } from './router.js';
 import { FrameBroker } from './broker/frameBroker.js';
+import { MotionGate } from './broker/motionGate.js';
 import { synthesize } from './speech/edgeTts.js';
 
 const FRAME_ROUTE_TTL_MS = 5_000;
@@ -83,6 +84,15 @@ export interface StartServerOptions {
     periodicMs: number;
     dedupeWindowMs: number;
     minSceneSeverity: 'low' | 'medium' | 'high';
+  };
+  motionGate: {
+    enabled: boolean;
+    thumbW: number;
+    thumbH: number;
+    triggerThreshold: number;
+    resetThreshold: number;
+    cooldownMs: number;
+    minPersistFrames: number;
   };
   insightRelay: {
     enabled: boolean;
@@ -501,18 +511,6 @@ function resolveCaptionUrl(baseUrl: string): string {
   return new URL('caption', normalizedBaseUrl).toString();
 }
 
-function severityRank(severity: 'low' | 'medium' | 'high'): number {
-  if (severity === 'high') {
-    return 3;
-  }
-
-  if (severity === 'medium') {
-    return 2;
-  }
-
-  return 1;
-}
-
 async function callCaptionService(
   captionConfig: StartServerOptions['caption'],
   jpegBytes: Buffer,
@@ -652,7 +650,7 @@ async function callAgentEventsIngest(agentBaseUrl: string, payload: AgentEventsI
 }
 
 export function startServer(options: StartServerOptions): Server {
-  const { port, eyePath, visionWsUrl, stream, caption, insightRelay, agent, text, speech } = options;
+  const { port, eyePath, visionWsUrl, stream, caption, motionGate, insightRelay, agent, text, speech } = options;
 
   let lastSpeechRequestStartedAtMs: number | null = null;
   let activeUiClient: WebSocket | null = null;
@@ -1068,14 +1066,24 @@ export function startServer(options: StartServerOptions): Server {
   };
 
   const frameBroker = new FrameBroker(stream.broker);
+  const motionGateEngine = motionGate.enabled
+    ? new MotionGate({
+        thumbW: motionGate.thumbW,
+        thumbH: motionGate.thumbH,
+        triggerThreshold: motionGate.triggerThreshold,
+        resetThreshold: motionGate.resetThreshold,
+        cooldownMs: motionGate.cooldownMs,
+        minPersistFrames: motionGate.minPersistFrames,
+      })
+    : null;
+  let lastMotion: { ts_ms: number; mad: number; triggered: boolean } | null = null;
+
   const visionForwardSampleEveryN = Math.max(1, stream.visionForward.sampleEveryN);
   let visionForwardCounter = 0;
 
-  const captionMinSeverityRank = severityRank(caption.minSceneSeverity);
   let inFlightCaption: Promise<void> | null = null;
   let pendingCaptionFrameId: string | null = null;
   let captionCooldownTimer: NodeJS.Timeout | null = null;
-  let captionPeriodicTimer: NodeJS.Timeout | null = null;
   let lastCaptionStartedAtMs: number | null = null;
   let lastCaptionText: string | null = null;
   let lastCaptionTextAtMs: number | null = null;
@@ -1093,25 +1101,6 @@ export function startServer(options: StartServerOptions): Server {
 
     lastCaptionWarningAtMs = nowMs;
     console.warn(`[eva] caption pipeline warning: ${reason}`);
-  };
-
-  const hasSceneChangeAtOrAboveThreshold = (
-    events: Array<{
-      name: string;
-      severity: 'low' | 'medium' | 'high';
-    }>,
-  ): boolean => {
-    for (const event of events) {
-      if (event.name !== 'scene_change') {
-        continue;
-      }
-
-      if (severityRank(event.severity) >= captionMinSeverityRank) {
-        return true;
-      }
-    }
-
-    return false;
   };
 
   const filterPersistableVisionEvents = (
@@ -1261,22 +1250,6 @@ export function startServer(options: StartServerOptions): Server {
     maybeStartCaptionWorker();
   };
 
-  if (caption.enabled && caption.periodicMs > 0) {
-    captionPeriodicTimer = setInterval(() => {
-      if (!activeUiClient || activeUiClient.readyState !== WebSocket.OPEN) {
-        return;
-      }
-
-      const latestFrame = frameBroker.getLatest();
-      if (!latestFrame) {
-        return;
-      }
-
-      scheduleCaptionForFrame(latestFrame.frame_id);
-    }, caption.periodicMs);
-    captionPeriodicTimer.unref?.();
-  }
-
   const frameRouter = new FrameRouter({
     ttlMs: FRAME_ROUTE_TTL_MS,
     onExpire: (frameId) => {
@@ -1325,10 +1298,6 @@ export function startServer(options: StartServerOptions): Server {
                 const reason = error instanceof Error ? error.message : String(error);
                 warnAgentEventsIngestFailure(reason);
               });
-            }
-
-            if (hasSceneChangeAtOrAboveThreshold(message.events)) {
-              scheduleCaptionForFrame(message.frame_id);
             }
 
             // Intentionally no direct event-based text/speech output.
@@ -1417,7 +1386,7 @@ export function startServer(options: StartServerOptions): Server {
     activeUiClient = ws;
     sendJson(ws, makeHello('eva'));
 
-    ws.on('message', (data, isBinary) => {
+    ws.on('message', async (data, isBinary) => {
       if (isBinary) {
         const binaryPayload = rawDataToBuffer(data);
 
@@ -1442,17 +1411,50 @@ export function startServer(options: StartServerOptions): Server {
           receivedAtMs: Date.now(),
         });
 
+        let receiptMotion: { mad: number; triggered: boolean } | undefined;
+
+        if (brokerPush.accepted && motionGateEngine !== null) {
+          try {
+            const motion = await motionGateEngine.process({
+              tsMs: decodedFrame.meta.ts_ms,
+              jpegBytes: decodedFrame.imageBytes,
+            });
+
+            lastMotion = {
+              ts_ms: decodedFrame.meta.ts_ms,
+              mad: motion.mad,
+              triggered: motion.triggered,
+            };
+
+            receiptMotion = {
+              mad: lastMotion.mad,
+              triggered: lastMotion.triggered,
+            };
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            console.warn(`[eva] motion gate processing failed for frame ${frameId}: ${reason}`);
+          }
+        }
+
         sendJson(
           ws,
           makeFrameReceived(frameId, {
             accepted: brokerPush.accepted,
             queue_depth: brokerPush.queueDepth,
             dropped: brokerPush.dropped,
+            ...(receiptMotion ? { motion: receiptMotion } : {}),
           }),
         );
 
         if (!brokerPush.accepted) {
           return;
+        }
+
+        if (receiptMotion?.triggered) {
+          const latestFrame = frameBroker.getLatest();
+          if (latestFrame) {
+            scheduleCaptionForFrame(latestFrame.frame_id);
+          }
         }
 
         if (!stream.visionForward.enabled) {
@@ -1557,7 +1559,10 @@ export function startServer(options: StartServerOptions): Server {
       `[eva] vision forwarding enabled=${stream.visionForward.enabled} sampleEveryN=${visionForwardSampleEveryN}`,
     );
     console.log(
-      `[eva] caption enabled=${caption.enabled} baseUrl=${caption.baseUrl} timeoutMs=${caption.timeoutMs} cooldownMs=${caption.cooldownMs} periodicMs=${caption.periodicMs} dedupeWindowMs=${caption.dedupeWindowMs} minSceneSeverity=${caption.minSceneSeverity}`,
+      `[eva] motion gate enabled=${motionGate.enabled} thumb=${motionGate.thumbW}x${motionGate.thumbH} triggerThreshold=${motionGate.triggerThreshold} resetThreshold=${motionGate.resetThreshold} cooldownMs=${motionGate.cooldownMs} minPersistFrames=${motionGate.minPersistFrames}`,
+    );
+    console.log(
+      `[eva] caption enabled=${caption.enabled} baseUrl=${caption.baseUrl} timeoutMs=${caption.timeoutMs} triggerSource=motion_gate triggerCooldownMs=${caption.cooldownMs} dedupeWindowMs=${caption.dedupeWindowMs}`,
     );
     console.log(
       `[eva] insight relay enabled=${insightRelay.enabled} cooldownMs=${insightRelay.cooldownMs} dedupeWindowMs=${insightRelay.dedupeWindowMs}`,
@@ -1587,11 +1592,6 @@ export function startServer(options: StartServerOptions): Server {
     if (captionCooldownTimer) {
       clearTimeout(captionCooldownTimer);
       captionCooldownTimer = null;
-    }
-
-    if (captionPeriodicTimer) {
-      clearInterval(captionPeriodicTimer);
-      captionPeriodicTimer = null;
     }
 
     pendingCaptionFrameId = null;

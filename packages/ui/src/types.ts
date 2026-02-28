@@ -26,6 +26,10 @@ export interface FrameReceivedMessage {
   accepted: boolean;
   queue_depth: number;
   dropped: number;
+  motion?: {
+    mad: number;
+    triggered: boolean;
+  };
 }
 
 export interface ErrorMessage {

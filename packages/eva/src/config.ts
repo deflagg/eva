@@ -143,6 +143,21 @@ const StreamConfigSchema = z.object({
   }),
 });
 
+const MotionGateConfigSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    thumbW: z.number().int().positive().default(64),
+    thumbH: z.number().int().positive().default(64),
+    triggerThreshold: z.number().nonnegative().default(12),
+    resetThreshold: z.number().nonnegative().default(8),
+    cooldownMs: z.number().int().nonnegative().default(1_500),
+    minPersistFrames: z.number().int().positive().default(2),
+  })
+  .refine((value) => value.resetThreshold <= value.triggerThreshold, {
+    path: ['resetThreshold'],
+    message: 'motionGate.resetThreshold must be <= motionGate.triggerThreshold',
+  });
+
 const InsightSeveritySchema = z.enum(['low', 'medium', 'high']);
 
 const CaptionConfigSchema = z.object({
@@ -185,6 +200,15 @@ const EvaConfigSchema = z.object({
     periodicMs: 8_000,
     dedupeWindowMs: 15_000,
     minSceneSeverity: 'medium',
+  }),
+  motionGate: MotionGateConfigSchema.default({
+    enabled: true,
+    thumbW: 64,
+    thumbH: 64,
+    triggerThreshold: 12,
+    resetThreshold: 8,
+    cooldownMs: 1_500,
+    minPersistFrames: 2,
   }),
   insightRelay: InsightRelayConfigSchema.default({
     enabled: true,

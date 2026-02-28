@@ -129,6 +129,23 @@
         "dropped": {
           "type": "integer",
           "minimum": 0
+        },
+        "motion": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mad",
+            "triggered"
+          ],
+          "properties": {
+            "mad": {
+              "type": "number",
+              "minimum": 0
+            },
+            "triggered": {
+              "type": "boolean"
+            }
+          }
         }
       }
     },

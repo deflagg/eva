@@ -43,7 +43,11 @@ Receipt ACK emitted by Eva as soon as a binary frame is accepted by Eva runtime 
   "ts_ms": 1700000000001,
   "accepted": true,
   "queue_depth": 12,
-  "dropped": 0
+  "dropped": 0,
+  "motion": {
+    "mad": 13.42,
+    "triggered": true
+  }
 }
 ```
 
@@ -51,6 +55,9 @@ Notes:
 - This is a **receipt** signal, not a Vision processing completion signal.
 - `accepted=false` means Eva dropped/rejected the frame at ingress.
 - `queue_depth` and `dropped` are broker-facing observability counters.
+- `motion` is optional and carries Motion Gate telemetry for tuning:
+  - `mad`: grayscale thumbnail mean absolute difference vs previous accepted frame
+  - `triggered`: whether Motion Gate emitted a trigger for that frame
 
 ### 3) `detections` (Vision -> Eva -> UI) JSON
 

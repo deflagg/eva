@@ -4,7 +4,7 @@ import ReactDOM from 'react-dom/client';
 import { captureJpegFrame, isCameraSupported, startCamera, stopCamera } from './camera';
 import { loadUiRuntimeConfig, type UiDebugOverlayConfig, type UiRuntimeConfig } from './config';
 import { encodeBinaryFrameEnvelope } from './frameBinary';
-import { clearOverlay, drawSceneChangeOverlay } from './overlay';
+import { clearOverlay, drawDebugGeometryOverlay } from './overlay';
 import {
   createSpeechClient,
   deriveEvaHttpBaseUrl,
@@ -50,6 +50,12 @@ interface LatestCaption {
   ts: string;
 }
 
+interface LatestMotion {
+  ts: string;
+  mad: number;
+  triggered: boolean;
+}
+
 type ChatMessageRole = 'user' | 'assistant';
 
 interface ChatMessage {
@@ -88,7 +94,6 @@ const SEVERITY_COLOR: Record<InsightSeverity, string> = {
 const FRAME_TIMEOUT_MS = 500;
 const FRAME_LOOP_INTERVAL_MS = 100;
 const EVENT_FEED_LIMIT = 60;
-const SCENE_CHANGE_OVERLAY_TTL_MS = 1_500;
 
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -155,12 +160,28 @@ function isFrameEventsMessage(message: unknown): message is FrameEventsMessage {
   );
 }
 
+function isFrameReceivedMotion(value: unknown): value is NonNullable<FrameReceivedMessage['motion']> {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.mad === 'number' &&
+    Number.isFinite(candidate.mad) &&
+    candidate.mad >= 0 &&
+    typeof candidate.triggered === 'boolean'
+  );
+}
+
 function isFrameReceivedMessage(message: unknown): message is FrameReceivedMessage {
   if (!message || typeof message !== 'object') {
     return false;
   }
 
   const candidate = message as Record<string, unknown>;
+  const motion = candidate.motion;
+
   return (
     candidate.type === 'frame_received' &&
     candidate.v === 2 &&
@@ -168,7 +189,8 @@ function isFrameReceivedMessage(message: unknown): message is FrameReceivedMessa
     typeof candidate.ts_ms === 'number' &&
     typeof candidate.accepted === 'boolean' &&
     typeof candidate.queue_depth === 'number' &&
-    typeof candidate.dropped === 'number'
+    typeof candidate.dropped === 'number' &&
+    (motion === undefined || isFrameReceivedMotion(motion))
   );
 }
 
@@ -352,25 +374,6 @@ function getSceneCaptionText(event: EventEntry): string | null {
   return normalizedText.length > 0 ? normalizedText : null;
 }
 
-function getSceneChangeBlobCount(message: FrameEventsMessage): number {
-  let count = 0;
-
-  for (const event of message.events) {
-    if (event.name !== 'scene_change') {
-      continue;
-    }
-
-    const blobs = event.data.blobs;
-    if (!Array.isArray(blobs)) {
-      continue;
-    }
-
-    count += blobs.length;
-  }
-
-  return count;
-}
-
 function hasDebugOverlayGeometry(config: UiDebugOverlayConfig | undefined): boolean {
   if (!config) {
     return false;
@@ -427,6 +430,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const [inFlightFrameId, setInFlightFrameId] = React.useState<string | null>(null);
   const [recentEvents, setRecentEvents] = React.useState<EventFeedEntry[]>([]);
   const [latestCaption, setLatestCaption] = React.useState<LatestCaption | null>(null);
+  const [latestMotion, setLatestMotion] = React.useState<LatestMotion | null>(null);
   const [latestInsight, setLatestInsight] = React.useState<InsightMessage | null>(null);
   const [debugOverlayEnabled, setDebugOverlayEnabled] = React.useState(false);
 
@@ -452,7 +456,6 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const seenTextOutputRequestIdsRef = React.useRef<string[]>([]);
   const inFlightRef = React.useRef<InFlightFrame | null>(null);
   const captureInProgressRef = React.useRef(false);
-  const sceneOverlayClearTimerRef = React.useRef<number | null>(null);
 
   const frameLoopTimerRef = React.useRef<number | null>(null);
   const framesSentRef = React.useRef(0);
@@ -563,35 +566,30 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     clearOverlay(overlayCanvas);
   }, []);
 
-  const clearSceneOverlayTimer = React.useCallback(() => {
-    if (sceneOverlayClearTimerRef.current === null) {
-      return;
-    }
-
-    window.clearTimeout(sceneOverlayClearTimerRef.current);
-    sceneOverlayClearTimerRef.current = null;
-  }, []);
-
-  const renderSceneOverlay = React.useCallback(
+  const renderDebugOverlay = React.useCallback(
     (message: FrameEventsMessage) => {
+      if (!debugOverlayEnabled || !debugOverlayConfig) {
+        clearOverlayCanvas();
+        return;
+      }
+
       const videoElement = videoRef.current;
       const overlayCanvas = overlayCanvasRef.current;
       if (!videoElement || !overlayCanvas) {
         return;
       }
 
-      drawSceneChangeOverlay(videoElement, overlayCanvas, message, {
-        debugOverlayEnabled,
-        debugOverlay: debugOverlayConfig,
-      });
-
-      clearSceneOverlayTimer();
-      sceneOverlayClearTimerRef.current = window.setTimeout(() => {
-        sceneOverlayClearTimerRef.current = null;
-        clearOverlayCanvas();
-      }, SCENE_CHANGE_OVERLAY_TTL_MS);
+      drawDebugGeometryOverlay(
+        videoElement,
+        overlayCanvas,
+        {
+          width: message.width,
+          height: message.height,
+        },
+        debugOverlayConfig,
+      );
     },
-    [clearOverlayCanvas, clearSceneOverlayTimer, debugOverlayConfig, debugOverlayEnabled],
+    [clearOverlayCanvas, debugOverlayConfig, debugOverlayEnabled],
   );
 
   React.useEffect(() => {
@@ -808,7 +806,6 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       onClose: () => {
         setStatus('disconnected');
         dropInFlight('Dropped in-flight frame: socket disconnected');
-        clearSceneOverlayTimer();
         clearOverlayCanvas();
         appendLog('system', 'Disconnected from Eva WebSocket endpoint.');
       },
@@ -820,25 +817,32 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         const textOutputMessage = isTextOutputMessage(message) ? message : null;
         const speechOutputMessage = isSpeechOutputMessage(message) ? message : null;
 
-        if (frameEventsMessage && frameEventsMessage.events.length > 0) {
-          for (const event of frameEventsMessage.events) {
-            const sceneCaptionText = getSceneCaptionText(event);
-            if (!sceneCaptionText) {
-              continue;
+        if (frameReceivedMessage?.motion) {
+          setLatestMotion({
+            ts: formatTime(frameReceivedMessage.ts_ms),
+            mad: frameReceivedMessage.motion.mad,
+            triggered: frameReceivedMessage.motion.triggered,
+          });
+        }
+
+        if (frameEventsMessage) {
+          if (frameEventsMessage.events.length > 0) {
+            for (const event of frameEventsMessage.events) {
+              const sceneCaptionText = getSceneCaptionText(event);
+              if (!sceneCaptionText) {
+                continue;
+              }
+
+              setLatestCaption({
+                text: sceneCaptionText,
+                ts: formatTime(event.ts_ms),
+              });
             }
 
-            setLatestCaption({
-              text: sceneCaptionText,
-              ts: formatTime(event.ts_ms),
-            });
+            appendEvents(frameEventsMessage.events);
           }
 
-          appendEvents(frameEventsMessage.events);
-
-          const sceneChangeBlobCount = getSceneChangeBlobCount(frameEventsMessage);
-          if (sceneChangeBlobCount > 0) {
-            renderSceneOverlay(frameEventsMessage);
-          }
+          renderDebugOverlay(frameEventsMessage);
         }
 
         if (insightMessage) {
@@ -917,13 +921,12 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     appendLog,
     appendTextOutputMessage,
     clearOverlayCanvas,
-    clearSceneOverlayTimer,
     connectionAttempt,
     dropInFlight,
     evaWsUrl,
     maybeAutoSpeakTextOutput,
     playSpeechOutputAlert,
-    renderSceneOverlay,
+    renderDebugOverlay,
   ]);
 
   const handleSendTestMessage = React.useCallback(() => {
@@ -1041,10 +1044,14 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
     setDebugOverlayEnabled((prev) => {
       const next = !prev;
+      if (!next) {
+        clearOverlayCanvas();
+      }
+
       appendLog('system', `Debug ROI/line overlay ${next ? 'enabled' : 'disabled'}.`);
       return next;
     });
-  }, [appendLog, debugOverlayConfigured]);
+  }, [appendLog, clearOverlayCanvas, debugOverlayConfigured]);
 
   const handleToggleAutoSpeak = React.useCallback(() => {
     setAutoSpeakEnabled((prev) => {
@@ -1120,7 +1127,6 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       const stream = await startCamera(videoElement);
       streamRef.current = stream;
 
-      clearSceneOverlayTimer();
       clearOverlayCanvas();
 
       setCameraStatus('running');
@@ -1131,7 +1137,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       setCameraError(message);
       appendLog('system', `Failed to start camera: ${message}`);
     }
-  }, [appendLog, cameraStatus, cameraSupported, clearOverlayCanvas, clearSceneOverlayTimer]);
+  }, [appendLog, cameraStatus, cameraSupported, clearOverlayCanvas]);
 
   const handleStopCamera = React.useCallback(() => {
     setStreamingEnabled(false);
@@ -1144,13 +1150,12 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       videoRef.current.srcObject = null;
     }
 
-    clearSceneOverlayTimer();
     clearOverlayCanvas();
 
     setCameraStatus('idle');
     setCameraError(null);
     appendLog('system', 'Camera stopped.');
-  }, [appendLog, clearOverlayCanvas, clearSceneOverlayTimer, dropInFlight]);
+  }, [appendLog, clearOverlayCanvas, dropInFlight]);
 
   const handleToggleStreaming = React.useCallback(() => {
     if (!streamingEnabled) {
@@ -1166,10 +1171,9 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
     setStreamingEnabled(false);
     dropInFlight('Dropped in-flight frame: streaming paused');
-    clearSceneOverlayTimer();
     clearOverlayCanvas();
     appendLog('system', 'Frame streaming paused.');
-  }, [appendLog, cameraStatus, clearOverlayCanvas, clearSceneOverlayTimer, dropInFlight, streamingEnabled]);
+  }, [appendLog, cameraStatus, clearOverlayCanvas, dropInFlight, streamingEnabled]);
 
   const trySendFrame = React.useCallback(async () => {
     if (!streamingEnabled || cameraStatus !== 'running') {
@@ -1292,10 +1296,9 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
       stopCamera(streamRef.current);
       streamRef.current = null;
-      clearSceneOverlayTimer();
       clearOverlayCanvas();
     };
-  }, [clearOverlayCanvas, clearSceneOverlayTimer]);
+  }, [clearOverlayCanvas]);
 
   // Insights are rendered silently (no spoken line).
 
@@ -1480,6 +1483,17 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
             <em>none yet</em>
           )}
         </p>
+        <p style={{ marginTop: 4, marginBottom: 0 }}>
+          <strong>Latest motion:</strong>{' '}
+          {latestMotion ? (
+            <>
+              MAD {latestMotion.mad.toFixed(2)} · triggered {latestMotion.triggered ? 'yes' : 'no'}{' '}
+              <small>(at {latestMotion.ts})</small>
+            </>
+          ) : (
+            <em>none yet</em>
+          )}
+        </p>
       </section>
 
       <section style={{ marginBottom: 16 }}>
@@ -1546,7 +1560,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
           }}
         >
           {recentEvents.length === 0 ? (
-            <p style={{ margin: 0 }}>No scene-change events yet.</p>
+            <p style={{ margin: 0 }}>No events yet.</p>
           ) : (
             <ul style={{ margin: 0, paddingLeft: 20 }}>
               {recentEvents.map((event) => (

@@ -49,6 +49,11 @@ export const FrameBinaryMetaSchema = z.object({
 
 export const InsightSeveritySchema = z.enum(['low', 'medium', 'high']);
 
+export const FrameReceivedMotionSchema = z.object({
+  mad: z.number().nonnegative(),
+  triggered: z.boolean(),
+});
+
 export const FrameReceivedMessageSchema = z.object({
   type: z.literal('frame_received'),
   v: z.literal(PROTOCOL_VERSION),
@@ -57,6 +62,7 @@ export const FrameReceivedMessageSchema = z.object({
   accepted: z.boolean(),
   queue_depth: z.number().int().nonnegative(),
   dropped: z.number().int().nonnegative(),
+  motion: FrameReceivedMotionSchema.optional(),
 });
 
 export const EventEntrySchema = z.object({
@@ -111,6 +117,7 @@ export type HelloMessage = z.infer<typeof HelloMessageSchema>;
 export type ErrorMessage = z.infer<typeof ErrorMessageSchema>;
 export type CommandMessage = z.infer<typeof CommandMessageSchema>;
 export type FrameBinaryMeta = z.infer<typeof FrameBinaryMetaSchema>;
+export type FrameReceivedMotion = z.infer<typeof FrameReceivedMotionSchema>;
 export type FrameReceivedMessage = z.infer<typeof FrameReceivedMessageSchema>;
 export type EventEntry = z.infer<typeof EventEntrySchema>;
 export type FrameEventsMessage = z.infer<typeof FrameEventsMessageSchema>;
@@ -185,6 +192,7 @@ export function makeFrameReceived(
     accepted: boolean;
     queue_depth: number;
     dropped: number;
+    motion?: FrameReceivedMotion;
   },
 ): FrameReceivedMessage {
   return {
@@ -195,6 +203,7 @@ export function makeFrameReceived(
     accepted: options.accepted,
     queue_depth: options.queue_depth,
     dropped: options.dropped,
+    ...(options.motion ? { motion: options.motion } : {}),
   };
 }
 

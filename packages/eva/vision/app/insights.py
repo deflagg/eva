@@ -27,9 +27,7 @@ DEFAULT_INSIGHT_ASSETS_DIR = "../memory/working_memory_assets"
 DEFAULT_INSIGHT_ASSETS_MAX_CLIPS = 200
 DEFAULT_INSIGHT_ASSETS_MAX_AGE_HOURS = 24
 FRAME_ID_FILENAME_SANITIZE_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
-DEFAULT_SURPRISE_WEIGHTS = {
-    "scene_change": 5.0,
-}
+DEFAULT_SURPRISE_WEIGHTS: dict[str, float] = {}
 
 
 class InsightError(RuntimeError):

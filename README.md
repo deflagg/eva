@@ -3,7 +3,7 @@
 This repository hosts four components:
 
 - `packages/eva` — TypeScript daemon (HTTP/WebSocket gateway)
-- `packages/eva/vision` — Python FastAPI daemon (**scene-change detector**)
+- `packages/eva/vision` — Python FastAPI daemon (Tier-2 insight relay; scene-change path removed)
 - `packages/eva/executive` — Node daemon (insight/text model service)
 - `packages/ui` — Vite + React web client
 
@@ -105,14 +105,16 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 170**.
+Implemented through **Iteration 176**.
 
 Key current behavior:
-- Vision emits per-frame `frame_events` (scene-change events + blob metadata).
-- Eva emits immediate receipt ACKs (`frame_received`) on frame ingress.
-- UI clears in-flight frames on `frame_received` (receipt), not on Vision processing messages.
-- Eva forwards Vision frames best-effort with sampling (`stream.visionForward.sampleEveryN`) and bounded broker guardrails.
-- Tier-1 captioning emits synthetic `scene_caption` events and persists caption events to Executive `/events` (`source: "caption"`).
+- Tier-0 motion detection now runs in Eva (`motionGate`) using grayscale thumbnail MAD + hysteresis/cooldown.
+- Tier-1 captions are triggered by Motion Gate (not Vision scene-change events).
+- Vision no longer computes/emits scene-change blobs; forwarded `frame_events` currently contain no detector events.
+- UI no longer renders blob overlays; it shows latest motion telemetry (`mad`, `triggered`) and latest caption text.
+- Eva emits immediate receipt ACKs (`frame_received`) on frame ingress and keeps bounded broker guardrails.
+- Tier-1 `scene_caption` events are still persisted to Executive `/events` (`source: "caption"`).
+- Auto-insights from detector events are currently disabled (manual `insight_test` path remains).
 
 ### Streaming ACK model: receipt ACK vs processing events
 
@@ -120,8 +122,8 @@ Key current behavior:
   - Clears UI in-flight slot.
   - Drives receipt counters/latency.
   - Includes broker metadata (`accepted`, `queue_depth`, `dropped`).
-- **`frame_events`** (Vision -> Eva -> UI) means Vision processing output for forwarded frames.
-  - Drives overlays + event feed.
+- **`frame_events`** (Vision -> Eva -> UI, plus synthetic caption events from Eva) carries processing/event output for forwarded frames.
+  - Drives UI event/caption display.
   - Does **not** control stream pacing.
 
 ### Interpreting UI counters

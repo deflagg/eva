@@ -27,6 +27,15 @@
     "dedupeWindowMs": 15000,
     "minSceneSeverity": "medium"
   },
+  "motionGate": {
+    "enabled": true,
+    "thumbW": 64,
+    "thumbH": 64,
+    "triggerThreshold": 12,
+    "resetThreshold": 8,
+    "cooldownMs": 1500,
+    "minPersistFrames": 2
+  },
   "insightRelay": {
     "enabled": true,
     "cooldownMs": 10000,

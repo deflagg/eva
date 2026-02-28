@@ -2,22 +2,6 @@ server:
   host: 127.0.0.1
   port: 8000
 
-scene_change:
-  enabled: true
-  downsample:
-    max_dim: 160
-  ema_alpha: 0.08
-  pixel_threshold: 18
-  cell_px: 10
-  cell_active_ratio: 0.08
-  min_blob_cells: 4
-  score_threshold: 1.2
-  min_persist_frames: 3
-  cooldown_ms: 2500
-  severity:
-    medium_score: 2.5
-    high_score: 5.0
-
 insights:
   enabled: true
   agent_url: http://127.0.0.1:8791/insight
@@ -36,8 +20,6 @@ insights:
     jpeg_quality: 75
 
 surprise:
-  enabled: true
+  enabled: false
   threshold: 5
   cooldown_ms: 10000
-  weights:
-    scene_change: 5

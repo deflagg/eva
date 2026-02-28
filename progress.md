@@ -8450,3 +8450,323 @@
 
 ### Notes
 - This iteration closes the 161–170 track with explicit runtime visibility and a regression guard against accidental ACK-path recoupling.
+
+## Iteration 171 (plan 171–176 track) — Add Motion Gate utility (no wiring)
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Added new Motion Gate utility module:
+  - `packages/eva/src/broker/motionGate.ts`
+- Implemented Motion Gate config + state machine:
+  - `MotionGateConfig` fields:
+    - `thumbW` (default `64`)
+    - `thumbH` (default `64`)
+    - `triggerThreshold`
+    - `resetThreshold`
+    - `cooldownMs`
+    - optional `minPersistFrames` (default `1`)
+  - validation guardrails:
+    - positive integer checks for dimensions / `minPersistFrames`
+    - finite non-negative checks for thresholds/cooldown
+    - invariant `resetThreshold <= triggerThreshold`
+- Implemented thumbnail decode/downsample path using `sharp`:
+  - JPEG decode
+  - resize to configured thumbnail dimensions
+  - grayscale + raw bytes extraction
+- Implemented motion score + trigger logic:
+  - computes MAD (mean absolute difference) against previous thumbnail
+  - hysteresis episode state (`triggerThreshold` enter, `resetThreshold` exit)
+  - optional persistence requirement (`minPersistFrames`)
+  - cooldown suppression using frame timestamp (`tsMs`)
+- Added pinned Sharp dependency to Eva package:
+  - `packages/eva/package.json` (`"sharp": "0.33.5"`)
+  - refreshed `packages/eva/package-lock.json`
+
+### Files changed
+- `packages/eva/src/broker/motionGate.ts` (new)
+- `packages/eva/package.json`
+- `packages/eva/package-lock.json`
+- `progress.md`
+
+### Verification
+- Acceptance checks pass:
+  - `cd packages/eva && npm i`
+  - `cd packages/eva && npm run build`
+
+### Run instructions
+- No runtime wiring in this iteration.
+- Import and instantiate in later iterations, for example:
+  - `const gate = new MotionGate({ triggerThreshold: 12, resetThreshold: 8, cooldownMs: 1500, minPersistFrames: 2 });`
+  - `await gate.process({ tsMs: Date.now(), jpegBytes });`
+
+### Notes
+- Iteration 171 is intentionally utility-only (no Eva server/config/UI wiring changes yet).
+
+## Iteration 172 (plan 171–176 track) — Wire Motion Gate into Eva ingest + surface MAD
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Added Eva Motion Gate config plumbing:
+  - `packages/eva/src/config.ts`
+    - added `motionGate` schema/defaults:
+      - `enabled`
+      - `thumbW`
+      - `thumbH`
+      - `triggerThreshold`
+      - `resetThreshold`
+      - `cooldownMs`
+      - `minPersistFrames`
+    - added validation guardrail: `resetThreshold <= triggerThreshold`
+  - `packages/eva/eva.config.json`
+  - `packages/eva/eva.config.local.example.json`
+    - added committed/local example `motionGate` blocks with defaults:
+      ```json
+      "motionGate": {
+        "enabled": true,
+        "thumbW": 64,
+        "thumbH": 64,
+        "triggerThreshold": 12,
+        "resetThreshold": 8,
+        "cooldownMs": 1500,
+        "minPersistFrames": 2
+      }
+      ```
+- Wired Motion Gate into Eva frame ingest runtime:
+  - `packages/eva/src/server.ts`
+    - constructs `MotionGate` engine when enabled
+    - on each accepted binary frame:
+      1. runs motion gate (`process({ tsMs, jpegBytes })`)
+      2. stores `lastMotion = { ts_ms, mad, triggered }`
+      3. includes motion telemetry in frame receipt when available
+    - logs motion gate startup config at server boot
+  - `packages/eva/src/index.ts`
+    - passes `config.motionGate` into `startServer(...)`
+- Extended `frame_received` protocol to include optional motion telemetry:
+  - `packages/protocol/schema.json`
+    - added optional `frame_received.motion`:
+      - `mad: number`
+      - `triggered: boolean`
+  - `packages/protocol/README.md`
+    - documented optional `motion` field and semantics
+  - `packages/eva/src/protocol.ts`
+    - added `FrameReceivedMotionSchema`
+    - updated `FrameReceivedMessageSchema`
+    - updated `makeFrameReceived(...)` to support optional `motion`
+- Updated UI parsing/types to surface Motion Gate telemetry:
+  - `packages/ui/src/types.ts`
+    - added optional `FrameReceivedMessage.motion`
+  - `packages/ui/src/main.tsx`
+    - validates optional receipt `motion` payload
+    - stores latest motion telemetry from receipt ACKs
+    - displays `Latest motion: MAD <value> · triggered yes/no (at <time>)`
+
+### Files changed
+- `packages/eva/src/config.ts`
+- `packages/eva/eva.config.json`
+- `packages/eva/eva.config.local.example.json`
+- `packages/eva/src/index.ts`
+- `packages/eva/src/server.ts`
+- `packages/eva/src/protocol.ts`
+- `packages/protocol/schema.json`
+- `packages/protocol/README.md`
+- `packages/ui/src/types.ts`
+- `packages/ui/src/main.tsx`
+- `progress.md`
+
+### Verification
+- Acceptance checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+
+### Manual run steps
+1. Start Eva + UI.
+2. Start camera + streaming in UI.
+3. Confirm `frame_received` payloads include optional `motion` object.
+4. Confirm UI `Latest motion` line updates while moving and remains more stable when still.
+5. Tune `motionGate.triggerThreshold` / `resetThreshold` in local Eva config as needed.
+
+### Notes
+- Caption triggering remains unchanged in Iteration 172 (still existing scene-change path).
+- Motion Gate telemetry is currently surfaced for tuning and upcoming cutover work in Iteration 173.
+
+## Iteration 173 (plan 171–176 track) — Motion Gate drives Tier-1 captions (hard cutover)
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Replaced Tier-1 caption trigger source in Eva runtime:
+  - `packages/eva/src/server.ts`
+  - removed Vision `scene_change`-based trigger path from Vision `frame_events` handler
+  - added Motion Gate trigger-based scheduling at frame ingest:
+    - after accepted frame + motion processing,
+    - `if (motion.triggered) scheduleCaptionForFrame(latestFrame.frame_id)`
+- Preserved latest-wins/no-backlog caption queue semantics:
+  - one caption request in flight (`inFlightCaption`)
+  - one pending frame slot (`pendingCaptionFrameId`) overwritten by newest trigger
+- Reused existing caption cooldown as trigger cooldown:
+  - `caption.cooldownMs` continues to gate caption trigger cadence
+  - this cooldown is separate from Motion Gate cooldown (`motionGate.cooldownMs`)
+- Removed periodic fallback triggering to enforce hard cutover to motion-only triggers:
+  - deleted periodic caption timer scheduling logic
+- Updated startup observability logs to reflect new trigger source:
+  - caption log now reports `triggerSource=motion_gate` and `triggerCooldownMs`.
+
+### Files changed
+- `packages/eva/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+
+### Manual run steps
+1. Start Eva + captioner + UI (Vision optional for caption trigger validation).
+2. Start camera + streaming in UI.
+3. Hold still and confirm captions do not repeatedly fire.
+4. Introduce motion and confirm a caption appears shortly after motion trigger.
+5. Continue motion and confirm caption cadence respects `caption.cooldownMs` (latest-wins behavior, no backlog spam).
+
+### Notes
+- Caption event persistence to Executive `/events` remains unchanged (`source: "caption"`).
+- Motion telemetry remains debug/observability-only and is not persisted as working-memory events.
+
+## Iteration 174 (plan 171–176 track) — UI removes blob overlay + scene-change assumptions
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Removed scene-change blob overlay rendering path in UI runtime:
+  - `packages/ui/src/main.tsx`
+  - removed blob-count-driven overlay trigger logic
+  - removed scene-change overlay TTL timer behavior
+  - disconnected frame-event handling from any `scene_change.blobs[]` assumptions
+- Kept and surfaced simple motion tuning indicators:
+  - retained `Latest motion` display fed by `frame_received.motion` telemetry
+  - shows latest `mad`, `triggered`, and timestamp
+- Simplified overlay module to debug-geometry-only rendering:
+  - `packages/ui/src/overlay.ts`
+  - removed `drawSceneChangeOverlay(...)`
+  - removed scene-change blob extraction/parsing/drawing helpers
+  - retained overlay canvas utilities and ROI/line debug geometry rendering via `drawDebugGeometryOverlay(...)`
+- Updated UI copy to remove scene-change-specific wording:
+  - recent-events empty state now reads `No events yet.`
+
+### Files changed
+- `packages/ui/src/main.tsx`
+- `packages/ui/src/overlay.ts`
+- `progress.md`
+
+### Verification
+- Acceptance checks pass:
+  - `cd packages/ui && npm run build`
+  - `cd packages/eva && npm run build`
+
+### Manual run steps
+1. Start Eva + UI and begin camera streaming.
+2. Confirm no blob rectangles are drawn on the video overlay.
+3. Confirm `Latest motion` continues to update from receipt telemetry.
+4. Confirm captions still appear from Motion Gate-triggered Tier-1 path.
+
+### Notes
+- This iteration removes blob-overlay UI coupling while preserving optional ROI/line debug overlay capability.
+
+## Iteration 175 (plan 171–176 track) — Vision disables SceneChangeEngine runtime
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Disabled SceneChangeEngine use in Vision frame loop:
+  - `packages/eva/vision/app/main.py`
+  - removed runtime `SceneChangeEngine(...)` instantiation in `/infer` path
+  - removed `scene_change_engine.process_frame(...)` usage
+  - frame processing now emits `frame_events` with `events: []` (no `scene_change` events emitted)
+- Updated startup logging to be explicit about runtime state:
+  - startup now logs `scene_change runtime` as disabled and non-emitting
+- Updated health payload for clarity:
+  - added explicit runtime indicators:
+    - `scene_change_runtime_enabled: false`
+    - `scene_change_events_emitted: false`
+- Updated Vision settings baseline:
+  - `packages/eva/vision/settings.yaml`
+    - set `scene_change.enabled: false`
+
+### Files changed
+- `packages/eva/vision/app/main.py`
+- `packages/eva/vision/settings.yaml`
+- `progress.md`
+
+### Verification
+- Acceptance checks pass:
+  - `cd packages/eva/vision && python3 -m compileall app`
+- Additional build checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+
+### Manual run steps
+1. Start Vision + Eva + UI.
+2. Stream camera frames.
+3. Confirm Vision `frame_events.events` payloads are empty (`[]`) and contain no `scene_change` entries.
+4. Confirm Motion Gate-driven captions still appear via Eva pipeline.
+
+### Notes
+- This iteration is runtime-disable only; scene-change modules/config structure remain in repo for cleanup in Iteration 176.
+
+## Iteration 176 (plan 171–176 track) — Hard cleanup: remove scene-change code/config/weights
+
+**Status:** ✅ Completed (2026-02-27)
+
+### Completed
+- Removed scene-change module from Vision runtime code:
+  - deleted `packages/eva/vision/app/scene_change.py`
+- Removed remaining scene-change imports/loaders/surfaces from Vision app:
+  - `packages/eva/vision/app/main.py`
+  - removed `SceneChangeSettings` / `load_scene_change_settings` usage
+  - removed scene-change config loading at startup
+  - removed scene-change-specific `/health` fields
+- Removed scene-change config and surprise scene-change weights:
+  - `packages/eva/vision/settings.yaml`
+  - removed `scene_change:` block entirely
+  - removed `surprise.weights.scene_change` (and weights map from committed config)
+  - set `surprise.enabled: false` in committed defaults
+- Updated insight defaults to drop scene-change weight baseline:
+  - `packages/eva/vision/app/insights.py`
+  - `DEFAULT_SURPRISE_WEIGHTS` is now empty
+- Clarified runtime behavior for auto-insights:
+  - `packages/eva/vision/app/main.py`
+  - startup/health now indicate scene-change path removed and `auto_insights_enabled=false`
+  - Vision still supports manual `insight_test`; automatic event-triggered insight remains disabled pending future trigger work
+- Docs cleanup:
+  - `packages/eva/vision/README.md`
+  - `README.md`
+  - `packages/ui/README.md`
+  - removed scene-change/blob runtime claims and documented Motion Gate Tier-0 + no blob overlays
+
+### Files changed
+- `packages/eva/vision/app/main.py`
+- `packages/eva/vision/app/insights.py`
+- `packages/eva/vision/app/scene_change.py` (deleted)
+- `packages/eva/vision/settings.yaml`
+- `packages/eva/vision/README.md`
+- `README.md`
+- `packages/ui/README.md`
+- `progress.md`
+
+### Verification
+- Acceptance checks pass:
+  - `cd packages/eva/vision && python3 -m compileall app`
+  - `cd packages/eva && npm run build`
+  - `cd packages/ui && npm run build`
+
+### Manual run steps
+1. Start Vision + Eva + UI.
+2. Stream camera frames and confirm:
+   - Motion Gate in Eva still drives captions.
+   - No scene-change/blob events are emitted by Vision.
+3. Confirm repository/runtime has no active scene-change config block.
+4. Optionally run manual `insight_test` command to verify Tier-2 insight path still works.
+
+### Notes
+- Auto-insights from detector events are intentionally disabled in this iteration until a new trigger strategy is introduced.

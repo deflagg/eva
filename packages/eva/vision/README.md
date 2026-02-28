@@ -1,59 +1,38 @@
 # Vision
 
-Python daemon that performs **scene-change detection** and emits `frame_events`.
+Python daemon for Tier-2 insight orchestration.
 
-This service no longer runs YOLO/tracking/object detectors.
-
-## Current behavior (Iteration 127)
+## Current behavior (Iteration 176)
 
 - HTTP health endpoint at `/health`
 - WebSocket endpoint at `/infer`
   - sends protocol `hello` on connect (`role: "vision"`)
   - expects binary frame envelopes (`frame_binary` metadata + JPEG bytes)
   - responds once per frame with `frame_events` (same `frame_id`)
-  - `events[]` contains zero or more `scene_change` events
-- Insight path:
-  - keeps clip buffer (pre/trigger/post frames)
-  - optionally downsamples + persists clip assets under `packages/eva/memory/working_memory_assets/<clip_id>/`
-  - calls Agent via HTTP (`insights.agent_url`) using `asset_rel_path` references
-  - emits protocol `insight` on success
+  - `events[]` is currently always empty (`[]`)
+- Scene-change runtime has been removed:
+  - no SceneChangeEngine
+  - no `scene_change` config block
+  - no scene-change blob emission
 
-## Scene-change algorithm knobs
+## Insight behavior
 
-Configured in `settings.yaml` / `settings.local.yaml` under `scene_change`:
+- Maintains clip buffer (pre/trigger/post frames)
+- Optionally downsamples + persists clip assets under:
+  - `packages/eva/memory/working_memory_assets/<clip_id>/`
+- Calls Agent via HTTP (`insights.agent_url`) using `asset_rel_path` references
+- Emits protocol `insight` on success
 
-- `enabled`
-- `downsample.max_dim`
-- `ema_alpha`
-- `pixel_threshold`
-- `cell_px`
-- `cell_active_ratio`
-- `min_blob_cells`
-- `score_threshold`
-- `min_persist_frames`
-- `cooldown_ms`
-- `severity.medium_score`
-- `severity.high_score`
+### Auto-insights
 
-Practical tuning guidance:
+Auto-insight triggering from detector events is currently **disabled** in runtime (no detector events are emitted). `insight_test` remains available for manual insight runs.
 
-- **Too chatty / false positives**
-  - increase `pixel_threshold`
-  - increase `score_threshold`
-  - increase `min_persist_frames`
-  - increase `cooldown_ms`
-- **Missing obvious changes**
-  - decrease `pixel_threshold`
-  - decrease `score_threshold`
-  - decrease `min_persist_frames`
-- **Blobs too coarse/fine**
-  - adjust `cell_px` (larger = coarser)
-  - adjust `cell_active_ratio`
+## Config sections
 
-## Other config sections
+Configured in `settings.yaml` / `settings.local.yaml`:
 
-- `insights.*` controls clip building + Agent call behavior.
-- `surprise.*` controls auto-insight triggering from events.
+- `insights.*` — clip building + Agent call behavior
+- `surprise.*` — retained for future trigger work (currently disabled by default)
 
 ## Run (dev)
 

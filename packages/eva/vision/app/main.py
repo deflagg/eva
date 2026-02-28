@@ -12,23 +12,15 @@ from .insights import InsightBuffer, InsightError, InsightSettings, load_insight
 from .protocol import (
     BinaryFrameParseError,
     CommandMessage,
-    EventEntry,
     FrameEventsMessage,
     decode_binary_frame_envelope,
     make_error,
     make_hello,
 )
-from .scene_change import (
-    SceneChangeEngine,
-    SceneChangeFrameDecodeError,
-    SceneChangeSettings,
-    load_scene_change_settings,
-)
 
 app = FastAPI(title="vision", version="0.1.0")
 
 _insight_settings: InsightSettings | None = None
-_scene_change_settings: SceneChangeSettings | None = None
 
 
 @dataclass(slots=True)
@@ -42,16 +34,11 @@ class FrameRequest:
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    """Fail fast if scene-change or insight config is missing/invalid."""
-    global _insight_settings, _scene_change_settings
+    """Fail fast if insight config is missing/invalid."""
+    global _insight_settings
 
     try:
         _insight_settings = load_insight_settings()
-    except Exception as exc:
-        raise RuntimeError(f"Vision startup failed: {exc}") from exc
-
-    try:
-        _scene_change_settings = load_scene_change_settings()
     except Exception as exc:
         raise RuntimeError(f"Vision startup failed: {exc}") from exc
 
@@ -78,19 +65,10 @@ async def on_startup() -> None:
         f"weights={len(_insight_settings.surprise.weights)}"
     )
     print(
-        "[vision] scene_change config: "
-        f"enabled={_scene_change_settings.enabled} "
-        f"downsample_max_dim={_scene_change_settings.downsample.max_dim} "
-        f"ema_alpha={_scene_change_settings.ema_alpha} "
-        f"pixel_threshold={_scene_change_settings.pixel_threshold} "
-        f"cell_px={_scene_change_settings.cell_px} "
-        f"cell_active_ratio={_scene_change_settings.cell_active_ratio} "
-        f"min_blob_cells={_scene_change_settings.min_blob_cells} "
-        f"score_threshold={_scene_change_settings.score_threshold} "
-        f"min_persist_frames={_scene_change_settings.min_persist_frames} "
-        f"cooldown_ms={_scene_change_settings.cooldown_ms} "
-        f"medium_score={_scene_change_settings.severity.medium_score} "
-        f"high_score={_scene_change_settings.severity.high_score}"
+        "[vision] scene-change path removed: "
+        "runtime_enabled=False "
+        "emitting_scene_change_events=False "
+        "auto_insights_enabled=False"
     )
 
 
@@ -106,31 +84,15 @@ async def health() -> dict[str, object]:
         "insight_cooldown_ms": _insight_settings.insight_cooldown_ms if _insight_settings is not None else 0,
         "insight_downsample_enabled": _insight_settings.downsample.enabled if _insight_settings is not None else False,
         "insight_downsample_max_dim": _insight_settings.downsample.max_dim if _insight_settings is not None else 0,
-        "insight_downsample_jpeg_quality": _insight_settings.downsample.jpeg_quality if _insight_settings is not None else 0,
+        "insight_downsample_jpeg_quality": _insight_settings.downsample.jpeg_quality
+        if _insight_settings is not None
+        else 0,
         "surprise_enabled": _insight_settings.surprise.enabled if _insight_settings is not None else False,
         "surprise_threshold": _insight_settings.surprise.threshold if _insight_settings is not None else 0,
         "surprise_cooldown_ms": _insight_settings.surprise.cooldown_ms if _insight_settings is not None else 0,
         "surprise_weights": len(_insight_settings.surprise.weights) if _insight_settings is not None else 0,
-        "scene_change_enabled": _scene_change_settings.enabled if _scene_change_settings is not None else False,
-        "scene_change_downsample_max_dim": _scene_change_settings.downsample.max_dim
-        if _scene_change_settings is not None
-        else 0,
-        "scene_change_ema_alpha": _scene_change_settings.ema_alpha if _scene_change_settings is not None else 0,
-        "scene_change_pixel_threshold": _scene_change_settings.pixel_threshold if _scene_change_settings is not None else 0,
-        "scene_change_cell_px": _scene_change_settings.cell_px if _scene_change_settings is not None else 0,
-        "scene_change_cell_active_ratio": _scene_change_settings.cell_active_ratio
-        if _scene_change_settings is not None
-        else 0,
-        "scene_change_min_blob_cells": _scene_change_settings.min_blob_cells if _scene_change_settings is not None else 0,
-        "scene_change_score_threshold": _scene_change_settings.score_threshold if _scene_change_settings is not None else 0,
-        "scene_change_min_persist_frames": _scene_change_settings.min_persist_frames
-        if _scene_change_settings is not None
-        else 0,
-        "scene_change_cooldown_ms": _scene_change_settings.cooldown_ms if _scene_change_settings is not None else 0,
-        "scene_change_medium_score": _scene_change_settings.severity.medium_score
-        if _scene_change_settings is not None
-        else 0,
-        "scene_change_high_score": _scene_change_settings.severity.high_score if _scene_change_settings is not None else 0,
+        "auto_insights_enabled": False,
+        "scene_change_removed": True,
     }
 
 
@@ -139,12 +101,8 @@ async def infer_socket(websocket: WebSocket) -> None:
     await websocket.accept()
 
     insight_settings = _insight_settings if _insight_settings is not None else load_insight_settings()
-    scene_change_settings = (
-        _scene_change_settings if _scene_change_settings is not None else load_scene_change_settings()
-    )
 
     insight_buffer = InsightBuffer(insight_settings)
-    scene_change_engine = SceneChangeEngine(scene_change_settings)
 
     send_lock = asyncio.Lock()
 
@@ -162,40 +120,16 @@ async def infer_socket(websocket: WebSocket) -> None:
     pending_frame_event = asyncio.Event()
     inference_running = False
     manual_insight_task: asyncio.Task[None] | None = None
-    auto_insight_task: asyncio.Task[None] | None = None
 
     async def process_frame(frame: FrameRequest) -> None:
-        nonlocal auto_insight_task
-
-        try:
-            events = scene_change_engine.process_frame(
-                ts_ms=frame.ts_ms,
-                width=frame.width,
-                height=frame.height,
-                jpeg_bytes=frame.image_bytes,
-            )
-            frame_events = FrameEventsMessage(
-                frame_id=frame.frame_id,
-                ts_ms=frame.ts_ms,
-                width=frame.width,
-                height=frame.height,
-                events=events,
-            )
-            await send_payload(frame_events.model_dump(exclude_none=True))
-
-            if (
-                events
-                and insight_settings.enabled
-                and insight_settings.surprise.enabled
-                and (auto_insight_task is None or auto_insight_task.done())
-            ):
-                auto_insight_task = asyncio.create_task(
-                    process_auto_insight(trigger_frame_id=frame_events.frame_id, events=events)
-                )
-        except SceneChangeFrameDecodeError as exc:
-            await send_payload(make_error("INVALID_IMAGE", str(exc), frame_id=frame.frame_id))
-        except Exception as exc:
-            await send_payload(make_error("INFERENCE_ERROR", str(exc), frame_id=frame.frame_id))
+        frame_events = FrameEventsMessage(
+            frame_id=frame.frame_id,
+            ts_ms=frame.ts_ms,
+            width=frame.width,
+            height=frame.height,
+            events=[],
+        )
+        await send_payload(frame_events.model_dump(exclude_none=True))
 
     async def process_insight_test() -> None:
         try:
@@ -205,21 +139,6 @@ async def infer_socket(websocket: WebSocket) -> None:
             await send_payload(make_error(exc.code, str(exc)))
         except Exception as exc:
             await send_payload(make_error("INSIGHT_ERROR", f"Insight test failed: {exc}"))
-
-    async def process_auto_insight(*, trigger_frame_id: str, events: list[EventEntry]) -> None:
-        try:
-            insight_message = await insight_buffer.run_auto_insight(
-                trigger_frame_id=trigger_frame_id,
-                events=events,
-            )
-            if insight_message is None:
-                return
-
-            await send_payload(insight_message.model_dump(exclude_none=True))
-        except InsightError as exc:
-            print(f"[vision] auto insight skipped: {exc.code} {exc}")
-        except Exception as exc:
-            print(f"[vision] auto insight failed: {exc}")
 
     async def inference_worker() -> None:
         nonlocal inference_running, pending_frame
@@ -341,8 +260,3 @@ async def infer_socket(websocket: WebSocket) -> None:
             manual_insight_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await manual_insight_task
-
-        if auto_insight_task and not auto_insight_task.done():
-            auto_insight_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await auto_insight_task

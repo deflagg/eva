@@ -238,6 +238,7 @@ async function main(): Promise<void> {
       visionWsUrl: config.vision.wsUrl,
       stream: config.stream,
       caption: config.caption,
+      motionGate: config.motionGate,
       insightRelay: config.insightRelay,
       agent: config.agent,
       text: config.text,
