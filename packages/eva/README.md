@@ -2,7 +2,7 @@
 
 TypeScript daemon for UI/WebSocket orchestration.
 
-## Current behavior (Iteration 102)
+## Current behavior (Iteration 181)
 
 - HTTP server on configured `server.port` (default `8787`)
 - Optional text endpoint (when `text.enabled=true`):
@@ -57,19 +57,20 @@ Browsers can block autoplay audio until a user gesture occurs.
 
 ## Runtime modes
 
-### 1) External mode (default)
+### 1) External mode
 
 - `subprocesses.enabled=false`
-- Start Agent + Vision manually, then start Eva.
+- Start Agent + Vision + Captioner manually, then start Eva.
 
 ### 2) Subprocess mode (one command boots stack)
 
-- Set `subprocesses.enabled=true`.
+- `subprocesses.enabled=true` (committed default in `eva.config.json`).
 - Eva will:
   1. start Agent and wait for `GET /health` = 200
   2. start Vision and wait for `GET /health` = 200
-  3. start Eva server
-- On shutdown, Eva stops Vision + Agent.
+  3. start Captioner and wait for `GET /health` = 200
+  4. start Eva server
+- On shutdown, Eva stops Captioner + Vision + Agent.
 
 ## Configuration (cosmiconfig + zod)
 
@@ -100,7 +101,7 @@ Current schema (abridged):
     "maxTextChars": 4000
   },
   "subprocesses": {
-    "enabled": false,
+    "enabled": true,
     "agent": {
       "enabled": true,
       "cwd": "packages/eva/executive",
@@ -112,6 +113,12 @@ Current schema (abridged):
       "cwd": "packages/eva/vision",
       "command": [".venv/bin/python", "-m", "app.run"],
       "healthUrl": "http://127.0.0.1:8000/health"
+    },
+    "captioner": {
+      "enabled": true,
+      "cwd": "packages/eva/captioner",
+      "command": [".venv/bin/python", "-m", "app.run"],
+      "healthUrl": "http://127.0.0.1:8792/health"
     }
   }
 }
@@ -136,6 +143,15 @@ npm install
 
 ```bash
 cd packages/eva/vision
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Captioner
+
+```bash
+cd packages/eva/captioner
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -167,7 +183,15 @@ source .venv/bin/activate
 python -m app.run
 ```
 
-3. Start Eva:
+3. Start Captioner:
+
+```bash
+cd packages/eva/captioner
+source .venv/bin/activate
+python -m app.run
+```
+
+4. Start Eva:
 
 ```bash
 cd packages/eva
@@ -176,30 +200,26 @@ npm run dev
 
 ## Subprocess mode run
 
-1. Copy local subprocess config:
+1. Start stack from Eva (uses committed `eva.config.json`):
 
 ```bash
 cd packages/eva
-cp eva.config.local.example.json eva.config.local.json
+npm run dev
 ```
 
-2. (If needed) point Vision command to your venv python in `eva.config.local.json`:
+2. (Optional) If your venv python paths differ, add `eva.config.local.json` overrides:
 
 ```json
 {
   "subprocesses": {
     "vision": {
       "command": ["/absolute/path/to/packages/eva/vision/.venv/bin/python", "-m", "app.run"]
+    },
+    "captioner": {
+      "command": ["/absolute/path/to/packages/eva/captioner/.venv/bin/python", "-m", "app.run"]
     }
   }
 }
-```
-
-3. Start stack from Eva:
-
-```bash
-cd packages/eva
-npm run dev
 ```
 
 ## Build

@@ -9,7 +9,7 @@ Python daemon for Tier-2 insight orchestration.
   - sends protocol `hello` on connect (`role: "vision"`)
   - expects binary frame envelopes (`frame_binary` metadata + JPEG bytes)
   - responds once per frame with `frame_events` (same `frame_id`)
-  - `events[]` is currently always empty (`[]`)
+  - `events[]` is currently empty (`[]`) by default
 - Scene-change runtime has been removed:
   - no SceneChangeEngine
   - no `scene_change` config block
@@ -25,14 +25,21 @@ Python daemon for Tier-2 insight orchestration.
 
 ### Auto-insights
 
-Auto-insight triggering from detector events is currently **disabled** in runtime (no detector events are emitted). `insight_test` remains available for manual insight runs.
+Auto-insights can run automatically while frames are streaming:
+
+- enabled via `insights.auto.enabled`
+- cadence controlled via `insights.auto.interval_ms`
+- still rate-limited by `insights.insight_cooldown_ms`
+
+`insight_test` remains available for manual insight runs.
 
 ## Config sections
 
 Configured in `settings.yaml` / `settings.local.yaml`:
 
 - `insights.*` — clip building + Agent call behavior
-- `surprise.*` — retained for future trigger work (currently disabled by default)
+- `insights.auto.*` — automatic insight trigger cadence
+- `surprise.*` — retained for event-weighted trigger work (disabled by default in committed settings)
 
 ## Run (dev)
 

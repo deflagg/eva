@@ -26,6 +26,7 @@ DEFAULT_DOWNSAMPLE_JPEG_QUALITY = 75
 DEFAULT_INSIGHT_ASSETS_DIR = "../memory/working_memory_assets"
 DEFAULT_INSIGHT_ASSETS_MAX_CLIPS = 200
 DEFAULT_INSIGHT_ASSETS_MAX_AGE_HOURS = 24
+DEFAULT_AUTO_INSIGHT_INTERVAL_MS = 1000
 FRAME_ID_FILENAME_SANITIZE_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
 DEFAULT_SURPRISE_WEIGHTS: dict[str, float] = {}
 
@@ -58,6 +59,12 @@ class InsightAssetsRetentionSettings:
 
 
 @dataclass(slots=True)
+class AutoInsightSettings:
+    enabled: bool
+    interval_ms: int
+
+
+@dataclass(slots=True)
 class InsightSettings:
     enabled: bool
     agent_url: str
@@ -68,6 +75,7 @@ class InsightSettings:
     pre_frames: int
     post_frames: int
     insight_cooldown_ms: int
+    auto: AutoInsightSettings
     downsample: InsightDownsampleSettings
     surprise: SurpriseSettings
 
@@ -561,6 +569,12 @@ def load_insight_settings() -> InsightSettings:
         key="insights.insight_cooldown_ms",
         default=10000,
     )
+    auto_enabled = _as_bool(settings.get("insights.auto.enabled", default=False), default=False)
+    auto_interval_ms = _as_non_negative_int(
+        settings.get("insights.auto.interval_ms", default=DEFAULT_AUTO_INSIGHT_INTERVAL_MS),
+        key="insights.auto.interval_ms",
+        default=DEFAULT_AUTO_INSIGHT_INTERVAL_MS,
+    )
     downsample_enabled = _as_bool(settings.get("insights.downsample.enabled", default=True), default=True)
     downsample_max_dim = _as_non_negative_int(
         settings.get("insights.downsample.max_dim", default=DEFAULT_DOWNSAMPLE_MAX_DIM),
@@ -581,6 +595,9 @@ def load_insight_settings() -> InsightSettings:
 
     if assets_max_clips < 1:
         raise RuntimeError("Vision config error: insights.assets.max_clips must be >= 1")
+
+    if auto_interval_ms < 1:
+        raise RuntimeError("Vision config error: insights.auto.interval_ms must be >= 1")
 
     surprise_enabled = _as_bool(settings.get("surprise.enabled", default=True), default=True)
     surprise_threshold = _as_non_negative_float(
@@ -612,6 +629,10 @@ def load_insight_settings() -> InsightSettings:
         pre_frames=pre_frames,
         post_frames=post_frames,
         insight_cooldown_ms=insight_cooldown_ms,
+        auto=AutoInsightSettings(
+            enabled=auto_enabled,
+            interval_ms=auto_interval_ms,
+        ),
         downsample=InsightDownsampleSettings(
             enabled=downsample_enabled,
             max_dim=downsample_max_dim,

@@ -14,6 +14,9 @@ insights:
   pre_frames: 3
   post_frames: 2
   insight_cooldown_ms: 10000
+  auto:
+    enabled: true
+    interval_ms: 1500
   downsample:
     enabled: true
     max_dim: 160

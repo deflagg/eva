@@ -81,6 +81,14 @@
       "healthUrl": "http://127.0.0.1:8000/health",
       "readyTimeoutMs": 60000,
       "shutdownTimeoutMs": 10000
+    },
+    "captioner": {
+      "enabled": true,
+      "cwd": "packages/eva/captioner",
+      "command": [".venv/bin/python", "-m", "app.run"],
+      "healthUrl": "http://127.0.0.1:8792/health",
+      "readyTimeoutMs": 120000,
+      "shutdownTimeoutMs": 10000
     }
   }
 }

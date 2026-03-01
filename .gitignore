@@ -11,6 +11,7 @@ packages/ui/vite.config.js
 packages/ui/vite.config.d.ts
 
 # Python
+packages/eva/captioner/.venv/
 packages/eva/vision/.venv/
 packages/eva/vision/**/__pycache__/
 packages/eva/vision/*.pt

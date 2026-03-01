@@ -1,9 +1,10 @@
-# Eva + Vision + UI + Agent
+# Eva + Vision + Captioner + UI + Agent
 
-This repository hosts four components:
+This repository hosts five components:
 
 - `packages/eva` — TypeScript daemon (HTTP/WebSocket gateway)
 - `packages/eva/vision` — Python FastAPI daemon (Tier-2 insight relay; scene-change path removed)
+- `packages/eva/captioner` — Python FastAPI daemon (Tier-1 image caption service)
 - `packages/eva/executive` — Node daemon (insight/text model service)
 - `packages/ui` — Vite + React web client
 
@@ -13,6 +14,7 @@ Protocol docs/schema are in `packages/protocol`.
 
 - Eva: `http://localhost:8787`
 - Vision: `http://localhost:8000`
+- Captioner: `http://127.0.0.1:8792`
 - Agent: `http://localhost:8791`
 - UI dev server: `http://127.0.0.1:5173`
 
@@ -47,15 +49,20 @@ Protocol docs/schema are in `packages/protocol`.
 
 ## One-command stack boot (Eva subprocess mode)
 
-After one-time dependency setup (Node deps + Vision venv + Agent secrets), you can boot Eva + Agent + Vision from one command:
+After one-time dependency setup (Node deps + Vision venv + Captioner venv + Agent secrets), you can boot Eva + Agent + Vision + Captioner from one command using committed config (`packages/eva/eva.config.json`):
 
 ```bash
 cd packages/eva
-cp eva.config.local.example.json eva.config.local.json
 npm run dev
 ```
 
-If Vision fails to start because your venv python path differs, set `subprocesses.vision.command` in `eva.config.local.json` to your venv interpreter (for example: `packages/eva/vision/.venv/bin/python -m app.run`).
+Optional local overrides are still supported via `eva.config.local.json`.
+If you want committed config only, ensure `eva.config.local.json` is absent.
+
+If venv python paths differ on your machine, override subprocess commands in `eva.config.local.json`:
+
+- `subprocesses.vision.command` (for example: `packages/eva/vision/.venv/bin/python -m app.run`)
+- `subprocesses.captioner.command` (for example: `packages/eva/captioner/.venv/bin/python -m app.run`)
 
 ## Development Run Instructions
 
@@ -85,7 +92,17 @@ Alternative (still supported):
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 3) Eva (TypeScript)
+### 3) Captioner (Python)
+
+```bash
+cd packages/eva/captioner
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m app.run
+```
+
+### 4) Eva (TypeScript)
 
 ```bash
 cd packages/eva
@@ -95,7 +112,7 @@ npm install
 npm run dev
 ```
 
-### 4) UI (React + Vite)
+### 5) UI (React + Vite)
 
 ```bash
 cd packages/ui
@@ -105,7 +122,7 @@ npm run dev
 
 ## Status
 
-Implemented through **Iteration 176**.
+Implemented through **Iteration 181**.
 
 Key current behavior:
 - Tier-0 motion detection now runs in Eva (`motionGate`) using grayscale thumbnail MAD + hysteresis/cooldown.

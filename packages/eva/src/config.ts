@@ -98,6 +98,15 @@ const VisionSubprocessConfigSchema = z.object({
   shutdownTimeoutMs: PositiveTimeoutMsSchema.default(10_000),
 });
 
+const CaptionerSubprocessConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  cwd: z.string().trim().min(1).default('packages/eva/captioner'),
+  command: CommandSchema.default(['.venv/bin/python', '-m', 'app.run']),
+  healthUrl: HttpUrlSchema.default('http://127.0.0.1:8792/health'),
+  readyTimeoutMs: PositiveTimeoutMsSchema.default(120_000),
+  shutdownTimeoutMs: PositiveTimeoutMsSchema.default(10_000),
+});
+
 const SubprocessesConfigSchema = z.object({
   enabled: z.boolean().default(false),
   agent: AgentSubprocessConfigSchema.default({
@@ -114,6 +123,14 @@ const SubprocessesConfigSchema = z.object({
     command: ['.venv/bin/python', '-m', 'app.run'],
     healthUrl: 'http://127.0.0.1:8000/health',
     readyTimeoutMs: 60_000,
+    shutdownTimeoutMs: 10_000,
+  }),
+  captioner: CaptionerSubprocessConfigSchema.default({
+    enabled: true,
+    cwd: 'packages/eva/captioner',
+    command: ['.venv/bin/python', '-m', 'app.run'],
+    healthUrl: 'http://127.0.0.1:8792/health',
+    readyTimeoutMs: 120_000,
     shutdownTimeoutMs: 10_000,
   }),
 });
@@ -254,6 +271,14 @@ const EvaConfigSchema = z.object({
       command: ['.venv/bin/python', '-m', 'app.run'],
       healthUrl: 'http://127.0.0.1:8000/health',
       readyTimeoutMs: 60_000,
+      shutdownTimeoutMs: 10_000,
+    },
+    captioner: {
+      enabled: true,
+      cwd: 'packages/eva/captioner',
+      command: ['.venv/bin/python', '-m', 'app.run'],
+      healthUrl: 'http://127.0.0.1:8792/health',
+      readyTimeoutMs: 120_000,
       shutdownTimeoutMs: 10_000,
     },
   }),

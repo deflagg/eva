@@ -29,8 +29,8 @@
   },
   "motionGate": {
     "enabled": true,
-    "thumbW": 64,
-    "thumbH": 64,
+    "thumbW": 350,
+    "thumbH": 350,
     "triggerThreshold": 12,
     "resetThreshold": 8,
     "cooldownMs": 1500,
@@ -52,7 +52,7 @@
     "maxTextChars": 4000
   },
   "speech": {
-    "enabled": false,
+    "enabled": true,
     "path": "/speech",
     "defaultVoice": "en-US-JennyNeural",
     "maxTextChars": 1000,
@@ -62,6 +62,33 @@
       "enabled": true,
       "ttlMs": 600000,
       "maxEntries": 64
+    }
+  },
+  "subprocesses": {
+    "enabled": true,
+    "agent": {
+      "enabled": true,
+      "cwd": "packages/eva/executive",
+      "command": ["npm", "run", "dev"],
+      "healthUrl": "http://127.0.0.1:8791/health",
+      "readyTimeoutMs": 30000,
+      "shutdownTimeoutMs": 5000
+    },
+    "vision": {
+      "enabled": true,
+      "cwd": "packages/eva/vision",
+      "command": [".venv/bin/python", "-m", "app.run"],
+      "healthUrl": "http://127.0.0.1:8000/health",
+      "readyTimeoutMs": 60000,
+      "shutdownTimeoutMs": 10000
+    },
+    "captioner": {
+      "enabled": true,
+      "cwd": "packages/eva/captioner",
+      "command": [".venv/bin/python", "-m", "app.run"],
+      "healthUrl": "http://127.0.0.1:8792/health",
+      "readyTimeoutMs": 120000,
+      "shutdownTimeoutMs": 10000
     }
   }
 }

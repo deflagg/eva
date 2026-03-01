@@ -8770,3 +8770,247 @@
 
 ### Notes
 - Auto-insights from detector events are intentionally disabled in this iteration until a new trigger strategy is introduced.
+
+## Iteration 177 — Config: add `subprocesses.captioner` (schema + example; no runtime behavior change yet)
+
+**Status:** ✅ Completed (2026-02-28)
+
+### Completed
+- Extended Eva config schema in `packages/eva/src/config.ts` with a new `CaptionerSubprocessConfigSchema` (modeled after vision subprocess config).
+- Added `subprocesses.captioner` to `SubprocessesConfigSchema` with defaults:
+  - `cwd`: `packages/eva/captioner`
+  - `command`: `[".venv/bin/python", "-m", "app.run"]`
+  - `healthUrl`: `http://127.0.0.1:8792/health`
+  - `readyTimeoutMs`: `120000`
+  - `shutdownTimeoutMs`: `10000`
+- Updated `EvaConfigSchema` committed defaults so parsed runtime config always includes `subprocesses.captioner`.
+- Updated `packages/eva/eva.config.local.example.json` to include the same `subprocesses.captioner` block.
+
+### Files changed
+- `packages/eva/src/config.ts`
+- `packages/eva/eva.config.local.example.json`
+- `progress.md`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+
+### Manual run steps
+1. Start Eva with subprocess mode disabled and confirm behavior is unchanged.
+2. Confirm this iteration only changes config surface (no runtime spawn/shutdown behavior changes yet).
+
+### Notes
+- Runtime orchestration changes (actually spawning/stopping captioner) are intentionally deferred to Iteration 178.
+
+## Iteration 178 — Runtime: Eva spawns Captioner in subprocess mode (+ shutdown integration)
+
+**Status:** ✅ Completed (2026-02-28)
+
+### Completed
+- Updated Eva subprocess orchestration in `packages/eva/src/index.ts` to supervise a third managed subprocess:
+  - added `captioner: ManagedProcess | null`
+  - startup order in subprocess mode is now:
+    1. agent
+    2. vision
+    3. captioner
+    4. Eva server
+- Added captioner startup/readiness wiring:
+  - starts captioner with `subprocesses.captioner` config
+  - logs startup command + cwd
+  - waits on captioner health with explicit log:
+    - `[eva] waiting for captioner health at ...`
+- Updated graceful shutdown ordering to include captioner in reverse order:
+  - close Eva server
+  - stop captioner
+  - stop vision
+  - stop agent
+- Updated forced-termination path to force-kill captioner too (alongside vision and agent), preventing orphan captioner processes on hard shutdown paths.
+
+### Files changed
+- `packages/eva/src/index.ts`
+- `progress.md`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+
+### Manual run steps
+1. Copy local config:
+   - `cp packages/eva/eva.config.local.example.json packages/eva/eva.config.local.json`
+2. Captioner one-time setup:
+   - `cd packages/eva/captioner`
+   - `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
+3. Start Eva:
+   - `cd packages/eva && npm run dev`
+4. Confirm captioner health:
+   - `curl http://127.0.0.1:8792/health`
+5. Start UI + stream and confirm:
+   - captions appear
+   - Eva logs no longer spam caption connection-refused warnings when captioner is managed and healthy.
+
+### Notes
+- External/manual captioner mode remains unchanged when subprocess management is disabled.
+
+## Iteration 179 — Docs: “one command boots the stack” includes Captioner
+
+**Status:** ✅ Completed (2026-02-28)
+
+### Completed
+- Updated root docs in `README.md` so Captioner is documented as a first-class runtime component.
+- Expanded top-level component inventory from four to five components and added:
+  - `packages/eva/captioner` (Tier-1 image caption service)
+- Added Captioner default port in defaults section:
+  - `http://127.0.0.1:8792`
+- Updated subprocess-mode stack boot section to explicitly state Eva boots:
+  - Agent + Vision + Captioner
+- Added per-platform subprocess command override guidance in one-command section:
+  - `subprocesses.vision.command`
+  - `subprocesses.captioner.command`
+- Added a dedicated **Captioner (Python)** manual run section in Development Run Instructions (mirroring `packages/eva/captioner/README.md`), and renumbered subsequent sections.
+
+### Files changed
+- `README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+
+### Manual run steps
+1. Read root `README.md` component list and confirm Captioner is present.
+2. Confirm defaults list includes Captioner at `http://127.0.0.1:8792`.
+3. Follow one-command subprocess instructions and verify wording says Eva boots Agent + Vision + Captioner.
+4. Confirm Development Run Instructions now include a dedicated Captioner setup/run block.
+
+### Notes
+- This iteration is documentation-only; no runtime behavior changes were made.
+
+## Iteration 180 — DX guardrail: clear startup warning when captions are enabled but captioner isn’t reachable
+
+**Status:** ✅ Completed (2026-02-28)
+
+### Completed
+- Added a one-time startup reachability check for Captioner health in `packages/eva/src/index.ts`:
+  - runs once during Eva startup when `caption.enabled=true`
+  - checks `GET {caption.baseUrl}/health` with a short timeout
+  - remains non-fatal (warning only)
+- Added explicit actionable startup warning text when Captioner health is unavailable:
+  - when subprocess mode is on:
+    - warns and suggests: `Enable subprocesses.captioner` (plus verify command/cwd/healthUrl settings)
+  - when subprocess mode is off:
+    - warns and suggests: `Start captioner manually at packages/eva/captioner`
+- Kept existing runtime caption behavior unchanged:
+  - caption call failures remain warnings
+  - no startup hard-fail introduced by this guardrail
+
+### Files changed
+- `packages/eva/src/index.ts`
+- `progress.md`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+
+### Manual run steps
+1. With captioner down and `caption.enabled=true`:
+   - start Eva and confirm a single startup warning is logged with actionable next-step text.
+2. With `subprocesses.enabled=true` but `subprocesses.captioner.enabled=false`:
+   - confirm warning includes `Enable subprocesses.captioner` guidance.
+3. With subprocess mode disabled:
+   - confirm warning includes `Start captioner manually at packages/eva/captioner` guidance.
+4. Start captioner and restart Eva:
+   - confirm startup warning is not printed.
+
+### Notes
+- This is a startup DX guardrail only; subprocess supervision behavior from Iteration 178 is unchanged.
+
+## Iteration 181 — Use committed `eva.config.json` for subprocess stack boot (no local config required)
+
+**Status:** ✅ Completed (2026-02-28)
+
+### Completed
+- Updated committed Eva runtime config in `packages/eva/eva.config.json` to include subprocess orchestration defaults directly:
+  - `subprocesses.enabled: true`
+  - `subprocesses.agent` block
+  - `subprocesses.vision` block
+  - `subprocesses.captioner` block
+- This makes one-command stack boot work from committed config (no required `eva.config.local.json` copy step).
+- Updated root docs in `README.md`:
+  - one-command section now uses committed `eva.config.json` directly (`cd packages/eva && npm run dev`)
+  - clarified that `eva.config.local.json` is optional and should be absent if committed-config-only behavior is desired
+- Updated package docs in `packages/eva/README.md`:
+  - runtime modes now include Captioner in subprocess startup/shutdown sequence
+  - config snippet now includes `subprocesses.captioner`
+  - added Captioner venv prerequisite
+  - external mode run steps now include starting Captioner manually
+  - subprocess mode run now uses committed config by default, with optional local command overrides for Vision/Captioner
+
+### Files changed
+- `packages/eva/eva.config.json`
+- `README.md`
+- `packages/eva/README.md`
+- `progress.md`
+
+### Verification
+- `cd packages/eva && npm run build` passes.
+
+### Manual run steps
+1. Ensure one-time env setup is complete:
+   - `packages/eva/vision/.venv` exists + requirements installed
+   - `packages/eva/captioner/.venv` exists + requirements installed
+   - Agent deps/secrets are set
+2. Start Eva only:
+   - `cd packages/eva && npm run dev`
+3. Confirm subprocess startup logs include agent, vision, captioner and health waits.
+4. Confirm health endpoints are reachable:
+   - `http://127.0.0.1:8791/health`
+   - `http://127.0.0.1:8000/health`
+   - `http://127.0.0.1:8792/health`
+
+### Notes
+- Config load order is unchanged (`eva.config.local.json` still has priority when present).
+- For committed-config-only behavior, remove or rename any existing `eva.config.local.json`.
+
+## Iteration 182 — Vision auto-insight configurable + enabled via settings
+
+**Status:** ✅ Completed (2026-02-28)
+
+### Completed
+- Added configurable auto-insight settings in `packages/eva/vision/app/insights.py`:
+  - new `AutoInsightSettings` dataclass
+  - new `insights.auto.enabled` config field
+  - new `insights.auto.interval_ms` config field with validation (`>= 1`)
+  - `InsightSettings` now carries `auto` settings for runtime use
+- Removed hardcoded auto-insight health/startup reporting in `packages/eva/vision/app/main.py`:
+  - startup logs now print configured auto state
+  - `/health` now reports:
+    - `auto_insights_enabled`
+    - `auto_insight_interval_ms`
+- Enabled runtime auto-insight trigger path in `packages/eva/vision/app/main.py`:
+  - on incoming frames, Vision now attempts auto insight on configured cadence
+  - preserved manual `insight_test`
+  - preserved cooldown guardrails via existing `insights.insight_cooldown_ms`
+- Updated committed Vision defaults in `packages/eva/vision/settings.yaml`:
+  - `insights.auto.enabled: true`
+  - `insights.auto.interval_ms: 1500`
+- Updated Vision docs in `packages/eva/vision/README.md` to describe auto-insight configuration and behavior.
+
+### Files changed
+- `packages/eva/vision/app/insights.py`
+- `packages/eva/vision/app/main.py`
+- `packages/eva/vision/settings.yaml`
+- `packages/eva/vision/README.md`
+- `docs/implementation-plan-177-182.md`
+- `progress.md`
+
+### Verification
+- `cd packages/eva/vision && python3 -m compileall app` passes.
+- `cd packages/eva && npm run build` passes.
+
+### Manual run steps
+1. Start Eva stack and ensure Vision is running.
+2. Check Vision health:
+   - `curl http://127.0.0.1:8000/health`
+   - confirm `auto_insights_enabled=true` and `auto_insight_interval_ms=1500`.
+3. Stream frames through `/eye`.
+4. Confirm `insight` messages are emitted without sending `insight_test`.
+
+### Notes
+- Current auto-trigger is cadence-based on inbound frames (config-driven), not event-weighted (`surprise.weights`) detector scoring.
+- `insight_test` remains available as a manual diagnostic trigger.

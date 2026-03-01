@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from dataclasses import dataclass
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -51,6 +52,8 @@ async def on_startup() -> None:
         f"pre_frames={_insight_settings.pre_frames} "
         f"post_frames={_insight_settings.post_frames} "
         f"insight_cooldown_ms={_insight_settings.insight_cooldown_ms} "
+        f"auto_enabled={_insight_settings.auto.enabled} "
+        f"auto_interval_ms={_insight_settings.auto.interval_ms} "
         f"assets_max_clips={_insight_settings.assets.max_clips} "
         f"assets_max_age_hours={_insight_settings.assets.max_age_hours} "
         f"downsample_enabled={_insight_settings.downsample.enabled} "
@@ -68,7 +71,7 @@ async def on_startup() -> None:
         "[vision] scene-change path removed: "
         "runtime_enabled=False "
         "emitting_scene_change_events=False "
-        "auto_insights_enabled=False"
+        f"auto_insights_enabled={_insight_settings.auto.enabled}"
     )
 
 
@@ -91,7 +94,8 @@ async def health() -> dict[str, object]:
         "surprise_threshold": _insight_settings.surprise.threshold if _insight_settings is not None else 0,
         "surprise_cooldown_ms": _insight_settings.surprise.cooldown_ms if _insight_settings is not None else 0,
         "surprise_weights": len(_insight_settings.surprise.weights) if _insight_settings is not None else 0,
-        "auto_insights_enabled": False,
+        "auto_insights_enabled": _insight_settings.auto.enabled if _insight_settings is not None else False,
+        "auto_insight_interval_ms": _insight_settings.auto.interval_ms if _insight_settings is not None else 0,
         "scene_change_removed": True,
     }
 
@@ -120,6 +124,8 @@ async def infer_socket(websocket: WebSocket) -> None:
     pending_frame_event = asyncio.Event()
     inference_running = False
     manual_insight_task: asyncio.Task[None] | None = None
+    auto_insight_task: asyncio.Task[None] | None = None
+    last_auto_insight_started_ms = 0
 
     async def process_frame(frame: FrameRequest) -> None:
         frame_events = FrameEventsMessage(
@@ -139,6 +145,36 @@ async def infer_socket(websocket: WebSocket) -> None:
             await send_payload(make_error(exc.code, str(exc)))
         except Exception as exc:
             await send_payload(make_error("INSIGHT_ERROR", f"Insight test failed: {exc}"))
+
+    async def process_auto_insight() -> None:
+        try:
+            insight_message = await insight_buffer.run_insight_test()
+            await send_payload(insight_message.model_dump(exclude_none=True))
+        except InsightError as exc:
+            if exc.code in {"INSIGHT_COOLDOWN", "NO_TRIGGER_FRAME", "INSIGHTS_DISABLED"}:
+                return
+            await send_payload(make_error(exc.code, f"Auto insight failed: {exc}"))
+        except Exception as exc:
+            await send_payload(make_error("INSIGHT_ERROR", f"Auto insight failed: {exc}"))
+
+    def maybe_start_auto_insight() -> None:
+        nonlocal auto_insight_task, last_auto_insight_started_ms
+
+        if not insight_settings.enabled or not insight_settings.auto.enabled:
+            return
+
+        if manual_insight_task is not None and not manual_insight_task.done():
+            return
+
+        if auto_insight_task is not None and not auto_insight_task.done():
+            return
+
+        now_ms = int(time.time() * 1000)
+        if now_ms - last_auto_insight_started_ms < insight_settings.auto.interval_ms:
+            return
+
+        last_auto_insight_started_ms = now_ms
+        auto_insight_task = asyncio.create_task(process_auto_insight())
 
     async def inference_worker() -> None:
         nonlocal inference_running, pending_frame
@@ -227,6 +263,7 @@ async def infer_socket(websocket: WebSocket) -> None:
                 continue
 
             insight_buffer.add_frame(envelope.meta, envelope.image_payload)
+            maybe_start_auto_insight()
 
             frame = FrameRequest(
                 frame_id=envelope.meta.frame_id,
@@ -260,3 +297,8 @@ async def infer_socket(websocket: WebSocket) -> None:
             manual_insight_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await manual_insight_task
+
+        if auto_insight_task and not auto_insight_task.done():
+            auto_insight_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await auto_insight_task
