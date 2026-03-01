@@ -31,9 +31,9 @@
     "enabled": true,
     "thumbW": 350,
     "thumbH": 350,
-    "triggerThreshold": 12,
-    "resetThreshold": 8,
-    "cooldownMs": 1500,
+    "triggerThreshold": 8,
+    "resetThreshold": 6,
+    "cooldownMs": 1000,
     "minPersistFrames": 2
   },
   "insightRelay": {
