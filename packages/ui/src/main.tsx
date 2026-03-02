@@ -56,6 +56,15 @@ interface LatestMotion {
   triggered: boolean;
 }
 
+interface SemanticSurpriseEntry {
+  id: number;
+  ts: string;
+  surprise: number;
+  similarityPrev: number;
+  similarityMean: number;
+  shouldEscalate: boolean;
+}
+
 type ChatMessageRole = 'user' | 'assistant';
 
 interface ChatMessage {
@@ -94,6 +103,7 @@ const SEVERITY_COLOR: Record<InsightSeverity, string> = {
 const FRAME_TIMEOUT_MS = 500;
 const FRAME_LOOP_INTERVAL_MS = 100;
 const EVENT_FEED_LIMIT = 60;
+const SURPRISE_FEED_LIMIT = 30;
 
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -374,6 +384,42 @@ function getSceneCaptionText(event: EventEntry): string | null {
   return normalizedText.length > 0 ? normalizedText : null;
 }
 
+function getSceneSemanticSurprise(event: EventEntry): Omit<SemanticSurpriseEntry, 'id' | 'ts'> | null {
+  if (event.name !== 'scene_caption') {
+    return null;
+  }
+
+  const semantic = event.data.semantic;
+  if (!semantic || typeof semantic !== 'object') {
+    return null;
+  }
+
+  const semanticRecord = semantic as Record<string, unknown>;
+  const surprise = semanticRecord.surprise;
+  const similarityPrev = semanticRecord.similarity_prev;
+  const similarityMean = semanticRecord.similarity_mean;
+  const shouldEscalate = semanticRecord.should_escalate;
+
+  if (
+    typeof surprise !== 'number' ||
+    !Number.isFinite(surprise) ||
+    typeof similarityPrev !== 'number' ||
+    !Number.isFinite(similarityPrev) ||
+    typeof similarityMean !== 'number' ||
+    !Number.isFinite(similarityMean) ||
+    typeof shouldEscalate !== 'boolean'
+  ) {
+    return null;
+  }
+
+  return {
+    surprise,
+    similarityPrev,
+    similarityMean,
+    shouldEscalate,
+  };
+}
+
 function hasDebugOverlayGeometry(config: UiDebugOverlayConfig | undefined): boolean {
   if (!config) {
     return false;
@@ -431,6 +477,8 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const [recentEvents, setRecentEvents] = React.useState<EventFeedEntry[]>([]);
   const [latestCaption, setLatestCaption] = React.useState<LatestCaption | null>(null);
   const [latestMotion, setLatestMotion] = React.useState<LatestMotion | null>(null);
+  const [latestSemanticSurprise, setLatestSemanticSurprise] = React.useState<SemanticSurpriseEntry | null>(null);
+  const [recentSemanticSurprise, setRecentSemanticSurprise] = React.useState<SemanticSurpriseEntry[]>([]);
   const [latestInsight, setLatestInsight] = React.useState<InsightMessage | null>(null);
   const [debugOverlayEnabled, setDebugOverlayEnabled] = React.useState(false);
 
@@ -453,6 +501,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const nextLogIdRef = React.useRef(1);
   const nextEventIdRef = React.useRef(1);
   const nextChatIdRef = React.useRef(1);
+  const nextSurpriseIdRef = React.useRef(1);
   const seenTextOutputRequestIdsRef = React.useRef<string[]>([]);
   const inFlightRef = React.useRef<InFlightFrame | null>(null);
   const captureInProgressRef = React.useRef(false);
@@ -475,7 +524,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     };
 
     nextLogIdRef.current += 1;
-    setLogs((prev) => [...prev.slice(-199), entry]);
+    setLogs((prev) => [entry, ...prev].slice(0, 200));
   }, []);
 
   const appendEvents = React.useCallback((events: EventEntry[]) => {
@@ -827,16 +876,32 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
         if (frameEventsMessage) {
           if (frameEventsMessage.events.length > 0) {
+            const semanticEntries: SemanticSurpriseEntry[] = [];
+
             for (const event of frameEventsMessage.events) {
               const sceneCaptionText = getSceneCaptionText(event);
-              if (!sceneCaptionText) {
-                continue;
+              if (sceneCaptionText) {
+                setLatestCaption({
+                  text: sceneCaptionText,
+                  ts: formatTime(event.ts_ms),
+                });
               }
 
-              setLatestCaption({
-                text: sceneCaptionText,
-                ts: formatTime(event.ts_ms),
-              });
+              const semanticSurprise = getSceneSemanticSurprise(event);
+              if (semanticSurprise) {
+                semanticEntries.push({
+                  id: nextSurpriseIdRef.current,
+                  ts: formatTime(event.ts_ms),
+                  ...semanticSurprise,
+                });
+                nextSurpriseIdRef.current += 1;
+              }
+            }
+
+            if (semanticEntries.length > 0) {
+              const newestSemanticEntry = semanticEntries[semanticEntries.length - 1];
+              setLatestSemanticSurprise(newestSemanticEntry);
+              setRecentSemanticSurprise((prev) => [...semanticEntries.reverse(), ...prev].slice(0, SURPRISE_FEED_LIMIT));
             }
 
             appendEvents(frameEventsMessage.events);
@@ -1494,6 +1559,27 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
             <em>none yet</em>
           )}
         </p>
+        <p style={{ marginTop: 4, marginBottom: 0 }}>
+          <strong>Latest semantic surprise:</strong>{' '}
+          {latestSemanticSurprise ? (
+            <>
+              surprise {latestSemanticSurprise.surprise.toFixed(3)} · prev sim {latestSemanticSurprise.similarityPrev.toFixed(3)}
+              {' · '}mean sim {latestSemanticSurprise.similarityMean.toFixed(3)} · escalate{' '}
+              {latestSemanticSurprise.shouldEscalate ? 'yes' : 'no'} <small>(at {latestSemanticSurprise.ts})</small>
+            </>
+          ) : (
+            <em>none yet (semantic samples appear when scene_caption events are emitted)</em>
+          )}
+        </p>
+        {recentSemanticSurprise.length > 0 ? (
+          <p style={{ marginTop: 4, marginBottom: 0 }}>
+            <strong>Recent surprise:</strong>{' '}
+            {recentSemanticSurprise
+              .slice(0, 12)
+              .map((entry) => entry.surprise.toFixed(2))
+              .join(' · ')}
+          </p>
+        ) : null}
       </section>
 
       <section style={{ marginBottom: 16 }}>

@@ -10144,3 +10144,30 @@
 - `cd packages/eva/vision && python3 -m compileall -f app`
 - Verified direct WS command returns actionable response path:
   - either `insight` or explicit `error` (no silent drop).
+
+## Iteration 198 — UI log ordering (newest-first)
+
+- Updated UI log panel ordering so newest entries appear at the top.
+- Change made in `packages/ui/src/main.tsx`:
+  - `setLogs((prev) => [...prev.slice(-199), entry])`
+  - -> `setLogs((prev) => [entry, ...prev].slice(0, 200))`
+- Behavior now matches request: latest log lines are visible first without scrolling to bottom.
+
+## Iteration 199 — UI semantic surprise tracking
+
+- Added live semantic surprise visibility in UI so movement impact can be monitored while streaming camera frames.
+- `packages/ui/src/main.tsx` updates:
+  - Added semantic surprise extraction from `scene_caption` event payload (`data.semantic`):
+    - `surprise`
+    - `similarity_prev`
+    - `similarity_mean`
+    - `should_escalate`
+  - Added state for:
+    - latest semantic surprise snapshot
+    - recent surprise sample feed
+  - Rendered new UI lines in the camera/status section:
+    - **Latest semantic surprise** (with prev/mean similarity and escalate flag)
+    - **Recent surprise** compact sequence (newest first)
+  - Added note when no semantic samples are available yet.
+- Validation:
+  - `cd packages/ui && npm run build`
