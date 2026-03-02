@@ -4,7 +4,7 @@
     "eyePath": "/eye"
   },
   "vision": {
-    "wsUrl": "ws://localhost:8000/infer"
+    "wsUrl": "ws://127.0.0.1:8792/infer"
   },
   "stream": {
     "broker": {
@@ -17,15 +17,6 @@
       "enabled": true,
       "sampleEveryN": 2
     }
-  },
-  "caption": {
-    "enabled": true,
-    "baseUrl": "http://127.0.0.1:8792",
-    "timeoutMs": 1500,
-    "cooldownMs": 2000,
-    "periodicMs": 8000,
-    "dedupeWindowMs": 15000,
-    "minSceneSeverity": "medium"
   },
   "motionGate": {
     "enabled": true,
@@ -69,7 +60,11 @@
     "agent": {
       "enabled": true,
       "cwd": "packages/eva/executive",
-      "command": ["npm", "run", "dev"],
+      "command": [
+        "npm",
+        "run",
+        "dev"
+      ],
       "healthUrl": "http://127.0.0.1:8791/health",
       "readyTimeoutMs": 30000,
       "shutdownTimeoutMs": 5000
@@ -77,15 +72,11 @@
     "vision": {
       "enabled": true,
       "cwd": "packages/eva/vision",
-      "command": [".venv/bin/python", "-m", "app.run"],
-      "healthUrl": "http://127.0.0.1:8000/health",
-      "readyTimeoutMs": 60000,
-      "shutdownTimeoutMs": 10000
-    },
-    "captioner": {
-      "enabled": true,
-      "cwd": "packages/eva/captioner",
-      "command": [".venv/bin/python", "-m", "app.run"],
+      "command": [
+        ".venv/bin/python",
+        "-m",
+        "app.run"
+      ],
       "healthUrl": "http://127.0.0.1:8792/health",
       "readyTimeoutMs": 120000,
       "shutdownTimeoutMs": 10000

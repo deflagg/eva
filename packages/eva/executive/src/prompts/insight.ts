@@ -57,7 +57,7 @@ export function buildInsightSystemPrompt(maxFrames: number, ttsStyle: 'clean' | 
     '- what_changed: include "No meaningful visual change across frames."',
     '- severity: low',
     '- tags: include "no_change" (or "uncertain")',
-    '- tts_response: none',
+    '- tts_response: one short low-key line; never null/none/empty.',
     '',
     'Safety / non-creepy rules:',
     '- Never mention cameras, frames, "I analyzed", models, telemetry, IDs, tokens, or cost.',

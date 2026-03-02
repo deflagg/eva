@@ -23,7 +23,7 @@ const FRAME_ROUTE_TTL_MS = 5_000;
 const AGENT_EVENTS_INGEST_TIMEOUT_MS = 400;
 const AGENT_EVENTS_INGEST_VERSION = 1;
 const AGENT_EVENTS_INGEST_WARN_COOLDOWN_MS = 10_000;
-const CAPTION_WARN_COOLDOWN_MS = 10_000;
+const MOTION_TRIGGER_WARN_COOLDOWN_MS = 10_000;
 
 class RequestBodyTooLargeError extends Error {
   constructor(maxBodyBytes: number) {
@@ -75,15 +75,6 @@ export interface StartServerOptions {
       enabled: boolean;
       sampleEveryN: number;
     };
-  };
-  caption: {
-    enabled: boolean;
-    baseUrl: string;
-    timeoutMs: number;
-    cooldownMs: number;
-    periodicMs: number;
-    dedupeWindowMs: number;
-    minSceneSeverity: 'low' | 'medium' | 'high';
   };
   motionGate: {
     enabled: boolean;
@@ -218,17 +209,8 @@ const AgentEventsIngestRequestSchema = z
   })
   .strict();
 
-const CaptionResponseSchema = z
-  .object({
-    text: z.string(),
-    latency_ms: z.number().int().nonnegative(),
-    model: z.string().trim().min(1),
-  })
-  .strict();
-
 type AgentRespondResponse = z.infer<typeof AgentRespondResponseSchema>;
 type AgentEventsIngestRequest = z.infer<typeof AgentEventsIngestRequestSchema>;
-type CaptionResponse = z.infer<typeof CaptionResponseSchema>;
 
 interface TextOutputMessage {
   type: 'text_output';
@@ -506,60 +488,6 @@ function resolveAgentEventsIngestUrl(baseUrl: string): string {
   return new URL('events', normalizedBaseUrl).toString();
 }
 
-function resolveCaptionUrl(baseUrl: string): string {
-  const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
-  return new URL('caption', normalizedBaseUrl).toString();
-}
-
-async function callCaptionService(
-  captionConfig: StartServerOptions['caption'],
-  jpegBytes: Buffer,
-): Promise<CaptionResponse> {
-  const timeoutController = new AbortController();
-  const timeoutId = setTimeout(() => {
-    timeoutController.abort();
-  }, captionConfig.timeoutMs);
-
-  let response: Response;
-  try {
-    response = await fetch(resolveCaptionUrl(captionConfig.baseUrl), {
-      method: 'POST',
-      headers: {
-        'content-type': 'image/jpeg',
-      },
-      body: new Uint8Array(jpegBytes),
-      signal: timeoutController.signal,
-    });
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`Caption request timed out after ${captionConfig.timeoutMs}ms.`);
-    }
-
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Caption request failed: ${message}`);
-  } finally {
-    clearTimeout(timeoutId);
-  }
-
-  if (!response.ok) {
-    throw new Error(`Caption /caption returned HTTP ${response.status}.`);
-  }
-
-  let payload: unknown;
-  try {
-    payload = await response.json();
-  } catch {
-    throw new Error('Caption /caption returned non-JSON payload.');
-  }
-
-  const parsedPayload = CaptionResponseSchema.safeParse(payload);
-  if (!parsedPayload.success) {
-    throw new Error('Caption /caption response shape is invalid.');
-  }
-
-  return parsedPayload.data;
-}
-
 async function callAgentRespond(
   agentConfig: StartServerOptions['agent'],
   request: ParsedTextRequest,
@@ -650,7 +578,7 @@ async function callAgentEventsIngest(agentBaseUrl: string, payload: AgentEventsI
 }
 
 export function startServer(options: StartServerOptions): Server {
-  const { port, eyePath, visionWsUrl, stream, caption, motionGate, insightRelay, agent, text, speech } = options;
+  const { port, eyePath, visionWsUrl, stream, motionGate, insightRelay, agent, text, speech } = options;
 
   let lastSpeechRequestStartedAtMs: number | null = null;
   let activeUiClient: WebSocket | null = null;
@@ -991,11 +919,11 @@ export function startServer(options: StartServerOptions): Server {
               total_bytes: brokerStats.totalBytes,
             },
           },
-          caption: {
-            enabled: caption.enabled,
-            in_flight: inFlightCaption !== null,
-            pending_frame_id: pendingCaptionFrameId,
-            last_latency_ms: lastCaptionLatencyMs,
+          vision_pipeline: {
+            mode: 'motion_to_vision_ws_attention',
+            motion_trigger_attention_start: true,
+            force_forward_trigger_frame: true,
+            sampled_forwarding_enabled: stream.visionForward.enabled,
           },
         }),
       );
@@ -1081,26 +1009,19 @@ export function startServer(options: StartServerOptions): Server {
   const visionForwardSampleEveryN = Math.max(1, stream.visionForward.sampleEveryN);
   let visionForwardCounter = 0;
 
-  let inFlightCaption: Promise<void> | null = null;
-  let pendingCaptionFrameId: string | null = null;
-  let captionCooldownTimer: NodeJS.Timeout | null = null;
-  let lastCaptionStartedAtMs: number | null = null;
-  let lastCaptionText: string | null = null;
-  let lastCaptionTextAtMs: number | null = null;
-  let lastCaptionLatencyMs: number | null = null;
-  let lastCaptionWarningAtMs: number | null = null;
+  let lastMotionTriggerWarningAtMs: number | null = null;
 
-  const warnCaptionFailure = (reason: string): void => {
+  const warnMotionTriggerForwardFailure = (reason: string): void => {
     const nowMs = Date.now();
     if (
-      lastCaptionWarningAtMs !== null &&
-      nowMs - lastCaptionWarningAtMs < CAPTION_WARN_COOLDOWN_MS
+      lastMotionTriggerWarningAtMs !== null &&
+      nowMs - lastMotionTriggerWarningAtMs < MOTION_TRIGGER_WARN_COOLDOWN_MS
     ) {
       return;
     }
 
-    lastCaptionWarningAtMs = nowMs;
-    console.warn(`[eva] caption pipeline warning: ${reason}`);
+    lastMotionTriggerWarningAtMs = nowMs;
+    console.warn(`[eva] motion-trigger vision handoff warning: ${reason}`);
   };
 
   const filterPersistableVisionEvents = (
@@ -1112,142 +1033,6 @@ export function startServer(options: StartServerOptions): Server {
     }>,
   ) => {
     return events.filter((event) => event.name === 'scene_caption');
-  };
-
-  const runCaptionForFrame = async (frameId: string): Promise<void> => {
-    if (!caption.enabled) {
-      return;
-    }
-
-    const brokerEntry = frameBroker.getByFrameId(frameId);
-    if (!brokerEntry) {
-      return;
-    }
-
-    lastCaptionStartedAtMs = Date.now();
-
-    let captionResponse: CaptionResponse;
-    try {
-      captionResponse = await callCaptionService(caption, brokerEntry.jpegBytes);
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      warnCaptionFailure(reason);
-      return;
-    }
-
-    const captionText = captionResponse.text.trim();
-    if (!captionText) {
-      return;
-    }
-
-    const nowMs = Date.now();
-    lastCaptionLatencyMs = captionResponse.latency_ms;
-
-    if (
-      caption.dedupeWindowMs > 0 &&
-      lastCaptionText !== null &&
-      lastCaptionTextAtMs !== null &&
-      captionText === lastCaptionText &&
-      nowMs - lastCaptionTextAtMs < caption.dedupeWindowMs
-    ) {
-      return;
-    }
-
-    lastCaptionText = captionText;
-    lastCaptionTextAtMs = nowMs;
-
-    const sceneCaptionEvent = {
-      name: 'scene_caption',
-      ts_ms: nowMs,
-      severity: 'low' as const,
-      data: {
-        text: captionText,
-        model: captionResponse.model,
-        latency_ms: captionResponse.latency_ms,
-      },
-    };
-
-    if (activeUiClient && activeUiClient.readyState === WebSocket.OPEN) {
-      sendJson(activeUiClient, {
-        type: 'frame_events',
-        v: PROTOCOL_VERSION,
-        frame_id: brokerEntry.frame_id,
-        ts_ms: nowMs,
-        width: brokerEntry.width,
-        height: brokerEntry.height,
-        events: [sceneCaptionEvent],
-      });
-    }
-
-    const eventsPayload: AgentEventsIngestRequest = {
-      v: AGENT_EVENTS_INGEST_VERSION,
-      source: 'caption',
-      events: [sceneCaptionEvent],
-      meta: {
-        frame_id: brokerEntry.frame_id,
-      },
-    };
-
-    void callAgentEventsIngest(agent.baseUrl, eventsPayload).catch((error) => {
-      const reason = error instanceof Error ? error.message : String(error);
-      warnAgentEventsIngestFailure(reason);
-    });
-  };
-
-  const maybeStartCaptionWorker = (): void => {
-    if (!caption.enabled) {
-      pendingCaptionFrameId = null;
-      return;
-    }
-
-    if (inFlightCaption !== null) {
-      return;
-    }
-
-    if (!pendingCaptionFrameId) {
-      return;
-    }
-
-    if (captionCooldownTimer !== null) {
-      return;
-    }
-
-    if (caption.cooldownMs > 0 && lastCaptionStartedAtMs !== null) {
-      const elapsedMs = Date.now() - lastCaptionStartedAtMs;
-      if (elapsedMs < caption.cooldownMs) {
-        const waitMs = caption.cooldownMs - elapsedMs;
-        captionCooldownTimer = setTimeout(() => {
-          captionCooldownTimer = null;
-          maybeStartCaptionWorker();
-        }, waitMs);
-        captionCooldownTimer.unref?.();
-        return;
-      }
-    }
-
-    const frameId = pendingCaptionFrameId;
-    pendingCaptionFrameId = null;
-
-    inFlightCaption = runCaptionForFrame(frameId)
-      .catch((error) => {
-        const reason = error instanceof Error ? error.message : String(error);
-        warnCaptionFailure(reason);
-      })
-      .finally(() => {
-        inFlightCaption = null;
-        if (pendingCaptionFrameId !== null) {
-          maybeStartCaptionWorker();
-        }
-      });
-  };
-
-  const scheduleCaptionForFrame = (frameId: string): void => {
-    if (!caption.enabled) {
-      return;
-    }
-
-    pendingCaptionFrameId = frameId;
-    maybeStartCaptionWorker();
   };
 
   const frameRouter = new FrameRouter({
@@ -1354,6 +1139,26 @@ export function startServer(options: StartServerOptions): Server {
 
   visionClient.connect();
 
+  const sendAttentionStartToVision = (): boolean => {
+    return visionClient.sendJson({
+      type: 'command',
+      v: PROTOCOL_VERSION,
+      name: 'attention_start',
+    });
+  };
+
+  const forwardFrameToVision = (frameId: string, targetClient: WebSocket, binaryPayload: Buffer): boolean => {
+    frameRouter.set(frameId, targetClient);
+
+    const forwarded = visionClient.sendBinary(binaryPayload);
+    if (!forwarded) {
+      frameRouter.delete(frameId);
+      return false;
+    }
+
+    return true;
+  };
+
   const wss = new WebSocketServer({ noServer: true });
 
   const cleanupClientRoutes = (client: WebSocket, reason: string): void => {
@@ -1450,10 +1255,29 @@ export function startServer(options: StartServerOptions): Server {
           return;
         }
 
+        let forwardedByMotionTrigger = false;
+
         if (receiptMotion?.triggered) {
-          const latestFrame = frameBroker.getLatest();
-          if (latestFrame) {
-            scheduleCaptionForFrame(latestFrame.frame_id);
+          if (!visionClient.isConnected()) {
+            warnMotionTriggerForwardFailure(
+              `Vision unavailable during motion trigger; cannot forward trigger frame ${frameId}.`,
+            );
+          } else {
+            const attentionSent = sendAttentionStartToVision();
+            if (!attentionSent) {
+              warnMotionTriggerForwardFailure(
+                `Failed to send attention_start for trigger frame ${frameId}.`,
+              );
+            }
+
+            const triggerForwarded = forwardFrameToVision(frameId, ws, binaryPayload);
+            if (!triggerForwarded) {
+              warnMotionTriggerForwardFailure(
+                `Failed to force-forward trigger frame ${frameId} to Vision.`,
+              );
+            } else {
+              forwardedByMotionTrigger = true;
+            }
           }
         }
 
@@ -1463,6 +1287,11 @@ export function startServer(options: StartServerOptions): Server {
 
         const shouldForwardSample = visionForwardCounter % visionForwardSampleEveryN === 0;
         visionForwardCounter += 1;
+
+        if (forwardedByMotionTrigger) {
+          return;
+        }
+
         if (!shouldForwardSample) {
           return;
         }
@@ -1471,12 +1300,7 @@ export function startServer(options: StartServerOptions): Server {
           return;
         }
 
-        frameRouter.set(frameId, ws);
-
-        const forwarded = visionClient.sendBinary(binaryPayload);
-        if (!forwarded) {
-          frameRouter.delete(frameId);
-        }
+        void forwardFrameToVision(frameId, ws, binaryPayload);
 
         return;
       }
@@ -1562,7 +1386,7 @@ export function startServer(options: StartServerOptions): Server {
       `[eva] motion gate enabled=${motionGate.enabled} thumb=${motionGate.thumbW}x${motionGate.thumbH} triggerThreshold=${motionGate.triggerThreshold} resetThreshold=${motionGate.resetThreshold} cooldownMs=${motionGate.cooldownMs} minPersistFrames=${motionGate.minPersistFrames}`,
     );
     console.log(
-      `[eva] caption enabled=${caption.enabled} baseUrl=${caption.baseUrl} timeoutMs=${caption.timeoutMs} triggerSource=motion_gate triggerCooldownMs=${caption.cooldownMs} dedupeWindowMs=${caption.dedupeWindowMs}`,
+      '[eva] vision attention relay mode=motion_to_vision_ws_attention motionTriggerAttentionStart=true forceForwardTriggerFrame=true',
     );
     console.log(
       `[eva] insight relay enabled=${insightRelay.enabled} cooldownMs=${insightRelay.cooldownMs} dedupeWindowMs=${insightRelay.dedupeWindowMs}`,
@@ -1588,13 +1412,6 @@ export function startServer(options: StartServerOptions): Server {
     emittedInsightUtteranceClipIds.clear();
     speechCache.clear();
     inFlightSpeechSynthesis.clear();
-
-    if (captionCooldownTimer) {
-      clearTimeout(captionCooldownTimer);
-      captionCooldownTimer = null;
-    }
-
-    pendingCaptionFrameId = null;
 
     visionClient.disconnect();
     wss.close();

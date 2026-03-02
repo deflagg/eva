@@ -9014,3 +9014,1035 @@
 ### Notes
 - Current auto-trigger is cadence-based on inbound frames (config-driven), not event-weighted (`surprise.weights`) detector scoring.
 - `insight_test` remains available as a manual diagnostic trigger.
+
+## Iteration 183 — Captioner WS-first `/infer` skeleton + clean protocol implementation (no caption events, no insight)
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Added new protocol module in `packages/eva/captioner/app/protocol.py` (clean captioner-local implementation):
+  - protocol v2 constants/types for `hello`, `error`, `frame_events`, `command`, and binary `frame_binary` metadata
+  - binary frame envelope decoder:
+    - 4-byte big-endian metadata length
+    - UTF-8 JSON metadata parse/validation
+    - JPEG payload length validation (`image_bytes` exact match)
+  - message builders:
+    - `make_hello(role)`
+    - `make_error(code, message, frame_id?)`
+    - `make_frame_events(frame_id, ts_ms, width, height)` (currently `events: []`)
+  - minimal command parsing helper (`parse_command_payload`) validating `name` as a non-empty string.
+- Added WS `/infer` endpoint to `packages/eva/captioner/app/main.py`:
+  - accepts WS connection and immediately emits `hello(role="vision")`
+  - on valid binary frame envelope, decodes and returns `frame_events` with empty `events[]` (pipeline proof)
+  - on invalid binary payload, emits protocol `error` (`INVALID_FRAME_BINARY`)
+  - on invalid JSON text payload, emits protocol `error` (`INVALID_JSON`)
+  - parses JSON `command` payloads and returns `UNSUPPORTED_COMMAND` for now (minimal command plumbing only)
+  - non-binary/non-command payloads return protocol errors (`FRAME_BINARY_REQUIRED` / `INVALID_PAYLOAD`)
+- Updated captioner docs in `packages/eva/captioner/README.md`:
+  - added WS-first migration note
+  - documented `/infer` behavior and binary envelope shape
+  - documented minimal command parse support.
+
+### Files changed
+- `packages/eva/captioner/app/protocol.py` (new)
+- `packages/eva/captioner/app/main.py`
+- `packages/eva/captioner/README.md`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/captioner && python3 -m compileall app`
+- WS handshake/frame skeleton smoke test passes:
+  - started captioner with model disabled for startup speed:
+    - `DYNACONF_CAPTION__ENABLED=false .venv/bin/python -m app.run`
+  - connected to `ws://127.0.0.1:8792/infer`
+  - observed `hello`
+  - sent one valid protocol-v2 binary frame envelope
+  - observed `frame_events` with matching `frame_id` and `events: []`.
+
+### Manual run steps
+1. Start captioner:
+   - `cd packages/eva/captioner`
+   - `python -m app.run`
+2. Connect a WS client to `ws://127.0.0.1:8792/infer`.
+3. Confirm first message is `hello` with `role: "vision"`.
+4. Send a valid binary frame envelope and confirm response is `frame_events` with `events: []`.
+5. Send malformed payloads and confirm protocol `error` responses.
+
+### Notes
+- This iteration adds WS skeleton/protocol plumbing only.
+- Caption generation and insight behavior are unchanged in this step (existing HTTP `/caption` path remains available during migration).
+
+## Iteration 184 — Captioner canonical config model + settings schema rewrite
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Added `packages/eva/captioner/app/config.py` (new canonical config layer):
+  - loads Dynaconf once (`settings.yaml` + optional `settings.local.yaml`)
+  - validates and maps into typed dataclass config object:
+    - `server.{host,port}`
+    - `executive.{base_url,timeout_ms}`
+    - `attention.{window_ms}`
+    - `caption.{enabled,model_id,device,max_dim,max_new_tokens,max_body_bytes,cooldown_ms,dedupe_window_ms}`
+    - `semantic.{enabled,model_id,device,history_size}`
+    - `surprise.{threshold}`
+    - `insight.{enabled,pre_frames,post_frames,max_frames,cooldown_ms,post_wait_ms,assets_dir,retention.*}`
+  - added `config_summary(...)` helper for health/runtime observability payloads.
+- Replaced ad-hoc runtime config reads with canonical config usage:
+  - `packages/eva/captioner/app/main.py`
+    - removed scattered `settings.get(...)` + ad-hoc parsing helpers
+    - startup now loads/validates config via `load_app_config()`
+    - caption runtime now uses `config.caption` directly
+    - `/health` now exposes canonical loaded config summary under `config`
+  - `packages/eva/captioner/app/run.py`
+    - uses canonical config for `uvicorn` host/port (`config.server.*`)
+- Rewrote `packages/eva/captioner/settings.yaml` to canonical schema shape used by the new config model.
+- Updated `packages/eva/captioner/README.md` to document canonical config sections and load behavior.
+
+### Files changed
+- `packages/eva/captioner/app/config.py` (new)
+- `packages/eva/captioner/app/main.py`
+- `packages/eva/captioner/app/run.py`
+- `packages/eva/captioner/settings.yaml`
+- `packages/eva/captioner/README.md`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/captioner && python3 -m compileall app`
+- Startup + health summary smoke test passes:
+  - started captioner with model disabled for fast boot:
+    - `DYNACONF_CAPTION__ENABLED=false .venv/bin/python -m app.run`
+  - verified `/health` includes canonical `config` summary with all sections.
+- WS regression smoke check passes:
+  - connected to `ws://127.0.0.1:8792/infer`
+  - observed `hello`
+  - sent valid binary frame envelope
+  - observed `frame_events` with matching `frame_id` and `events: []`.
+
+### Manual run steps
+1. Start captioner:
+   - `cd packages/eva/captioner`
+   - `python -m app.run`
+2. Check health:
+   - `curl -sS http://127.0.0.1:8792/health`
+   - confirm `config.server`, `config.executive`, `config.attention`, `config.caption`, `config.semantic`, `config.surprise`, `config.insight` are present.
+3. Connect WS client to `/infer` and send one valid binary frame envelope.
+4. Confirm `hello` + `frame_events(events=[])` behavior is unchanged.
+
+### Notes
+- This iteration is config-model and schema cleanup only; caption/semantic/insight runtime features are still staged for later iterations.
+
+## Iteration 185 — Captioner FrameBuffer + attention state machine (no caption emission yet)
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Added frame buffering module `packages/eva/captioner/app/frame_buffer.py`:
+  - bounded ring buffer for recent frame payloads
+  - stored frame shape:
+    - `frame_id`, `ts_ms`, `width`, `height`, `jpeg_bytes`
+  - implemented APIs:
+    - `add_frame(meta, jpeg)`
+    - `get_clip(trigger_frame_id, pre_frames, post_frames)`
+  - added buffer stats surface (`max_frames`, `depth`, `added`, `evicted`) and per-insert eviction info.
+- Added attention-window module `packages/eva/captioner/app/attention.py`:
+  - state machine for active attention windows
+  - `activate(now_ms?)` sets `active_until_ms = now + window_ms`
+  - `is_active(now_ms?)` helper for runtime checks
+  - `state()` helper for observability.
+- Wired WS runtime in `packages/eva/captioner/app/main.py`:
+  - per-connection `FrameBuffer` initialized on `/infer` connect
+  - per-connection `AttentionWindow` initialized from `attention.window_ms`
+  - on every valid binary frame:
+    - frame is added to ring buffer
+    - frame buffer growth/eviction counters are logged
+    - WS response remains `frame_events` with `events: []` (no caption logic yet)
+  - command handling now supports:
+    - `command.name === "attention_start"` → activates attention window
+    - unsupported command names still return `UNSUPPORTED_COMMAND`
+- Added `/health` WS runtime observability counters:
+  - `connections_opened`
+  - `active_connections`
+  - `frames_buffered`
+  - `frames_evicted`
+  - `attention_start_count`
+  - `last_attention_start_ts_ms`
+  - `frame_buffer_max_frames_hint`
+- Updated `packages/eva/captioner/README.md` for Iteration 185 behavior:
+  - documented frame buffer + attention modules and APIs
+  - documented `attention_start` command behavior.
+
+### Files changed
+- `packages/eva/captioner/app/frame_buffer.py` (new)
+- `packages/eva/captioner/app/attention.py` (new)
+- `packages/eva/captioner/app/main.py`
+- `packages/eva/captioner/README.md`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/captioner && python3 -m compileall app`
+- WS command + frame buffer smoke test passes:
+  - started captioner with model disabled:
+    - `DYNACONF_CAPTION__ENABLED=false .venv/bin/python -m app.run`
+  - connected to `ws://127.0.0.1:8792/infer`
+  - sent command `{ "type":"command", "v":2, "name":"attention_start" }`
+  - sent 22 valid binary frames
+  - observed:
+    - 22 `frame_events` responses (no `events` payload entries)
+    - no protocol errors
+- Buffer eviction + command observability confirmed:
+  - `/health` showed:
+    - `ws_runtime.frames_buffered = 22`
+    - `ws_runtime.frames_evicted = 6`
+    - `ws_runtime.attention_start_count = 1`
+  - runtime logs showed ring buffer growth and eviction counters.
+
+### Manual run steps
+1. Start captioner:
+   - `cd packages/eva/captioner`
+   - `python -m app.run`
+2. Connect WS client to `ws://127.0.0.1:8792/infer`.
+3. Send:
+   - `{"type":"command","v":2,"name":"attention_start"}`
+4. Stream enough frames to exceed buffer capacity and confirm logs show evictions.
+5. Call `GET /health` and confirm `ws_runtime` counters increment.
+
+### Notes
+- Iteration 185 intentionally does not emit scene captions from WS yet.
+- HTTP `/caption` path remains unchanged during this step.
+
+## Iteration 186 — Captioner emits `scene_caption` during attention (WS-first)
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Extended captioner WS runtime in `packages/eva/captioner/app/main.py` to emit caption events directly from `/infer`:
+  - when all conditions are true:
+    1. captioning enabled + runtime loaded
+    2. attention window is active
+    3. caption cooldown allows
+  - captioner now generates BLIP caption from frame JPEG bytes in-process (no HTTP `/caption` dependency)
+  - emits one `scene_caption` event inside `frame_events.events[]` with data:
+    - `text`
+    - `model`
+    - `latency_ms`
+- Added WS caption gating + suppression state:
+  - per-connection caption state tracks:
+    - last caption attempt timestamp (cooldown)
+    - last emitted caption text/timestamp (dedupe)
+  - identical captions inside `caption.dedupe_window_ms` are suppressed.
+- Added WS runtime observability counters:
+  - `scene_caption_emitted`
+  - `scene_caption_dedupe_suppressed`
+  - `scene_caption_cooldown_skipped`
+  - `scene_caption_errors`
+  - `last_scene_caption_ts_ms`
+  - `last_scene_caption_text`
+- Improved WS reliability around caption failures:
+  - caption generation exceptions now emit protocol `error` (`CAPTION_FAILED`) and continue frame stream.
+- Updated protocol helper in `packages/eva/captioner/app/protocol.py`:
+  - `make_frame_events(...)` now accepts optional `events` list (default empty).
+- Updated docs in `packages/eva/captioner/README.md`:
+  - documented attention-driven `scene_caption` emission
+  - documented event payload shape
+  - documented cooldown/dedupe behavior and related health counters.
+
+### Files changed
+- `packages/eva/captioner/app/main.py`
+- `packages/eva/captioner/app/protocol.py`
+- `packages/eva/captioner/README.md`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/captioner && python3 -m compileall app`
+- WS caption behavior verified with deterministic in-process harness (`fastapi.testclient` + mocked caption runtime):
+  - before `attention_start`, frame yields `frame_events.events=[]`
+  - after `attention_start`:
+    - first frame emits `scene_caption`
+    - second frame with same caption is dedupe-suppressed (`events=[]`)
+    - third frame with different caption emits `scene_caption`
+  - `/health` `ws_runtime` counters confirmed:
+    - `scene_caption_emitted=2`
+    - `scene_caption_dedupe_suppressed=1`
+    - `attention_start_count=1`
+
+### Manual run steps
+1. Start captioner:
+   - `cd packages/eva/captioner`
+   - `python -m app.run`
+2. Connect WS client to `ws://127.0.0.1:8792/infer`.
+3. Send command:
+   - `{"type":"command","v":2,"name":"attention_start"}`
+4. Stream frames and confirm `frame_events.events[]` includes `scene_caption` entries while attention is active.
+5. Keep sending near-identical frames and confirm dedupe suppresses repeated identical caption text within dedupe window.
+
+### Notes
+- Iteration 186 keeps WS as primary pipeline for caption events.
+- HTTP `/caption` remains available during migration, but WS caption emission no longer depends on HTTP caption calls.
+
+## Iteration 187 — CLIP semantic embeddings + surprise scoring + escalate decision (no `/insight` call yet)
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Added semantic embedding runtime module `packages/eva/captioner/app/semantic_model.py`:
+  - startup-loadable CLIP image encoder runtime (`AutoProcessor` + `CLIPModel`)
+  - device resolution policy (`auto|cuda|cpu`) with cuda fallback logging
+  - per-frame embedding API:
+    - `compute_semantic_embedding(runtime, jpeg_bytes)`
+    - returns normalized vector + latency + model id
+- Added surprise scoring module `packages/eva/captioner/app/surprise.py`:
+  - rolling embedding history with configurable size (`semantic.history_size`)
+  - computes:
+    - `similarity_prev`
+    - `similarity_mean`
+    - `surprise = 1 - max(similarity_prev, similarity_mean)` (clamped `[0,1]`)
+  - computes `should_escalate` decision via `surprise >= surprise.threshold`
+- Extended WS caption pipeline in `packages/eva/captioner/app/main.py`:
+  - startup now loads semantic runtime when `semantic.enabled=true`
+  - per-connection `SurpriseTracker` created using:
+    - `semantic.history_size`
+    - `surprise.threshold`
+  - when `scene_caption` is emitted, event payload now includes:
+    - `data.semantic.surprise`
+    - `data.semantic.similarity_prev`
+    - `data.semantic.similarity_mean`
+    - `data.semantic.model`
+    - `data.semantic.latency_ms`
+    - `data.semantic.should_escalate`
+  - no `/insight` call in this iteration (decision is computed + surfaced only)
+- Extended WS runtime observability in `/health`:
+  - semantic runtime status fields:
+    - `semantic_model_id`
+    - `semantic_requested_device`
+    - `semantic_resolved_device`
+    - `semantic_model_loaded`
+    - `surprise_threshold`
+  - semantic counters:
+    - `semantic_embeddings`
+    - `semantic_errors`
+    - `last_semantic_surprise`
+    - `last_semantic_similarity_prev`
+    - `last_semantic_similarity_mean`
+    - `insight_decision_escalate_count`
+    - `insight_decision_noop_count`
+    - `last_should_escalate`
+- Updated protocol helper usage in captioner WS path:
+  - `make_frame_events(..., events=...)` used for semantic-enriched `scene_caption` events.
+- Updated dependency list:
+  - `packages/eva/captioner/requirements.txt` now includes `numpy` explicitly.
+- Updated docs:
+  - `packages/eva/captioner/README.md` now documents semantic payload fields, surprise decisioning, and runtime counters.
+
+### Files changed
+- `packages/eva/captioner/app/semantic_model.py` (new)
+- `packages/eva/captioner/app/surprise.py` (new)
+- `packages/eva/captioner/app/main.py`
+- `packages/eva/captioner/app/protocol.py`
+- `packages/eva/captioner/requirements.txt`
+- `packages/eva/captioner/README.md`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/captioner && python3 -m compileall app`
+- Deterministic semantic/surprise WS harness passes (`fastapi.testclient`, mocked caption + semantic runtime):
+  - sent `attention_start`, then three frames with controlled embeddings
+  - observed `scene_caption` semantic values:
+    - frame 1 baseline: `surprise=0.0`
+    - frame 2 similar scene: `surprise≈0.02` (low)
+    - frame 3 changed scene: `surprise=1.0` (high)
+  - observed decisions:
+    - `should_escalate`: `false, false, true`
+  - `/health.ws_runtime` confirmed:
+    - `semantic_embeddings=3`
+    - `insight_decision_escalate_count=1`
+    - `insight_decision_noop_count=2`
+
+### Manual run steps
+1. Start captioner:
+   - `cd packages/eva/captioner`
+   - `python -m app.run`
+2. Connect WS client to `ws://127.0.0.1:8792/infer`.
+3. Send command:
+   - `{"type":"command","v":2,"name":"attention_start"}`
+4. Stream frames and inspect `frame_events.events[].data.semantic` fields.
+5. Verify stable scenes tend toward lower `surprise`; larger visual changes increase `surprise` and may set `should_escalate=true`.
+
+### Notes
+- This iteration computes and surfaces semantic surprise + decision only.
+- Executive `/insight` invocation remains intentionally deferred to Iteration 189.
+
+## Iteration 188 — ExecutiveClient + caption event persistence to `/events`
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Added new async Executive client module `packages/eva/captioner/app/executive_client.py`:
+  - `ExecutiveClient.post_events(source, events, meta)`
+    - validates request/response payloads with Pydantic
+    - uses async `httpx` client and configured timeout (`executive.timeout_ms`)
+    - normalizes transport/status/schema failures into `ExecutiveClientError`
+  - `ExecutiveClient.post_insight(...)`
+    - added as explicit stub for Iteration 189 (validates input shape, returns `NOT_IMPLEMENTED` error)
+- Wired captioner runtime to persist emitted scene captions to Executive `/events`:
+  - `packages/eva/captioner/app/main.py`
+  - for every emitted `scene_caption` event, captioner now asynchronously forwards:
+    - `v: 1`
+    - `source: "vision"`
+    - `events: [scene_caption_event]`
+    - `meta.frame_id`
+  - forwarded event payload includes semantic fields already attached in Iteration 187 (`data.semantic.*`)
+- Added failure handling and warning throttling for Executive forwarding:
+  - non-fatal forwarding path (frame stream continues even when Executive is down)
+  - warning throttle window:
+    - `EXECUTIVE_EVENTS_WARN_COOLDOWN_MS = 10000`
+  - added warning helper:
+    - `_warn_executive_forward_failure(...)`
+- Added Executive client lifecycle management:
+  - instantiate client at startup using canonical config:
+    - `executive.base_url`
+    - `executive.timeout_ms`
+  - close client on shutdown.
+- Extended health/runtime observability:
+  - top-level health fields:
+    - `executive_base_url`
+    - `executive_timeout_ms`
+    - `executive_client_ready`
+  - `ws_runtime` counters:
+    - `executive_events_forwarded`
+    - `executive_events_failed`
+    - `last_executive_events_forwarded_ts_ms`
+- Updated runtime docs in `packages/eva/captioner/README.md`:
+  - documented Executive forwarding behavior
+  - documented Executive client module and non-fatal warning-throttled failure mode
+  - documented new executive forwarding counters.
+- Updated dependencies:
+  - `packages/eva/captioner/requirements.txt` now includes `httpx` (for ExecutiveClient).
+
+### Files changed
+- `packages/eva/captioner/app/executive_client.py` (new)
+- `packages/eva/captioner/app/main.py`
+- `packages/eva/captioner/requirements.txt`
+- `packages/eva/captioner/README.md`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/captioner && python3 -m compileall app`
+- Executive forward success harness passes (deterministic local HTTP capture server + WS test):
+  - sent `attention_start`, emitted two `scene_caption` events
+  - captured two `POST /events` payloads with:
+    - `v=1`
+    - `source="vision"`
+    - `events[0].name="scene_caption"`
+    - `events[0].data.semantic` present
+    - `meta.frame_id` present
+  - `/health.ws_runtime` confirmed:
+    - `executive_events_forwarded=2`
+    - `executive_events_failed=0`
+- Executive failure non-fatal harness passes (unreachable Executive URL):
+  - `scene_caption` still emitted over WS
+  - `/health.ws_runtime.executive_events_failed >= 1`
+  - warning printed (throttled path).
+
+### Manual run steps
+1. Start Executive and note its `/events` URL (default `http://127.0.0.1:8791/events`).
+2. Start captioner:
+   - `cd packages/eva/captioner`
+   - `python -m app.run`
+3. Connect WS client to `/infer`, send `attention_start`, then stream frames.
+4. Confirm emitted `scene_caption` events over WS.
+5. Inspect Executive working-memory log and confirm `wm_event` entries from source `vision` are appended.
+6. Stop Executive temporarily and repeat frames; confirm captioner still streams and only logs warning-throttled forward failures.
+
+### Notes
+- Iteration 188 persists scene caption events for continuity without blocking WS frame flow.
+- Executive `/insight` calls are intentionally deferred to Iteration 189.
+
+## Iteration 189 — Insight clip assets + Executive `/insight` call + WS `insight` emission
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Added clip asset persistence module `packages/eva/captioner/app/clip_assets.py`:
+  - `ClipAssetsManager.persist_clip(clip_id, frames)` writes JPEGs under:
+    - `insight.assets_dir/<clip_id>/XX-<frame_id>.jpg`
+  - returns clip frame refs including `asset_rel_path` for Executive payloads
+  - applies retention pruning on write:
+    - `insight.retention.max_clips`
+    - `insight.retention.max_age_hours`
+- Implemented Executive `/insight` client path in `packages/eva/captioner/app/executive_client.py`:
+  - replaced Iteration 188 stub with real `post_insight(...)`
+  - validates request payload shape (`clip_id`, `trigger_frame_id`, `frames[]`)
+  - validates response payload shape (`summary`, `usage`)
+  - reuses shared HTTP error handling (`EXECUTIVE_TIMEOUT`, `EXECUTIVE_UNREACHABLE`, `EXECUTIVE_ERROR`, `EXECUTIVE_INVALID_RESPONSE`)
+- Extended protocol helpers in `packages/eva/captioner/app/protocol.py`:
+  - added `InsightMessage` model
+  - added `make_insight(...)` builder for outbound WS messages
+- Wired escalation flow in `packages/eva/captioner/app/main.py`:
+  - per-connection `ClipAssetsManager` + `WsInsightState`
+  - escalation trigger guard:
+    - attention active
+    - semantic `should_escalate=true`
+    - insight cooldown allows (`insight.cooldown_ms`)
+    - no in-flight insight task for same connection
+  - clip collection from `FrameBuffer` using:
+    - `insight.pre_frames`
+    - `insight.post_frames`
+    - `insight.max_frames`
+  - bounded wait for trailing post frames via `insight.post_wait_ms`
+  - async call to `ExecutiveClient.post_insight(...)`
+  - emits WS `insight` payload on success
+  - keeps failures non-fatal to frame stream
+- Extended `/health` WS runtime counters:
+  - `insight_requested`
+  - `insight_emitted`
+  - `insight_cooldown_skipped`
+  - `insight_busy_skipped`
+  - `insight_clip_build_errors`
+  - `insight_errors`
+  - `last_insight_ts_ms`
+  - `last_insight_clip_id`
+- Updated captioner docs (`packages/eva/captioner/README.md`) to reflect Iteration 189 behavior and WS `insight` message shape.
+
+### Files changed
+- `packages/eva/captioner/app/clip_assets.py` (new)
+- `packages/eva/captioner/app/executive_client.py`
+- `packages/eva/captioner/app/protocol.py`
+- `packages/eva/captioner/app/main.py`
+- `packages/eva/captioner/README.md`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/captioner && python3 -m compileall app`
+- Deterministic WS insight harness passes (TestClient + mock Executive server):
+  - sent `attention_start` and controlled frame sequence with semantic surprise spikes
+  - observed exactly one successful insight escalation under cooldown policy
+  - captured one `POST /insight` with:
+    - `clip_id`
+    - `trigger_frame_id`
+    - `frames[]` containing `asset_rel_path`
+  - verified referenced clip assets exist on disk under configured `insight.assets_dir`
+  - observed WS outbound `insight` payload with `summary.tts_response`
+  - `/health.ws_runtime` confirmed:
+    - `insight_requested=1`
+    - `insight_emitted=1`
+    - `insight_cooldown_skipped>=1`
+
+### Manual run steps
+1. Start Executive (`/events` + `/insight`) and captioner:
+   - `cd packages/eva/captioner`
+   - `python -m app.run`
+2. Connect WS client to `ws://127.0.0.1:8792/infer`.
+3. Send command:
+   - `{"type":"command","v":2,"name":"attention_start"}`
+4. Stream frame envelopes and watch:
+   - `frame_events.events[].data.semantic.should_escalate`
+5. On escalation, confirm:
+   - Executive receives `POST /insight`
+   - WS client receives `{"type":"insight", ...}`
+   - clip JPEG assets exist under `insight.assets_dir/<clip_id>/`
+6. Repeat high-surprise events inside cooldown window and confirm no additional insight spam.
+
+### Notes
+- Insight execution is intentionally asynchronous and non-blocking relative to per-frame WS acknowledgements.
+- Legacy `packages/eva/vision` remains untouched in this iteration (cleanup/rename still deferred).
+
+## Iteration 190 — Eva integration: MotionGate → Captioner WS; disable Eva HTTP caption path
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Updated Eva runtime to stop using the HTTP caption endpoint path (`POST /caption`) for motion-triggered captioning:
+  - removed HTTP caption call workflow from `packages/eva/src/server.ts`
+  - removed caption worker/cooldown scheduling state that drove `callCaptionService(...)`
+- Implemented MotionGate-triggered WS handoff to captioner/vision stream:
+  - on motion trigger, Eva now sends Vision command:
+    - `{ "type": "command", "v": 2, "name": "attention_start" }`
+  - then force-forwards the trigger frame to Vision WS immediately
+    - bypasses sampling skips (`stream.visionForward.sampleEveryN`)
+    - keeps frame route mapping so response returns to requesting UI socket
+- Preserved sampled forwarding path for non-trigger frames:
+  - sampling still applies for regular stream forwarding
+  - motion-trigger force-forward short-circuits duplicate forwarding for that frame
+- Added throttled motion-trigger handoff warning path (non-fatal) when Vision is unavailable or forwarding fails.
+- Updated Eva `/health` caption section to reflect WS-driven behavior:
+  - `mode: "vision_ws"`
+  - `http_path_disabled: true`
+  - `motion_trigger_attention_start: true`
+  - `force_forward_trigger_frame: true`
+- Updated runtime startup logs in Eva to reflect new caption relay mode instead of HTTP caption endpoint settings.
+
+### Config updates
+- Updated committed config WS target to captioner service:
+  - `packages/eva/eva.config.json`
+    - `vision.wsUrl = "ws://127.0.0.1:8792/infer"`
+- Updated local override example to match:
+  - `packages/eva/eva.config.local.example.json`
+    - `vision.wsUrl = "ws://127.0.0.1:8792/infer"`
+
+### Files changed
+- `packages/eva/src/server.ts`
+- `packages/eva/src/index.ts`
+- `packages/eva/eva.config.json`
+- `packages/eva/eva.config.local.example.json`
+- `progress.md`
+
+### Verification
+- TypeScript build passes:
+  - `cd packages/eva && npm run build`
+- Deterministic runtime smoke harness passes (Node script with mock Vision WS):
+  - configured `sampleEveryN=100` so second frame would normally be skipped
+  - sent two frames with controlled motion change (black → white)
+  - observed second `frame_received.motion.triggered=true`
+  - observed mock Vision received:
+    - command `attention_start`
+    - binary trigger frame `f2` (force-forwarded despite sampling)
+
+### Manual run steps
+1. Start captioner (`packages/eva/captioner`) and Executive (`packages/eva/executive`).
+2. Ensure Eva config points `vision.wsUrl` to captioner:
+   - `ws://127.0.0.1:8792/infer`
+3. Start Eva:
+   - `cd packages/eva && npm run dev`
+4. Connect UI and stream frames through Eva `/eye`.
+5. Trigger motion and confirm:
+   - Eva sends `attention_start` to captioner WS
+   - trigger frame is forwarded immediately (even if sample skip would apply)
+   - caption/insight events come from captioner WS path.
+
+### Notes
+- Legacy `packages/eva/vision` process/files remain present and untouched in this iteration (cleanup/disable deferred to Iteration 191).
+
+## Iteration 191 — Runtime cleanup: disable legacy Vision subprocess (keep folder)
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Disabled legacy Vision subprocess in committed Eva runtime config:
+  - `packages/eva/eva.config.json`
+    - `subprocesses.vision.enabled = false`
+  - kept legacy `subprocesses.vision` block present (not deleted) for compatibility/debug toggles.
+- Updated local config example similarly:
+  - `packages/eva/eva.config.local.example.json`
+    - `subprocesses.vision.enabled = false`
+- Updated config defaults to align migration runtime with disabled legacy Vision:
+  - `packages/eva/src/config.ts`
+    - `VisionSubprocessConfigSchema` default `enabled: false`
+    - `SubprocessesConfigSchema` default object sets `vision.enabled: false`
+    - top-level `EvaConfigSchema` default `subprocesses.vision.enabled: false`
+- Updated Eva docs to explicitly describe migration runtime identity:
+  - `packages/eva/README.md`
+    - `vision.wsUrl` default documented as captioner WS (`ws://127.0.0.1:8792/infer`)
+    - clarified that captioner acts as Vision during migration
+    - subprocess mode now documented as Agent + Captioner + Eva (legacy Vision disabled)
+    - external-mode and override examples updated accordingly
+
+### Files changed
+- `packages/eva/eva.config.json`
+- `packages/eva/eva.config.local.example.json`
+- `packages/eva/src/config.ts`
+- `packages/eva/README.md`
+- `progress.md`
+
+### Verification
+- TypeScript build passes:
+  - `cd packages/eva && npm run build`
+- Deterministic subprocess boot smoke harness passes:
+  - launched `dist/index.js` with temporary test config (`subprocesses.enabled=true`, `vision.enabled=false`)
+  - mocked Agent/Captioner health subprocesses
+  - verified logs show:
+    - `starting agent subprocess`
+    - `starting captioner subprocess`
+    - **no** `starting vision subprocess`
+  - verified Eva reached listening state successfully.
+
+### Manual run steps
+1. Confirm config uses captioner WS:
+   - `vision.wsUrl = ws://127.0.0.1:8792/infer`
+2. Confirm subprocess config:
+   - `subprocesses.enabled = true`
+   - `subprocesses.vision.enabled = false`
+   - `subprocesses.captioner.enabled = true`
+3. Run:
+   - `cd packages/eva && npm run dev`
+4. Validate startup logs show Agent + Captioner startup and no legacy Vision subprocess startup.
+
+### Notes
+- Legacy folder/process config remains available for temporary debugging, but default runtime path now treats captioner as Vision.
+- No deletion/rename was performed in this iteration.
+
+## Iteration 192 — Captioner cleanup: WS-only caption path; remove HTTP leftovers
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Removed legacy HTTP caption endpoint from captioner runtime:
+  - deleted `POST /caption` handler from `packages/eva/captioner/app/main.py`
+  - removed related HTTP-only request helpers and error response plumbing
+  - caption generation now occurs only inside WS `/infer` flow
+- Removed caption-only config key no longer used after WS-first migration:
+  - removed `caption.max_body_bytes` from captioner config model and summary:
+    - `packages/eva/captioner/app/config.py`
+  - removed `caption.max_body_bytes` from committed settings:
+    - `packages/eva/captioner/settings.yaml`
+- Updated captioner docs to reflect WS-only behavior:
+  - `packages/eva/captioner/README.md`
+    - current behavior updated to Iteration 192
+    - removed `/caption` endpoint references and HTTP smoke-check section
+    - removed `max_body_bytes` from documented caption config keys
+
+### Files changed
+- `packages/eva/captioner/app/main.py`
+- `packages/eva/captioner/app/config.py`
+- `packages/eva/captioner/settings.yaml`
+- `packages/eva/captioner/README.md`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/captioner && python3 -m compileall app`
+- Deterministic WS-only smoke harness passes (`fastapi.testclient` with mocked caption runtime):
+  - confirmed `POST /caption` now returns `404`
+  - confirmed WS `/infer` still emits `frame_events` with `scene_caption` under `attention_start`
+
+### Manual run steps
+1. Start captioner:
+   - `cd packages/eva/captioner`
+   - `python -m app.run`
+2. Confirm HTTP caption endpoint is removed:
+   - `curl -i -X POST -H 'Content-Type: image/jpeg' --data-binary @frame.jpg http://127.0.0.1:8792/caption`
+   - expect `404`.
+3. Connect WS client to `ws://127.0.0.1:8792/infer`.
+4. Send command:
+   - `{"type":"command","v":2,"name":"attention_start"}`
+5. Stream binary frame envelopes and confirm caption/semantic/insight behavior is delivered through WS messages only.
+
+### Notes
+- This iteration intentionally keeps service naming/folder layout unchanged; rename/removal steps are deferred to Iterations 193+.
+
+## Iteration 193 — Final rename: `captioner` → `vision` (folder + subprocess config key)
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Performed runtime folder rename so active Python WS service now lives at Vision path:
+  - moved legacy Vision implementation to temporary holding path:
+    - `packages/eva/vision` → `packages/eva/vision-legacy`
+  - moved new WS-first implementation into canonical Vision path:
+    - `packages/eva/captioner` → `packages/eva/vision`
+- Migrated Eva subprocess config model from `subprocesses.captioner` to `subprocesses.vision` (python service):
+  - `packages/eva/src/config.ts`
+    - removed `captioner` subprocess schema block
+    - updated `vision` subprocess defaults to new service values:
+      - `enabled: true`
+      - `cwd: packages/eva/vision`
+      - `command: [.venv/bin/python, -m, app.run]`
+      - `healthUrl: http://127.0.0.1:8792/health`
+      - `readyTimeoutMs: 120000`
+- Updated Eva startup/shutdown orchestration to use only Agent + Vision subprocesses:
+  - `packages/eva/src/index.ts`
+    - removed captioner subprocess lifecycle handling
+    - retained vision subprocess lifecycle as canonical Python vision runtime
+- Updated committed/runtime config files to new subprocess key layout:
+  - `packages/eva/eva.config.json`
+    - removed `subprocesses.captioner`
+    - `subprocesses.vision` now points to `packages/eva/vision` and health `:8792`
+  - `packages/eva/eva.config.local.example.json`
+    - same key migration and path updates
+- Updated docs + paths:
+  - `packages/eva/README.md`
+    - runtime instructions now use `packages/eva/vision`
+    - subprocess schema examples now use `subprocesses.vision` only
+    - documented temporary legacy holding folder `packages/eva/vision-legacy`
+  - `packages/eva/vision/README.md`
+    - service doc now reflects Vision naming and `packages/eva/vision` run path
+
+### Files changed
+- `packages/eva/src/config.ts`
+- `packages/eva/src/index.ts`
+- `packages/eva/eva.config.json`
+- `packages/eva/eva.config.local.example.json`
+- `packages/eva/README.md`
+- `packages/eva/vision/README.md`
+- folder/path migration:
+  - `packages/eva/captioner` → `packages/eva/vision`
+  - legacy moved to `packages/eva/vision-legacy`
+- `progress.md`
+
+### Verification
+- Eva TS build passes:
+  - `cd packages/eva && npm run build`
+- Vision Python app compile check passes at renamed path:
+  - `cd packages/eva/vision && python3 -m compileall -f app`
+- Deterministic subprocess boot smoke harness passes (temporary config):
+  - confirms logs include:
+    - `starting agent subprocess`
+    - `starting vision subprocess`
+  - confirms no captioner subprocess reference remains.
+
+### Manual run steps
+1. Confirm config:
+   - `vision.wsUrl = ws://127.0.0.1:8792/infer`
+   - `subprocesses.vision.enabled = true`
+   - no `subprocesses.captioner` block
+2. Start stack:
+   - `cd packages/eva && npm run dev`
+3. Confirm startup logs show Agent + Vision subprocess and no Captioner subprocess.
+4. Stream frames via Eva `/eye` and confirm Vision WS (`/infer`) path remains functional.
+
+### Notes
+- Legacy old Vision implementation is retained temporarily under `packages/eva/vision-legacy` for the next destructive cleanup iteration.
+
+## Iteration 194 — Remove legacy Vision service (old implementation)
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Deleted the old legacy Python Vision implementation directory:
+  - removed `packages/eva/vision-legacy`
+- Kept only one Python vision runtime in repo:
+  - `packages/eva/vision` (the renamed WS-first implementation from prior iterations)
+- Removed remaining active-doc reference that still described the legacy holding folder:
+  - updated `packages/eva/README.md` to state `packages/eva/vision` is the only Python vision runtime.
+
+### Files changed
+- Removed directory: `packages/eva/vision-legacy` (entire old service tree)
+- `packages/eva/README.md`
+- `progress.md`
+
+### Verification
+- Confirmed only one vision service directory remains:
+  - `find packages/eva -maxdepth 1 -type d -name 'vision*'`
+  - output: `packages/eva/vision`
+- Build checks pass:
+  - `cd packages/eva && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall -f app`
+- Runtime smoke (temporary subprocess config) passes:
+  - Eva starts Agent + Vision subprocess and reaches listening state
+  - no captioner subprocess key/path usage in runtime logs
+
+### Manual run steps
+1. Start stack:
+   - `cd packages/eva && npm run dev`
+2. Confirm subprocess startup logs include only Agent + Vision.
+3. Stream frames through Eva `/eye` and confirm Vision WS (`/infer`) path still responds with `frame_events`.
+4. Verify filesystem has no legacy Python vision service directory left.
+
+### Notes
+- This is the planned destructive cleanup step for old Vision implementation removal.
+- Further config/dead-code/docs cleanup continues in Iterations 195–197.
+
+## Iteration 195 — Eva config/code cleanup: remove leftover caption knobs + simplify runtime flow messaging
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Removed unused Eva config block for deprecated HTTP caption pipeline:
+  - deleted top-level `caption.*` from config schema and defaults:
+    - `packages/eva/src/config.ts`
+  - deleted `caption` block from committed configs:
+    - `packages/eva/eva.config.json`
+    - `packages/eva/eva.config.local.example.json`
+- Removed remaining server/runtime wiring that depended on removed caption config:
+  - `packages/eva/src/server.ts`
+    - `StartServerOptions` no longer includes `caption`
+    - removed `caption` destructuring and motion-trigger gating dependency
+    - motion-trigger attention handoff now driven directly by MotionGate result
+    - `/health` payload now exposes `vision_pipeline` block instead of legacy `caption` block
+- Simplified and clarified runtime logs to match actual flow:
+  - startup log now uses:
+    - `vision attention relay mode=motion_to_vision_ws_attention ...`
+  - removed legacy caption-relay wording.
+- Updated server startup call site to match cleaned config surface:
+  - `packages/eva/src/index.ts`
+    - removed `caption: config.caption` from `startServer(...)` args
+- Updated Eva README iteration marker to reflect current behavior after cleanup:
+  - `packages/eva/README.md` (`Iteration 195`).
+
+### Files changed
+- `packages/eva/src/config.ts`
+- `packages/eva/src/server.ts`
+- `packages/eva/src/index.ts`
+- `packages/eva/eva.config.json`
+- `packages/eva/eva.config.local.example.json`
+- `packages/eva/README.md`
+- `progress.md`
+
+### Verification
+- TypeScript build passes:
+  - `cd packages/eva && npm run build`
+- Deterministic runtime smoke harness passes (mock Vision WS + MotionGate trigger):
+  - confirms `/health` contains `vision_pipeline` and no `caption` block
+  - confirms motion trigger still sends `attention_start` and force-forwards trigger frame
+  - confirms startup logs use updated vision-attention relay wording
+- Existing subprocess migration smoke remains valid post-cleanup:
+  - Agent + Vision subprocess startup works and no caption subprocess references remain.
+
+### Manual run steps
+1. Run Eva:
+   - `cd packages/eva && npm run dev`
+2. Verify startup logs include:
+   - `vision attention relay mode=motion_to_vision_ws_attention ...`
+3. Hit health endpoint and confirm no legacy `caption` config/runtime block:
+   - `curl -s http://127.0.0.1:8787/health | jq`
+4. Stream frames via `/eye`, trigger motion, confirm trigger-frame force-forward + `attention_start` behavior remains intact.
+
+### Notes
+- This iteration removes stale caption-pipeline knobs while preserving current MotionGate → Vision WS attention behavior.
+- Protocol-level `scene_caption` event naming remains unchanged by design.
+
+## Iteration 196 — Protocol + docs cleanup (remove stale service references)
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Updated root repository README to match current architecture and runtime reality:
+  - `README.md`
+  - removed legacy multi-service framing that still referenced a separate captioner service
+  - updated component list to: Eva + Vision + Executive + UI
+  - updated default ports and run instructions to use `packages/eva/vision` as sole Python vision runtime
+  - updated one-command subprocess notes to use `subprocesses.vision` only
+- Updated protocol docs to match current message shapes in runtime code:
+  - `packages/protocol/README.md`
+    - replaced stale `detections`-centric sections with current `frame_events` model
+    - documented current command path (`attention_start`)
+    - aligned examples with Vision WS-first flow and current event payloads (`scene_caption`, `insight`, `text_output`, `speech_output`)
+- Updated canonical protocol schema to match actual v2 usage:
+  - `packages/protocol/schema.json`
+    - removed stale `detections` message definition from top-level `oneOf`
+    - added/kept canonical definitions for:
+      - `frame_binary_meta`
+      - `frame_received`
+      - `frame_events`
+      - `insight`
+      - `text_output`
+      - `speech_output`
+      - `error`
+      - `hello`
+      - `command`
+    - validated JSON schema file syntax (`python3 -m json.tool`)
+- Removed remaining "captioner service" wording in active service docs:
+  - `packages/eva/vision/README.md` intro now references Vision directly.
+
+### Files changed
+- `README.md`
+- `packages/protocol/README.md`
+- `packages/protocol/schema.json`
+- `packages/eva/vision/README.md`
+- `progress.md`
+
+### Verification
+- Schema JSON validation passes:
+  - `python3 -m json.tool packages/protocol/schema.json`
+- Eva TS build still passes after docs/schema updates:
+  - `cd packages/eva && npm run build`
+- Targeted stale-reference checks (active docs/protocol files):
+  - no remaining `captioner`/`subprocesses.captioner`/`detections` protocol references in updated active docs.
+
+### Manual run steps
+1. Read `README.md` and confirm run instructions use `packages/eva/vision` only.
+2. Inspect protocol docs:
+   - `packages/protocol/README.md`
+   - `packages/protocol/schema.json`
+3. Start stack (`cd packages/eva && npm run dev`) and verify runtime messages observed over `/eye` align with documented shapes (`frame_received`, `frame_events`, `insight`, optional text/speech outputs).
+
+### Notes
+- Historical implementation-plan docs and progress history intentionally retain older terms for audit trail.
+- Active runbook + protocol docs now match the current system behavior and naming.
+
+## Iteration 197 — Final sweep: remove orphaned files/settings and stale runtime labels
+
+**Status:** ✅ Completed (2026-03-01)
+
+### Completed
+- Removed obsolete Python settings shim left over from pre-canonical config flow:
+  - deleted `packages/eva/vision/app/settings.py`
+  - service now relies solely on `app/config.py` + `settings.yaml`/`settings.local.yaml`
+- Removed stale repository ignore rule for old renamed path:
+  - updated `.gitignore`
+  - removed `packages/eva/captioner/.venv/` entry
+- Standardized service identity strings/log labels from old name to canonical Vision naming:
+  - `packages/eva/vision/app/main.py`
+    - FastAPI title: `vision`
+    - startup/runtime log prefix changed `[captioner]` -> `[vision]`
+    - startup error text changed to `Vision startup failed`
+    - `/health.service` changed to `vision`
+    - `/infer` payload error string now says `Vision expects binary frame payloads on /infer.`
+  - `packages/eva/vision/app/clip_assets.py`
+    - log prefix `[vision]`
+  - `packages/eva/vision/app/semantic_model.py`
+    - log prefix `[vision]`
+  - `packages/eva/vision/app/config.py`
+    - config error prefix changed to `Vision config error`
+  - `packages/eva/vision/app/executive_client.py`
+    - config validation error prefix changed to `Vision config error`
+- Workspace cleanup of stale local artifacts from old flow:
+  - removed untracked `packages/eva/eva.config.local.json.bak`
+  - removed untracked stale build artifact `packages/eva/dist/quickvisionClient.js`
+
+### Files changed
+- `.gitignore`
+- `packages/eva/vision/app/main.py`
+- `packages/eva/vision/app/clip_assets.py`
+- `packages/eva/vision/app/semantic_model.py`
+- `packages/eva/vision/app/config.py`
+- `packages/eva/vision/app/executive_client.py`
+- removed: `packages/eva/vision/app/settings.py`
+- `progress.md`
+
+### Verification
+- Vision Python compile check passes:
+  - `cd packages/eva/vision && python3 -m compileall -f app`
+- Eva TS build passes:
+  - `cd packages/eva && npm run build`
+- Stale-reference sweep across active (non-history) files:
+  - no remaining `captioner`/`subprocesses.captioner`/`vision-legacy` references in active code/docs/configs.
+
+### Manual run steps
+1. Start stack:
+   - `cd packages/eva && npm run dev`
+2. Confirm Vision startup logs use `[vision]` prefix.
+3. Confirm `/health` from Vision reports:
+   - `{ "service": "vision", ... }`
+4. Send malformed text payload to Vision `/infer` and confirm error wording references Vision (not captioner).
+
+### Notes
+- Historical progress/plan files intentionally retain old names for audit trail.
+- Active runtime/config/docs now consistently use final Vision naming and paths.
+
+## Post-Iteration Fix (2026-03-01) — Insight trigger gating clock alignment
+
+**Context:** During real-world testing, captions were emitted but insights were not consistently triggering.
+
+### Root cause
+- In Vision WS frame handling, attention state for insight-trigger gating used frame metadata time (`envelope.meta.ts_ms`), while caption emission gating used server wall clock (`_current_time_ms()`).
+- With client/server timestamp skew, this mismatch could produce:
+  - caption emitted (attention active by server clock), but
+  - insight trigger skipped (attention considered inactive by frame-meta clock).
+
+### Fix
+- `packages/eva/vision/app/main.py`
+  - introduced per-frame `frame_now_ms = _current_time_ms()`
+  - use `frame_now_ms` consistently for:
+    - `attention_active` check in frame loop
+    - `now_ms` passed to `_build_scene_caption_event(...)`
+- Result: insight gating and caption emission now use the same time basis.
+
+### Verification
+- `cd packages/eva/vision && python3 -m compileall -f app`
+- Deterministic regression harness with intentionally stale frame `ts_ms` (`0`) passes:
+  - `attention_start` sent
+  - captions emitted
+  - semantic escalation observed
+  - `insight_requested` + `insight_emitted` incremented
+  - insight WS message received
+
+### Notes
+- This fix is behavior-preserving for normal synchronized clocks and removes skew-related false negatives in insight triggering.

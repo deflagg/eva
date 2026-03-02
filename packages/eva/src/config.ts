@@ -93,15 +93,6 @@ const VisionSubprocessConfigSchema = z.object({
   enabled: z.boolean().default(true),
   cwd: z.string().trim().min(1).default('packages/eva/vision'),
   command: CommandSchema.default(['.venv/bin/python', '-m', 'app.run']),
-  healthUrl: HttpUrlSchema.default('http://127.0.0.1:8000/health'),
-  readyTimeoutMs: PositiveTimeoutMsSchema.default(60_000),
-  shutdownTimeoutMs: PositiveTimeoutMsSchema.default(10_000),
-});
-
-const CaptionerSubprocessConfigSchema = z.object({
-  enabled: z.boolean().default(true),
-  cwd: z.string().trim().min(1).default('packages/eva/captioner'),
-  command: CommandSchema.default(['.venv/bin/python', '-m', 'app.run']),
   healthUrl: HttpUrlSchema.default('http://127.0.0.1:8792/health'),
   readyTimeoutMs: PositiveTimeoutMsSchema.default(120_000),
   shutdownTimeoutMs: PositiveTimeoutMsSchema.default(10_000),
@@ -120,14 +111,6 @@ const SubprocessesConfigSchema = z.object({
   vision: VisionSubprocessConfigSchema.default({
     enabled: true,
     cwd: 'packages/eva/vision',
-    command: ['.venv/bin/python', '-m', 'app.run'],
-    healthUrl: 'http://127.0.0.1:8000/health',
-    readyTimeoutMs: 60_000,
-    shutdownTimeoutMs: 10_000,
-  }),
-  captioner: CaptionerSubprocessConfigSchema.default({
-    enabled: true,
-    cwd: 'packages/eva/captioner',
     command: ['.venv/bin/python', '-m', 'app.run'],
     healthUrl: 'http://127.0.0.1:8792/health',
     readyTimeoutMs: 120_000,
@@ -175,18 +158,6 @@ const MotionGateConfigSchema = z
     message: 'motionGate.resetThreshold must be <= motionGate.triggerThreshold',
   });
 
-const InsightSeveritySchema = z.enum(['low', 'medium', 'high']);
-
-const CaptionConfigSchema = z.object({
-  enabled: z.boolean().default(true),
-  baseUrl: HttpUrlSchema.default('http://127.0.0.1:8792'),
-  timeoutMs: PositiveTimeoutMsSchema.default(1_500),
-  cooldownMs: z.number().int().nonnegative().default(2_000),
-  periodicMs: z.number().int().nonnegative().default(8_000),
-  dedupeWindowMs: z.number().int().nonnegative().default(15_000),
-  minSceneSeverity: InsightSeveritySchema.default('medium'),
-});
-
 const EvaConfigSchema = z.object({
   server: z.object({
     port: z.number().int().min(1).max(65_535),
@@ -208,15 +179,6 @@ const EvaConfigSchema = z.object({
       enabled: true,
       sampleEveryN: 2,
     },
-  }),
-  caption: CaptionConfigSchema.default({
-    enabled: true,
-    baseUrl: 'http://127.0.0.1:8792',
-    timeoutMs: 1_500,
-    cooldownMs: 2_000,
-    periodicMs: 8_000,
-    dedupeWindowMs: 15_000,
-    minSceneSeverity: 'medium',
   }),
   motionGate: MotionGateConfigSchema.default({
     enabled: true,
@@ -268,14 +230,6 @@ const EvaConfigSchema = z.object({
     vision: {
       enabled: true,
       cwd: 'packages/eva/vision',
-      command: ['.venv/bin/python', '-m', 'app.run'],
-      healthUrl: 'http://127.0.0.1:8000/health',
-      readyTimeoutMs: 60_000,
-      shutdownTimeoutMs: 10_000,
-    },
-    captioner: {
-      enabled: true,
-      cwd: 'packages/eva/captioner',
       command: ['.venv/bin/python', '-m', 'app.run'],
       healthUrl: 'http://127.0.0.1:8792/health',
       readyTimeoutMs: 120_000,
