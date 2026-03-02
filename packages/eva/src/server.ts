@@ -8,18 +8,22 @@ import {
   CommandMessageSchema,
   decodeBinaryFrameEnvelope,
   makeError,
+  makeFrameReceived,
   makeHello,
   PROTOCOL_VERSION,
   VisionInboundMessageSchema,
 } from './protocol.js';
 import { createVisionClient } from './visionClient.js';
 import { FrameRouter } from './router.js';
+import { FrameBroker } from './broker/frameBroker.js';
+import { MotionGate } from './broker/motionGate.js';
 import { synthesize } from './speech/edgeTts.js';
 
 const FRAME_ROUTE_TTL_MS = 5_000;
 const AGENT_EVENTS_INGEST_TIMEOUT_MS = 400;
 const AGENT_EVENTS_INGEST_VERSION = 1;
 const AGENT_EVENTS_INGEST_WARN_COOLDOWN_MS = 10_000;
+const MOTION_TRIGGER_WARN_COOLDOWN_MS = 10_000;
 
 class RequestBodyTooLargeError extends Error {
   constructor(maxBodyBytes: number) {
@@ -60,6 +64,27 @@ export interface StartServerOptions {
   port: number;
   eyePath: string;
   visionWsUrl: string;
+  stream: {
+    broker: {
+      enabled: boolean;
+      maxFrames: number;
+      maxAgeMs: number;
+      maxBytes: number;
+    };
+    visionForward: {
+      enabled: boolean;
+      sampleEveryN: number;
+    };
+  };
+  motionGate: {
+    enabled: boolean;
+    thumbW: number;
+    thumbH: number;
+    triggerThreshold: number;
+    resetThreshold: number;
+    cooldownMs: number;
+    minPersistFrames: number;
+  };
   insightRelay: {
     enabled: boolean;
     cooldownMs: number;
@@ -553,7 +578,7 @@ async function callAgentEventsIngest(agentBaseUrl: string, payload: AgentEventsI
 }
 
 export function startServer(options: StartServerOptions): Server {
-  const { port, eyePath, visionWsUrl, insightRelay, agent, text, speech } = options;
+  const { port, eyePath, visionWsUrl, stream, motionGate, insightRelay, agent, text, speech } = options;
 
   let lastSpeechRequestStartedAtMs: number | null = null;
   let activeUiClient: WebSocket | null = null;
@@ -874,6 +899,37 @@ export function startServer(options: StartServerOptions): Server {
   const server = createServer((req, res) => {
     const requestUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
+    if (requestUrl.pathname === '/health') {
+      const brokerStats = frameBroker.getStats();
+
+      res.statusCode = 200;
+      res.setHeader('content-type', 'application/json');
+      res.end(
+        JSON.stringify({
+          service: 'eva',
+          status: 'ok',
+          stream: {
+            broker: {
+              enabled: brokerStats.enabled,
+              max_frames: brokerStats.maxFrames,
+              max_age_ms: brokerStats.maxAgeMs,
+              max_bytes: brokerStats.maxBytes,
+              queue_depth: brokerStats.queueDepth,
+              dropped: brokerStats.dropped,
+              total_bytes: brokerStats.totalBytes,
+            },
+          },
+          vision_pipeline: {
+            mode: 'motion_to_vision_ws_attention',
+            motion_trigger_attention_start: true,
+            force_forward_trigger_frame: true,
+            sampled_forwarding_enabled: stream.visionForward.enabled,
+          },
+        }),
+      );
+      return;
+    }
+
     if (text.enabled && requestUrl.pathname === text.path) {
       void handleTextRequest(req, res).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -937,6 +993,48 @@ export function startServer(options: StartServerOptions): Server {
     return true;
   };
 
+  const frameBroker = new FrameBroker(stream.broker);
+  const motionGateEngine = motionGate.enabled
+    ? new MotionGate({
+        thumbW: motionGate.thumbW,
+        thumbH: motionGate.thumbH,
+        triggerThreshold: motionGate.triggerThreshold,
+        resetThreshold: motionGate.resetThreshold,
+        cooldownMs: motionGate.cooldownMs,
+        minPersistFrames: motionGate.minPersistFrames,
+      })
+    : null;
+  let lastMotion: { ts_ms: number; mad: number; triggered: boolean } | null = null;
+
+  const visionForwardSampleEveryN = Math.max(1, stream.visionForward.sampleEveryN);
+  let visionForwardCounter = 0;
+
+  let lastMotionTriggerWarningAtMs: number | null = null;
+
+  const warnMotionTriggerForwardFailure = (reason: string): void => {
+    const nowMs = Date.now();
+    if (
+      lastMotionTriggerWarningAtMs !== null &&
+      nowMs - lastMotionTriggerWarningAtMs < MOTION_TRIGGER_WARN_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    lastMotionTriggerWarningAtMs = nowMs;
+    console.warn(`[eva] motion-trigger vision handoff warning: ${reason}`);
+  };
+
+  const filterPersistableVisionEvents = (
+    events: Array<{
+      name: string;
+      ts_ms: number;
+      severity: 'low' | 'medium' | 'high';
+      data: Record<string, unknown>;
+    }>,
+  ) => {
+    return events.filter((event) => event.name === 'scene_caption');
+  };
+
   const frameRouter = new FrameRouter({
     ttlMs: FRAME_ROUTE_TTL_MS,
     onExpire: (frameId) => {
@@ -970,19 +1068,22 @@ export function startServer(options: StartServerOptions): Server {
 
         if (message.type === 'frame_events') {
           if (message.events.length > 0) {
-            const eventsPayload: AgentEventsIngestRequest = {
-              v: AGENT_EVENTS_INGEST_VERSION,
-              source: 'vision',
-              events: message.events,
-              meta: {
-                frame_id: message.frame_id,
-              },
-            };
+            const persistableVisionEvents = filterPersistableVisionEvents(message.events);
+            if (persistableVisionEvents.length > 0) {
+              const eventsPayload: AgentEventsIngestRequest = {
+                v: AGENT_EVENTS_INGEST_VERSION,
+                source: 'vision',
+                events: persistableVisionEvents,
+                meta: {
+                  frame_id: message.frame_id,
+                },
+              };
 
-            void callAgentEventsIngest(agent.baseUrl, eventsPayload).catch((error) => {
-              const reason = error instanceof Error ? error.message : String(error);
-              warnAgentEventsIngestFailure(reason);
-            });
+              void callAgentEventsIngest(agent.baseUrl, eventsPayload).catch((error) => {
+                const reason = error instanceof Error ? error.message : String(error);
+                warnAgentEventsIngestFailure(reason);
+              });
+            }
 
             // Intentionally no direct event-based text/speech output.
           }
@@ -1001,12 +1102,20 @@ export function startServer(options: StartServerOptions): Server {
         if (message.type === 'error' && message.frame_id) {
           const targetClient = frameRouter.take(message.frame_id);
 
-          if (!targetClient) {
-            console.warn(`[eva] no route for frame_id ${message.frame_id}; dropping Vision response`);
+          if (targetClient) {
+            sendJson(targetClient, message);
             return;
           }
 
-          sendJson(targetClient, message);
+          if (activeUiClient && activeUiClient.readyState === WebSocket.OPEN) {
+            console.warn(
+              `[eva] no route for frame_id ${message.frame_id}; forwarding Vision error to active UI client`,
+            );
+            sendJson(activeUiClient, message);
+            return;
+          }
+
+          console.warn(`[eva] no route for frame_id ${message.frame_id}; dropping Vision response`);
           return;
         }
 
@@ -1037,6 +1146,26 @@ export function startServer(options: StartServerOptions): Server {
   });
 
   visionClient.connect();
+
+  const sendAttentionStartToVision = (): boolean => {
+    return visionClient.sendJson({
+      type: 'command',
+      v: PROTOCOL_VERSION,
+      name: 'attention_start',
+    });
+  };
+
+  const forwardFrameToVision = (frameId: string, targetClient: WebSocket, binaryPayload: Buffer): boolean => {
+    frameRouter.set(frameId, targetClient);
+
+    const forwarded = visionClient.sendBinary(binaryPayload);
+    if (!forwarded) {
+      frameRouter.delete(frameId);
+      return false;
+    }
+
+    return true;
+  };
 
   const wss = new WebSocketServer({ noServer: true });
 
@@ -1070,7 +1199,7 @@ export function startServer(options: StartServerOptions): Server {
     activeUiClient = ws;
     sendJson(ws, makeHello('eva'));
 
-    ws.on('message', (data, isBinary) => {
+    ws.on('message', async (data, isBinary) => {
       if (isBinary) {
         const binaryPayload = rawDataToBuffer(data);
 
@@ -1086,18 +1215,100 @@ export function startServer(options: StartServerOptions): Server {
 
         const frameId = decodedFrame.meta.frame_id;
 
-        if (!visionClient.isConnected()) {
-          sendJson(ws, makeError('QV_UNAVAILABLE', 'Vision is not connected.', frameId));
+        const brokerPush = frameBroker.push({
+          frame_id: frameId,
+          ts_ms: decodedFrame.meta.ts_ms,
+          width: decodedFrame.meta.width,
+          height: decodedFrame.meta.height,
+          jpegBytes: decodedFrame.imageBytes,
+          receivedAtMs: Date.now(),
+        });
+
+        let receiptMotion: { mad: number; triggered: boolean } | undefined;
+
+        if (brokerPush.accepted && motionGateEngine !== null) {
+          try {
+            const motion = await motionGateEngine.process({
+              tsMs: decodedFrame.meta.ts_ms,
+              jpegBytes: decodedFrame.imageBytes,
+            });
+
+            lastMotion = {
+              ts_ms: decodedFrame.meta.ts_ms,
+              mad: motion.mad,
+              triggered: motion.triggered,
+            };
+
+            receiptMotion = {
+              mad: lastMotion.mad,
+              triggered: lastMotion.triggered,
+            };
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            console.warn(`[eva] motion gate processing failed for frame ${frameId}: ${reason}`);
+          }
+        }
+
+        sendJson(
+          ws,
+          makeFrameReceived(frameId, {
+            accepted: brokerPush.accepted,
+            queue_depth: brokerPush.queueDepth,
+            dropped: brokerPush.dropped,
+            ...(receiptMotion ? { motion: receiptMotion } : {}),
+          }),
+        );
+
+        if (!brokerPush.accepted) {
           return;
         }
 
-        frameRouter.set(frameId, ws);
+        let forwardedByMotionTrigger = false;
 
-        const forwarded = visionClient.sendBinary(binaryPayload);
-        if (!forwarded) {
-          frameRouter.delete(frameId);
-          sendJson(ws, makeError('QV_UNAVAILABLE', 'Vision is not connected.', frameId));
+        if (receiptMotion?.triggered) {
+          if (!visionClient.isConnected()) {
+            warnMotionTriggerForwardFailure(
+              `Vision unavailable during motion trigger; cannot forward trigger frame ${frameId}.`,
+            );
+          } else {
+            const attentionSent = sendAttentionStartToVision();
+            if (!attentionSent) {
+              warnMotionTriggerForwardFailure(
+                `Failed to send attention_start for trigger frame ${frameId}.`,
+              );
+            }
+
+            const triggerForwarded = forwardFrameToVision(frameId, ws, binaryPayload);
+            if (!triggerForwarded) {
+              warnMotionTriggerForwardFailure(
+                `Failed to force-forward trigger frame ${frameId} to Vision.`,
+              );
+            } else {
+              forwardedByMotionTrigger = true;
+            }
+          }
         }
+
+        if (!stream.visionForward.enabled) {
+          return;
+        }
+
+        const shouldForwardSample = visionForwardCounter % visionForwardSampleEveryN === 0;
+        visionForwardCounter += 1;
+
+        if (forwardedByMotionTrigger) {
+          return;
+        }
+
+        if (!shouldForwardSample) {
+          return;
+        }
+
+        if (!visionClient.isConnected()) {
+          return;
+        }
+
+        void forwardFrameToVision(frameId, ws, binaryPayload);
 
         return;
       }
@@ -1174,6 +1385,18 @@ export function startServer(options: StartServerOptions): Server {
     console.log(`[eva] websocket endpoint ws://localhost:${port}${eyePath}`);
     console.log(`[eva] Vision target ${visionClient.getUrl()}`);
     console.log(
+      `[eva] stream broker enabled=${stream.broker.enabled} maxFrames=${stream.broker.maxFrames} maxAgeMs=${stream.broker.maxAgeMs} maxBytes=${stream.broker.maxBytes}`,
+    );
+    console.log(
+      `[eva] vision forwarding enabled=${stream.visionForward.enabled} sampleEveryN=${visionForwardSampleEveryN}`,
+    );
+    console.log(
+      `[eva] motion gate enabled=${motionGate.enabled} thumb=${motionGate.thumbW}x${motionGate.thumbH} triggerThreshold=${motionGate.triggerThreshold} resetThreshold=${motionGate.resetThreshold} cooldownMs=${motionGate.cooldownMs} minPersistFrames=${motionGate.minPersistFrames}`,
+    );
+    console.log(
+      '[eva] vision attention relay mode=motion_to_vision_ws_attention motionTriggerAttentionStart=true forceForwardTriggerFrame=true',
+    );
+    console.log(
       `[eva] insight relay enabled=${insightRelay.enabled} cooldownMs=${insightRelay.cooldownMs} dedupeWindowMs=${insightRelay.dedupeWindowMs}`,
     );
     console.log(`[eva] agent respond target ${resolveAgentRespondUrl(agent.baseUrl)} timeoutMs=${agent.timeoutMs}`);
@@ -1197,6 +1420,7 @@ export function startServer(options: StartServerOptions): Server {
     emittedInsightUtteranceClipIds.clear();
     speechCache.clear();
     inFlightSpeechSynthesis.clear();
+
     visionClient.disconnect();
     wss.close();
   });

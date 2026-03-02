@@ -1,19 +1,19 @@
-# Eva + Vision + UI + Agent
+# Eva + Vision + UI + Executive
 
-This repository hosts four components:
+This repository currently runs four primary components:
 
-- `packages/eva` — TypeScript daemon (HTTP/WebSocket gateway)
-- `packages/eva/vision` — Python FastAPI daemon (**scene-change detector**)
-- `packages/eva/executive` — Node daemon (insight/text model service)
+- `packages/eva` — TypeScript gateway daemon (HTTP + WebSocket)
+- `packages/eva/vision` — Python WS-first vision runtime (`/infer`)
+- `packages/eva/executive` — Node executive/agent service
 - `packages/ui` — Vite + React web client
 
-Protocol docs/schema are in `packages/protocol`.
+Protocol docs/schema live in `packages/protocol`.
 
-## Defaults
+## Default local ports
 
-- Eva: `http://localhost:8787`
-- Vision: `http://localhost:8000`
-- Agent: `http://localhost:8791`
+- Eva: `http://127.0.0.1:8787`
+- Vision: `http://127.0.0.1:8792`
+- Executive: `http://127.0.0.1:8791`
 - UI dev server: `http://127.0.0.1:5173`
 
 ## Configuration files
@@ -28,17 +28,11 @@ Protocol docs/schema are in `packages/protocol`.
 - `packages/eva/vision/settings.yaml` (committed)
 - `packages/eva/vision/settings.local.yaml` (optional local override, gitignored)
 
-### Agent (cosmiconfig + zod)
+### Executive (cosmiconfig + zod)
 
 - `packages/eva/executive/agent.config.json` (committed)
 - `packages/eva/executive/agent.config.local.json` (optional local override, gitignored)
 - `packages/eva/executive/agent.secrets.local.json` (required local secrets file, gitignored)
-
-### Executive LLM trace logging (hot-toggle local config)
-
-- `packages/eva/llm_logs/config.example.json` (committed template)
-- `packages/eva/llm_logs/config.json` (local runtime toggle, gitignored)
-- default output: `packages/eva/llm_logs/openai-requests.log` (gitignored JSONL)
 
 ### UI runtime config
 
@@ -47,19 +41,18 @@ Protocol docs/schema are in `packages/protocol`.
 
 ## One-command stack boot (Eva subprocess mode)
 
-After one-time dependency setup (Node deps + Vision venv + Agent secrets), you can boot Eva + Agent + Vision from one command:
+After one-time dependency setup, boot Agent + Vision + Eva from one command:
 
 ```bash
 cd packages/eva
-cp eva.config.local.example.json eva.config.local.json
 npm run dev
 ```
 
-If Vision fails to start because your venv python path differs, set `subprocesses.vision.command` in `eva.config.local.json` to your venv interpreter (for example: `packages/eva/vision/.venv/bin/python -m app.run`).
+If your Python path differs, override `subprocesses.vision.command` in `eva.config.local.json`.
 
-## Development Run Instructions
+## Development run instructions
 
-### 1) Agent (TypeScript + pi-ai)
+### 1) Executive
 
 ```bash
 cd packages/eva/executive
@@ -69,7 +62,7 @@ npm install
 npm run dev
 ```
 
-### 2) Vision (Python)
+### 2) Vision
 
 ```bash
 cd packages/eva/vision
@@ -79,13 +72,7 @@ pip install -r requirements.txt
 python -m app.run
 ```
 
-Alternative (still supported):
-
-```bash
-uvicorn app.main:app --reload --port 8000
-```
-
-### 3) Eva (TypeScript)
+### 3) Eva
 
 ```bash
 cd packages/eva
@@ -95,7 +82,7 @@ npm install
 npm run dev
 ```
 
-### 4) UI (React + Vite)
+### 4) UI
 
 ```bash
 cd packages/ui
@@ -103,12 +90,10 @@ npm install
 npm run dev
 ```
 
-## Status
+## Runtime flow (high level)
 
-Implemented through **Iteration 127**.
-
-Key current behavior:
-- Vision emits per-frame `frame_events` (scene-change events + blob metadata).
-- Eva routes frame-scoped responses by `frame_id` and forwards events to Agent `/events`.
-- UI ACKs frames on `frame_events`, renders scene-change blob overlays, and maintains event feed.
-- Insights remain clip-based and optional, triggered from event surprise/cooldown rules.
+- UI streams `frame_binary` messages to Eva (`/eye`).
+- Eva emits immediate `frame_received` ingress ACKs.
+- MotionGate trigger in Eva sends `attention_start` and force-forwards trigger frame to Vision WS.
+- Vision emits `frame_events` (`scene_caption`) and `insight` messages.
+- Eva forwards `scene_caption` events to Executive `/events` (fire-and-forget).

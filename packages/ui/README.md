@@ -1,8 +1,8 @@
 # Eva UI
 
-React + Vite client for webcam streaming, scene-change visualization, and chat/speech controls.
+React + Vite client for webcam streaming, motion/caption observability, and chat/speech controls.
 
-## Current behavior (Iteration 136)
+## Current behavior (Iteration 176)
 
 - Loads runtime config from:
   - `/config.local.json` first (if present)
@@ -12,27 +12,38 @@ React + Vite client for webcam streaming, scene-change visualization, and chat/s
   - `POST /text` chat requests
   - speech endpoint requests (configured `speech.path`, default `/speech`)
 - Displays connection state and log panel
-- Camera streaming:
-  - captures JPEG frames from `<video>` via hidden `<canvas>`
-  - sends binary frame envelopes (`frame_binary` metadata + JPEG bytes)
-  - keeps max 1 in-flight frame with timeout-based backpressure
-  - ACKs in-flight frames on matching `frame_events.frame_id`
-- Event display:
-  - renders `scene_change` blob boxes on overlay canvas
-  - overlay is short-lived (~1–2s TTL)
-  - shows recent event feed entries from `frame_events.events[]`
-- Insight panel:
-  - shows latest `insight` summary/usage
-  - shows `summary.tts_response` as a visible “Spoken line” secondary row
-- Chat + speech:
-  - sends text via `POST /text`
-  - renders `text_output` replies
-  - auto-speak is limited to:
-    - user chat replies, or
-    - insight-triggered system utterances (`text_output.meta.trigger_kind === "insight"`)
-  - all other system `text_output` messages are intentionally not auto-spoken
-  - raw frame/event traffic is not auto-spoken
-  - manual speech test remains available
+
+### Camera streaming
+
+- Captures JPEG frames from `<video>` via hidden `<canvas>`
+- Sends binary frame envelopes (`frame_binary` metadata + JPEG bytes)
+- Keeps max 1 in-flight frame with timeout-based backpressure
+- ACKs in-flight frames on matching `frame_received.frame_id`
+
+### Motion + events
+
+- No scene-change blob overlay rendering
+- Optional debug ROI/line overlay can be toggled when configured
+- Shows latest motion telemetry from `frame_received.motion`:
+  - `mad`
+  - `triggered`
+- Shows recent event feed entries and latest caption text
+
+### Insight panel
+
+- Shows latest `insight` summary/usage
+- Shows `summary.tts_response` as visible “Spoken line”
+
+### Chat + speech
+
+- Sends text via `POST /text`
+- Renders `text_output` replies
+- Auto-speak is limited to:
+  - user chat replies, or
+  - insight-triggered system utterances (`text_output.meta.trigger_kind === "insight"`)
+- All other system `text_output` messages are intentionally not auto-spoken
+- Raw frame/event traffic is not auto-spoken
+- Manual speech test remains available
 
 ## Runtime config files
 

@@ -49,6 +49,22 @@ export const FrameBinaryMetaSchema = z.object({
 
 export const InsightSeveritySchema = z.enum(['low', 'medium', 'high']);
 
+export const FrameReceivedMotionSchema = z.object({
+  mad: z.number().nonnegative(),
+  triggered: z.boolean(),
+});
+
+export const FrameReceivedMessageSchema = z.object({
+  type: z.literal('frame_received'),
+  v: z.literal(PROTOCOL_VERSION),
+  frame_id: z.string().min(1),
+  ts_ms: z.number().int().nonnegative(),
+  accepted: z.boolean(),
+  queue_depth: z.number().int().nonnegative(),
+  dropped: z.number().int().nonnegative(),
+  motion: FrameReceivedMotionSchema.optional(),
+});
+
 export const EventEntrySchema = z.object({
   name: z.string().min(1),
   ts_ms: z.number().int().nonnegative(),
@@ -70,7 +86,6 @@ export const InsightSummarySchema = z.object({
   one_liner: z.string().min(1),
   tts_response: z.string().min(1),
   what_changed: z.array(z.string().min(1)),
-  severity: InsightSeveritySchema,
   tags: z.array(z.string().min(1)),
 });
 
@@ -101,6 +116,8 @@ export type HelloMessage = z.infer<typeof HelloMessageSchema>;
 export type ErrorMessage = z.infer<typeof ErrorMessageSchema>;
 export type CommandMessage = z.infer<typeof CommandMessageSchema>;
 export type FrameBinaryMeta = z.infer<typeof FrameBinaryMetaSchema>;
+export type FrameReceivedMotion = z.infer<typeof FrameReceivedMotionSchema>;
+export type FrameReceivedMessage = z.infer<typeof FrameReceivedMessageSchema>;
 export type EventEntry = z.infer<typeof EventEntrySchema>;
 export type FrameEventsMessage = z.infer<typeof FrameEventsMessageSchema>;
 export type InsightSummary = z.infer<typeof InsightSummarySchema>;
@@ -165,6 +182,27 @@ export function decodeBinaryFrameEnvelope(binaryPayload: Buffer): DecodedBinaryF
   return {
     meta: parsedMetadata.data,
     imageBytes,
+  };
+}
+
+export function makeFrameReceived(
+  frame_id: string,
+  options: {
+    accepted: boolean;
+    queue_depth: number;
+    dropped: number;
+    motion?: FrameReceivedMotion;
+  },
+): FrameReceivedMessage {
+  return {
+    type: 'frame_received',
+    v: PROTOCOL_VERSION,
+    frame_id,
+    ts_ms: Date.now(),
+    accepted: options.accepted,
+    queue_depth: options.queue_depth,
+    dropped: options.dropped,
+    ...(options.motion ? { motion: options.motion } : {}),
   };
 }
 

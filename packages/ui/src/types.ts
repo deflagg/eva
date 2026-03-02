@@ -18,6 +18,20 @@ export interface FrameBinaryMeta {
   image_bytes: number;
 }
 
+export interface FrameReceivedMessage {
+  type: 'frame_received';
+  v: 2;
+  frame_id: string;
+  ts_ms: number;
+  accepted: boolean;
+  queue_depth: number;
+  dropped: number;
+  motion?: {
+    mad: number;
+    triggered: boolean;
+  };
+}
+
 export interface ErrorMessage {
   type: 'error';
   v: 2;
@@ -53,7 +67,6 @@ export interface InsightSummary {
   one_liner: string;
   tts_response: string;
   what_changed: string[];
-  severity: InsightSeverity;
   tags: string[];
 }
 
@@ -114,6 +127,7 @@ export interface SpeechOutputMessage {
 
 export type ProtocolMessage =
   | HelloMessage
+  | FrameReceivedMessage
   | FrameEventsMessage
   | ErrorMessage
   | InsightMessage

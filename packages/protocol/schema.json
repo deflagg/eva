@@ -1,47 +1,28 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.com/eva/protocol-v1.schema.json",
-  "title": "Eva Protocol v1",
-  "description": "JSON message schemas for Eva protocol control/detection/messages and binary-frame metadata.",
+  "$id": "https://example.com/eva/protocol-v2.schema.json",
+  "title": "Eva Protocol v2",
+  "description": "JSON message schemas for Eva protocol control/event/messages and binary-frame metadata.",
   "type": "object",
   "oneOf": [
-    {
-      "$ref": "#/$defs/frame_binary_meta"
-    },
-    {
-      "$ref": "#/$defs/detections"
-    },
-    {
-      "$ref": "#/$defs/error"
-    },
-    {
-      "$ref": "#/$defs/hello"
-    },
-    {
-      "$ref": "#/$defs/command"
-    },
-    {
-      "$ref": "#/$defs/insight"
-    },
-    {
-      "$ref": "#/$defs/text_output"
-    },
-    {
-      "$ref": "#/$defs/speech_output"
-    }
+    { "$ref": "#/$defs/frame_binary_meta" },
+    { "$ref": "#/$defs/frame_received" },
+    { "$ref": "#/$defs/frame_events" },
+    { "$ref": "#/$defs/error" },
+    { "$ref": "#/$defs/hello" },
+    { "$ref": "#/$defs/command" },
+    { "$ref": "#/$defs/insight" },
+    { "$ref": "#/$defs/text_output" },
+    { "$ref": "#/$defs/speech_output" }
   ],
   "$defs": {
     "version": {
       "type": "integer",
-      "const": 1
+      "const": 2
     },
     "severity": {
       "type": "string",
-      "enum": [
-        "low",
-        "medium",
-        "high"
-      ]
+      "enum": ["low", "medium", "high"]
     },
     "frame_binary_meta": {
       "type": "object",
@@ -57,105 +38,26 @@
         "image_bytes"
       ],
       "properties": {
-        "type": {
-          "const": "frame_binary"
-        },
-        "v": {
-          "$ref": "#/$defs/version"
-        },
-        "frame_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "ts_ms": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "mime": {
-          "type": "string",
-          "const": "image/jpeg"
-        },
-        "width": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "height": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "image_bytes": {
-          "type": "integer",
-          "minimum": 1
-        }
+        "type": { "const": "frame_binary" },
+        "v": { "$ref": "#/$defs/version" },
+        "frame_id": { "type": "string", "minLength": 1 },
+        "ts_ms": { "type": "integer", "minimum": 0 },
+        "mime": { "const": "image/jpeg" },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "image_bytes": { "type": "integer", "minimum": 1 }
       }
     },
-    "detection": {
+    "frame_received_motion": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "cls",
-        "name",
-        "conf",
-        "box"
-      ],
+      "required": ["mad", "triggered"],
       "properties": {
-        "cls": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "name": {
-          "type": "string",
-          "minLength": 1
-        },
-        "conf": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
-        },
-        "box": {
-          "type": "array",
-          "items": {
-            "type": "number"
-          },
-          "minItems": 4,
-          "maxItems": 4
-        },
-        "track_id": {
-          "type": "integer"
-        }
+        "mad": { "type": "number", "minimum": 0 },
+        "triggered": { "type": "boolean" }
       }
     },
-    "event_entry": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "name",
-        "ts_ms",
-        "severity",
-        "data"
-      ],
-      "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1
-        },
-        "ts_ms": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "severity": {
-          "$ref": "#/$defs/severity"
-        },
-        "track_id": {
-          "type": "integer"
-        },
-        "data": {
-          "type": "object",
-          "additionalProperties": true
-        }
-      }
-    },
-    "detections": {
+    "frame_received": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -163,244 +65,132 @@
         "v",
         "frame_id",
         "ts_ms",
-        "width",
-        "height",
-        "model",
-        "detections"
+        "accepted",
+        "queue_depth",
+        "dropped"
       ],
       "properties": {
-        "type": {
-          "const": "detections"
-        },
-        "v": {
-          "$ref": "#/$defs/version"
-        },
-        "frame_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "ts_ms": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "width": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "height": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "model": {
-          "type": "string",
-          "minLength": 1
-        },
-        "detections": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/detection"
-          }
-        },
+        "type": { "const": "frame_received" },
+        "v": { "$ref": "#/$defs/version" },
+        "frame_id": { "type": "string", "minLength": 1 },
+        "ts_ms": { "type": "integer", "minimum": 0 },
+        "accepted": { "type": "boolean" },
+        "queue_depth": { "type": "integer", "minimum": 0 },
+        "dropped": { "type": "integer", "minimum": 0 },
+        "motion": { "$ref": "#/$defs/frame_received_motion" }
+      }
+    },
+    "event_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "ts_ms", "severity", "data"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "ts_ms": { "type": "integer", "minimum": 0 },
+        "severity": { "$ref": "#/$defs/severity" },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "frame_events": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "v", "frame_id", "ts_ms", "width", "height", "events"],
+      "properties": {
+        "type": { "const": "frame_events" },
+        "v": { "$ref": "#/$defs/version" },
+        "frame_id": { "type": "string", "minLength": 1 },
+        "ts_ms": { "type": "integer", "minimum": 0 },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
         "events": {
           "type": "array",
-          "items": {
-            "$ref": "#/$defs/event_entry"
-          }
+          "items": { "$ref": "#/$defs/event_entry" }
         }
       }
     },
     "insight_summary": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "one_liner",
-        "tts_response",
-        "what_changed",
-        "severity",
-        "tags"
-      ],
+      "required": ["one_liner", "tts_response", "what_changed", "tags"],
       "properties": {
-        "one_liner": {
-          "type": "string",
-          "minLength": 1
-        },
-        "tts_response": {
-          "type": "string",
-          "minLength": 1
-        },
+        "one_liner": { "type": "string", "minLength": 1 },
+        "tts_response": { "type": "string", "minLength": 1 },
         "what_changed": {
           "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
-        },
-        "severity": {
-          "$ref": "#/$defs/severity"
+          "items": { "type": "string", "minLength": 1 }
         },
         "tags": {
           "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
+          "items": { "type": "string", "minLength": 1 }
         }
       }
     },
     "insight_usage": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "input_tokens",
-        "output_tokens",
-        "cost_usd"
-      ],
+      "required": ["input_tokens", "output_tokens", "cost_usd"],
       "properties": {
-        "input_tokens": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "output_tokens": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "cost_usd": {
-          "type": "number",
-          "minimum": 0
-        }
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "cost_usd": { "type": "number", "minimum": 0 }
       }
     },
     "insight": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "type",
-        "v",
-        "clip_id",
-        "trigger_frame_id",
-        "ts_ms",
-        "summary",
-        "usage"
-      ],
+      "required": ["type", "v", "clip_id", "trigger_frame_id", "ts_ms", "summary", "usage"],
       "properties": {
-        "type": {
-          "const": "insight"
-        },
-        "v": {
-          "$ref": "#/$defs/version"
-        },
-        "clip_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "trigger_frame_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "ts_ms": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "summary": {
-          "$ref": "#/$defs/insight_summary"
-        },
-        "usage": {
-          "$ref": "#/$defs/insight_usage"
-        }
+        "type": { "const": "insight" },
+        "v": { "$ref": "#/$defs/version" },
+        "clip_id": { "type": "string", "minLength": 1 },
+        "trigger_frame_id": { "type": "string", "minLength": 1 },
+        "ts_ms": { "type": "integer", "minimum": 0 },
+        "summary": { "$ref": "#/$defs/insight_summary" },
+        "usage": { "$ref": "#/$defs/insight_usage" }
       }
     },
     "text_output_meta": {
       "type": "object",
       "additionalProperties": true,
-      "required": [
-        "tone",
-        "concepts",
-        "surprise",
-        "note"
-      ],
+      "required": ["tone", "concepts", "surprise", "note"],
       "properties": {
-        "tone": {
-          "type": "string",
-          "minLength": 1
-        },
+        "tone": { "type": "string", "minLength": 1 },
         "concepts": {
           "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
+          "items": { "type": "string", "minLength": 1 }
         },
-        "surprise": {
-          "type": "number"
-        },
-        "note": {
-          "type": "string",
-          "minLength": 1
-        }
+        "surprise": { "type": "number" },
+        "note": { "type": "string", "minLength": 1 }
       }
     },
     "text_output": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "type",
-        "v",
-        "request_id",
-        "ts_ms",
-        "text",
-        "meta"
-      ],
+      "required": ["type", "v", "request_id", "ts_ms", "text", "meta"],
       "properties": {
-        "type": {
-          "const": "text_output"
-        },
-        "v": {
-          "$ref": "#/$defs/version"
-        },
-        "request_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "session_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "ts_ms": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "text": {
-          "type": "string",
-          "minLength": 1
-        },
-        "meta": {
-          "$ref": "#/$defs/text_output_meta"
-        }
+        "type": { "const": "text_output" },
+        "v": { "$ref": "#/$defs/version" },
+        "request_id": { "type": "string", "minLength": 1 },
+        "session_id": { "type": "string", "minLength": 1 },
+        "ts_ms": { "type": "integer", "minimum": 0 },
+        "text": { "type": "string", "minLength": 1 },
+        "meta": { "$ref": "#/$defs/text_output_meta" }
       }
     },
     "speech_output_meta": {
       "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "trigger_kind",
-        "trigger_id",
-        "severity"
-      ],
+      "additionalProperties": true,
+      "required": ["trigger_kind", "trigger_id", "severity"],
       "properties": {
         "trigger_kind": {
           "type": "string",
-          "enum": [
-            "insight",
-            "wm_event"
-          ]
+          "enum": ["insight", "wm_event"]
         },
-        "trigger_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "severity": {
-          "const": "high"
-        }
+        "trigger_id": { "type": "string", "minLength": 1 },
+        "severity": { "const": "high" }
       }
     },
     "speech_output": {
@@ -420,128 +210,53 @@
         "meta"
       ],
       "properties": {
-        "type": {
-          "const": "speech_output"
-        },
-        "v": {
-          "$ref": "#/$defs/version"
-        },
-        "request_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "session_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "ts_ms": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "mime": {
-          "const": "audio/mpeg"
-        },
-        "voice": {
-          "type": "string",
-          "minLength": 1
-        },
-        "rate": {
-          "type": "number",
-          "minimum": 0.25,
-          "maximum": 4
-        },
-        "text": {
-          "type": "string",
-          "minLength": 1
-        },
-        "audio_b64": {
-          "type": "string",
-          "minLength": 1
-        },
-        "meta": {
-          "$ref": "#/$defs/speech_output_meta"
-        }
+        "type": { "const": "speech_output" },
+        "v": { "$ref": "#/$defs/version" },
+        "request_id": { "type": "string", "minLength": 1 },
+        "session_id": { "type": "string", "minLength": 1 },
+        "ts_ms": { "type": "integer", "minimum": 0 },
+        "mime": { "const": "audio/mpeg" },
+        "voice": { "type": "string", "minLength": 1 },
+        "rate": { "type": "number", "minimum": 0.25, "maximum": 4 },
+        "text": { "type": "string", "minLength": 1 },
+        "audio_b64": { "type": "string", "minLength": 1 },
+        "meta": { "$ref": "#/$defs/speech_output_meta" }
       }
     },
     "error": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "type",
-        "v",
-        "code",
-        "message"
-      ],
+      "required": ["type", "v", "code", "message"],
       "properties": {
-        "type": {
-          "const": "error"
-        },
-        "v": {
-          "$ref": "#/$defs/version"
-        },
-        "frame_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "code": {
-          "type": "string",
-          "minLength": 1
-        },
-        "message": {
-          "type": "string",
-          "minLength": 1
-        }
+        "type": { "const": "error" },
+        "v": { "$ref": "#/$defs/version" },
+        "frame_id": { "type": "string", "minLength": 1 },
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 }
       }
     },
     "hello": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "type",
-        "v",
-        "role",
-        "ts_ms"
-      ],
+      "required": ["type", "v", "role", "ts_ms"],
       "properties": {
-        "type": {
-          "const": "hello"
-        },
-        "v": {
-          "$ref": "#/$defs/version"
-        },
+        "type": { "const": "hello" },
+        "v": { "$ref": "#/$defs/version" },
         "role": {
           "type": "string",
-          "enum": [
-            "ui",
-            "eva",
-            "vision"
-          ]
+          "enum": ["ui", "eva", "vision"]
         },
-        "ts_ms": {
-          "type": "integer",
-          "minimum": 0
-        }
+        "ts_ms": { "type": "integer", "minimum": 0 }
       }
     },
     "command": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "type",
-        "v",
-        "name"
-      ],
+      "required": ["type", "v", "name"],
       "properties": {
-        "type": {
-          "const": "command"
-        },
-        "v": {
-          "$ref": "#/$defs/version"
-        },
-        "name": {
-          "type": "string",
-          "minLength": 1
-        }
+        "type": { "const": "command" },
+        "v": { "$ref": "#/$defs/version" },
+        "name": { "type": "string", "minLength": 1 }
       }
     }
   }

@@ -2,8 +2,6 @@ import { readFile } from 'node:fs/promises';
 
 import { z } from 'zod';
 
-const InsightSeveritySchema = z.enum(['low', 'medium', 'high']);
-
 const InsightAssetRefSchema = z
   .object({
     frame_id: z.string().trim().min(1).optional(),
@@ -19,7 +17,6 @@ const WorkingMemoryWmInsightSchema = z
     ts_ms: z.number().int().nonnegative(),
     clip_id: z.string().trim().min(1),
     trigger_frame_id: z.string().trim().min(1),
-    severity: InsightSeveritySchema,
     one_liner: z.string().trim().min(1),
     what_changed: z.array(z.string().trim().min(1)).default([]),
     tags: z.array(z.string().trim().min(1)).default([]),
@@ -36,7 +33,6 @@ export interface InsightEntry {
   summary: {
     one_liner: string;
     what_changed: string[];
-    severity: z.infer<typeof InsightSeveritySchema>;
     tags: string[];
   };
   assets?: InsightAssetRef[];
@@ -122,7 +118,6 @@ export async function retrieveRecentInsights(options: RetrieveRecentInsightsOpti
       summary: {
         one_liner: normalized.data.one_liner,
         what_changed: [...normalized.data.what_changed],
-        severity: normalized.data.severity,
         tags: [...normalized.data.tags],
       },
       ...(normalized.data.assets && normalized.data.assets.length > 0
@@ -182,12 +177,7 @@ export function formatInsightsForDebug(
   const lines: string[] = [];
 
   for (const insight of selected) {
-    lines.push(
-      truncateText(
-        `[${formatTimeHms(insight.ts_ms)}] (${insight.summary.severity}) ${insight.summary.one_liner}`,
-        maxLineChars,
-      ),
-    );
+    lines.push(truncateText(`[${formatTimeHms(insight.ts_ms)}] ${insight.summary.one_liner}`, maxLineChars));
 
     const changes = insight.summary.what_changed.slice(0, maxWhatChangedItems);
     for (const change of changes) {

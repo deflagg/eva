@@ -1,43 +1,40 @@
 server:
   host: 127.0.0.1
-  port: 8000
+  port: 8792
 
-scene_change:
-  enabled: true
-  downsample:
-    max_dim: 160
-  ema_alpha: 0.08
-  pixel_threshold: 18
-  cell_px: 10
-  cell_active_ratio: 0.08
-  min_blob_cells: 4
-  score_threshold: 1.2
-  min_persist_frames: 3
-  cooldown_ms: 2500
-  severity:
-    medium_score: 2.5
-    high_score: 5.0
+executive:
+  base_url: http://127.0.0.1:8791
+  timeout_ms: 30000
 
-insights:
+attention:
+  window_ms: 15000
+
+caption:
   enabled: true
-  agent_url: http://127.0.0.1:8791/insight
-  assets_dir: ../memory/working_memory_assets
-  assets:
-    max_clips: 200
-    max_age_hours: 24
-  timeout_ms: 20000
-  max_frames: 6
-  pre_frames: 3
-  post_frames: 2
-  insight_cooldown_ms: 10000
-  downsample:
-    enabled: true
-    max_dim: 160
-    jpeg_quality: 75
+  model_id: Salesforce/blip-image-captioning-base
+  device: cuda
+  max_dim: 384
+  max_new_tokens: 24
+  cooldown_ms: 2000
+  dedupe_window_ms: 15000
+
+semantic:
+  enabled: true
+  model_id: openai/clip-vit-base-patch32
+  device: auto
+  history_size: 64
 
 surprise:
+  threshold: 0.05
+
+insight:
   enabled: true
-  threshold: 5
-  cooldown_ms: 10000
-  weights:
-    scene_change: 5
+  pre_frames: 2
+  post_frames: 2
+  max_frames: 6
+  cooldown_ms: 5000
+  post_wait_ms: 400
+  assets_dir: ../memory/working_memory_assets
+  retention:
+    max_clips: 200
+    max_age_hours: 24

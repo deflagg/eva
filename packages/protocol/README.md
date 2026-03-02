@@ -1,23 +1,23 @@
-# Eva Protocol (v1)
+# Eva Protocol (v2)
 
-Detections/control messages are JSON over WebSocket. Frame transport (UI -> Eva -> Vision) uses a binary envelope.
+Control/events are JSON over WebSocket. Frame transport (UI -> Eva -> Vision) uses a binary envelope.
 
 ## Message Types
 
 ### 1) `frame_binary` envelope (UI -> Eva -> Vision)
 
-Each frame is sent as one **binary WebSocket message** with this layout:
+Each frame is sent as one binary WebSocket message with layout:
 
-1. **4 bytes**: unsigned big-endian metadata length `N`
-2. **N bytes**: UTF-8 JSON metadata object
-3. **remaining bytes**: raw JPEG payload
+1. 4-byte unsigned big-endian metadata length `N`
+2. `N` bytes UTF-8 JSON metadata
+3. Remaining bytes raw JPEG payload
 
-Metadata JSON shape:
+Metadata shape:
 
 ```json
 {
   "type": "frame_binary",
-  "v": 1,
+  "v": 2,
   "frame_id": "550e8400-e29b-41d4-a716-446655440000",
   "ts_ms": 1700000000000,
   "mime": "image/jpeg",
@@ -28,68 +28,79 @@ Metadata JSON shape:
 ```
 
 Rules:
-- `image_bytes` must exactly match the binary JPEG payload size.
+- `image_bytes` must match payload byte length.
 - `mime` is currently fixed to `image/jpeg`.
 
-### 2) `detections` (Vision -> Eva -> UI) JSON
+### 2) `frame_received` (Eva -> UI)
+
+Ingress ACK emitted by Eva immediately after frame enqueue/reject decision.
 
 ```json
 {
-  "type": "detections",
-  "v": 1,
+  "type": "frame_received",
+  "v": 2,
   "frame_id": "550e8400-e29b-41d4-a716-446655440000",
-  "ts_ms": 1700000000000,
+  "ts_ms": 1700000000001,
+  "accepted": true,
+  "queue_depth": 12,
+  "dropped": 0,
+  "motion": {
+    "mad": 13.42,
+    "triggered": true
+  }
+}
+```
+
+Notes:
+- This is a receipt signal, not Vision inference completion.
+- `motion` is optional MotionGate telemetry.
+
+### 3) `frame_events` (Vision -> Eva -> UI)
+
+```json
+{
+  "type": "frame_events",
+  "v": 2,
+  "frame_id": "550e8400-e29b-41d4-a716-446655440000",
+  "ts_ms": 1700000000456,
   "width": 1280,
   "height": 720,
-  "model": "yoloe-26",
-  "detections": [
-    {
-      "cls": 0,
-      "name": "person",
-      "conf": 0.91,
-      "box": [120, 80, 420, 640],
-      "track_id": 17
-    }
-  ],
   "events": [
     {
-      "name": "line_cross",
-      "ts_ms": 1700000000123,
-      "severity": "medium",
-      "track_id": 17,
+      "name": "scene_caption",
+      "ts_ms": 1700000000456,
+      "severity": "low",
       "data": {
-        "line": "doorway",
-        "direction": "A->B"
+        "text": "a person entering the room",
+        "model": "Salesforce/blip-image-captioning-base",
+        "latency_ms": 181,
+        "semantic": {
+          "surprise": 0.61,
+          "similarity_prev": 0.32,
+          "similarity_mean": 0.41,
+          "model": "openai/clip-vit-base-patch32",
+          "latency_ms": 22,
+          "should_escalate": true
+        }
       }
     }
   ]
 }
 ```
 
-Notes:
-- `detection.track_id` is optional.
-- `detections.events` is optional.
-- `events[].severity` is one of `low | medium | high`.
-
-### 3) `insight` (Vision -> Eva -> UI) JSON
-
-> Important: insight messages do **not** include `frame_id`.
+### 4) `insight` (Vision -> Eva -> UI)
 
 ```json
 {
   "type": "insight",
-  "v": 1,
+  "v": 2,
   "clip_id": "2b84b71b-2db6-4781-bdc5-f2b35e643b1f",
   "trigger_frame_id": "550e8400-e29b-41d4-a716-446655440000",
-  "ts_ms": 1700000000456,
+  "ts_ms": 1700000000789,
   "summary": {
-    "one_liner": "Two people crossed paths quickly near the entry.",
-    "tts_response": "Whoa—did those two just cross paths near the entry? Was that expected?",
-    "what_changed": [
-      "Person A entered from left",
-      "Person B moved toward doorway"
-    ],
-    "severity": "medium",
+    "one_liner": "Two people crossed paths near the entry.",
+    "tts_response": "Heads up, two people just crossed near the entry.",
+    "what_changed": ["person entered", "person turned toward doorway"],
     "tags": ["entry", "motion"]
   },
   "usage": {
@@ -100,40 +111,31 @@ Notes:
 }
 ```
 
-Notes:
-- `summary.tts_response` is required and carries the conversational utterance string produced by the insight model.
-
-### 4) `text_output` (Eva -> UI) JSON
-
-Used for immediate server-originated text replies/alerts.
+### 5) `text_output` (Eva -> UI)
 
 ```json
 {
   "type": "text_output",
-  "v": 1,
+  "v": 2,
   "request_id": "f53ef67c-70af-4b78-a2cb-5f49551de061",
-  "session_id": "system-alerts",
+  "session_id": "system-insights",
   "ts_ms": 1700000001200,
-  "text": "Alert: near collision.",
+  "text": "Something changed near the entry.",
   "meta": {
-    "tone": "urgent",
-    "concepts": ["high_severity", "alert"],
-    "surprise": 1,
-    "note": "Auto alert (push mode)."
+    "tone": "conversational",
+    "concepts": ["insight"],
+    "surprise": 0,
+    "note": "Auto utterance from insight."
   }
 }
 ```
 
-### 5) `speech_output` (Eva -> UI) JSON
-
-> Additive protocol extension for server-originated spoken output.
->
-> Browser autoplay policy still applies: clients may need a one-time user gesture (for example, an **Enable Audio** button) before automatic playback is allowed.
+### 6) `speech_output` (Eva -> UI)
 
 ```json
 {
   "type": "speech_output",
-  "v": 1,
+  "v": 2,
   "request_id": "f53ef67c-70af-4b78-a2cb-5f49551de061",
   "session_id": "system-alerts",
   "ts_ms": 1700000001234,
@@ -150,42 +152,40 @@ Used for immediate server-originated text replies/alerts.
 }
 ```
 
-### 6) `command` (UI -> Eva -> Vision, debug) JSON
-
-> Temporary debug command introduced in Iteration 13.
+### 7) `command` (UI -> Eva -> Vision)
 
 ```json
 {
   "type": "command",
-  "v": 1,
-  "name": "insight_test"
+  "v": 2,
+  "name": "attention_start"
 }
 ```
 
-### 7) `error` (any direction) JSON
+### 8) `error` (any direction)
 
 ```json
 {
   "type": "error",
-  "v": 1,
+  "v": 2,
   "frame_id": "550e8400-e29b-41d4-a716-446655440000",
   "code": "SOME_CODE",
   "message": "Human-readable error"
 }
 ```
 
-### 8) Optional `hello` (debug) JSON
+### 9) `hello` (optional/debug)
 
 ```json
 {
   "type": "hello",
-  "v": 1,
-  "role": "ui",
+  "v": 2,
+  "role": "vision",
   "ts_ms": 1700000000000
 }
 ```
 
 ## Notes
 
-- `v` is protocol version and is currently fixed at `1`.
-- Detection `box` coordinates are in source-frame pixel space: `[x1, y1, x2, y2]`.
+- Protocol version is fixed at `v: 2`.
+- Canonical schema source: `packages/protocol/schema.json`.

@@ -18,6 +18,10 @@ class BinaryFrameParseError(ValueError):
     """Raised when a binary frame envelope cannot be decoded."""
 
 
+class CommandParseError(ValueError):
+    """Raised when a command JSON payload is missing required shape."""
+
+
 class ProtocolMessage(BaseModel):
     type: str
     v: int = PROTOCOL_VERSION
@@ -58,7 +62,7 @@ class FrameBinaryMetaMessage(ProtocolMessage):
 @dataclass(slots=True)
 class BinaryFrameEnvelope:
     meta: FrameBinaryMetaMessage
-    image_payload: bytes
+    jpeg_bytes: bytes
 
 
 class EventEntry(BaseModel):
@@ -82,7 +86,6 @@ class InsightSummary(BaseModel):
     one_liner: str = Field(min_length=1)
     tts_response: str = Field(min_length=1)
     what_changed: list[str]
-    severity: InsightSeverity
     tags: list[str]
 
 
@@ -140,13 +143,20 @@ def decode_binary_frame_envelope(payload: bytes) -> BinaryFrameEnvelope:
             f"Binary frame metadata is invalid{f' for frame_id={frame_id}' if frame_id else ''}."
         ) from exc
 
-    image_payload = payload[metadata_end:]
-    if len(image_payload) != metadata.image_bytes:
+    jpeg_payload = payload[metadata_end:]
+    if len(jpeg_payload) != metadata.image_bytes:
         raise BinaryFrameParseError(
-            f"Binary frame image length mismatch (expected {metadata.image_bytes}, got {len(image_payload)})."
+            f"Binary frame image length mismatch (expected {metadata.image_bytes}, got {len(jpeg_payload)})."
         )
 
-    return BinaryFrameEnvelope(meta=metadata, image_payload=image_payload)
+    return BinaryFrameEnvelope(meta=metadata, jpeg_bytes=jpeg_payload)
+
+
+def parse_command_payload(payload: object) -> CommandMessage:
+    try:
+        return CommandMessage.model_validate(payload)
+    except ValidationError as exc:
+        raise CommandParseError("Invalid command payload.") from exc
 
 
 def make_hello(role: RoleType) -> dict[str, object]:
@@ -155,3 +165,36 @@ def make_hello(role: RoleType) -> dict[str, object]:
 
 def make_error(code: str, message: str, frame_id: str | None = None) -> dict[str, object]:
     return ErrorMessage(code=code, message=message, frame_id=frame_id).model_dump(exclude_none=True)
+
+
+def make_frame_events(
+    frame_id: str,
+    ts_ms: int,
+    width: int,
+    height: int,
+    events: list[dict[str, Any]] | None = None,
+) -> dict[str, object]:
+    return FrameEventsMessage(
+        frame_id=frame_id,
+        ts_ms=ts_ms,
+        width=width,
+        height=height,
+        events=events or [],
+    ).model_dump(exclude_none=True)
+
+
+def make_insight(
+    *,
+    clip_id: str,
+    trigger_frame_id: str,
+    summary: dict[str, Any],
+    usage: dict[str, Any],
+    ts_ms: int | None = None,
+) -> dict[str, object]:
+    return InsightMessage(
+        clip_id=clip_id,
+        trigger_frame_id=trigger_frame_id,
+        ts_ms=ts_ms if ts_ms is not None else int(time.time() * 1000),
+        summary=summary,
+        usage=usage,
+    ).model_dump(exclude_none=True)
