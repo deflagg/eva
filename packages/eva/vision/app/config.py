@@ -214,7 +214,7 @@ def _build_app_config(settings: Dynaconf) -> AppConfig:
 
     executive = ExecutiveConfig(
         base_url=_read_non_empty_string(settings, "executive.base_url", "http://127.0.0.1:8791"),
-        timeout_ms=_read_int(settings, "executive.timeout_ms", 2_000, minimum=1),
+        timeout_ms=_read_int(settings, "executive.timeout_ms", 30_000, minimum=1),
     )
 
     attention = AttentionConfig(
@@ -254,7 +254,7 @@ def _build_app_config(settings: Dynaconf) -> AppConfig:
         max_frames=_read_int(settings, "insight.max_frames", 6, minimum=1),
         cooldown_ms=_read_int(settings, "insight.cooldown_ms", 30_000, minimum=1),
         post_wait_ms=_read_int(settings, "insight.post_wait_ms", 400, minimum=0),
-        assets_dir=_read_assets_dir(settings, "insight.assets_dir", "assets/insights"),
+        assets_dir=_read_assets_dir(settings, "insight.assets_dir", "../memory/working_memory_assets"),
         retention=insight_retention,
     )
 

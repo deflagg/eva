@@ -318,7 +318,6 @@ interface WorkingMemoryWmInsightEntry {
   source: 'vision';
   clip_id: string;
   trigger_frame_id: string;
-  severity: InsightSummary['severity'];
   one_liner: string;
   what_changed: string[];
   tags: string[];
@@ -1056,7 +1055,6 @@ function buildWorkingMemoryInsightEntry(
     source: 'vision',
     clip_id: clipId,
     trigger_frame_id: triggerFrameId,
-    severity: insight.summary.severity,
     one_liner: insight.summary.one_liner,
     what_changed: [...insight.summary.what_changed],
     tags: [...insight.summary.tags],
@@ -1305,13 +1303,11 @@ function buildCompactionRecordDetail(entry: WorkingMemoryRecord): string {
 
   if (entry.type === 'wm_insight') {
     const oneLiner = getStringField(record, 'one_liner') ?? '';
-    const severity = getStringField(record, 'severity') ?? 'unknown';
     const tags = toStringList(record.tags).slice(0, 4);
     const changed = toStringList(record.what_changed).slice(0, 2);
 
     const parts = [
       `insight="${compactForPrompt(oneLiner, COMPACTION_PROMPT_MAX_TEXT_CHARS)}"`,
-      `severity=${severity}`,
     ];
 
     if (tags.length > 0) {
@@ -1328,13 +1324,11 @@ function buildCompactionRecordDetail(entry: WorkingMemoryRecord): string {
   if (entry.type === 'wm_event') {
     const source = getStringField(record, 'source') ?? 'unknown';
     const name = getStringField(record, 'name') ?? 'unknown';
-    const severity = getStringField(record, 'severity') ?? 'unknown';
     const summary = getStringField(record, 'summary') ?? '';
 
     return [
       `event=${name}`,
       `source=${source}`,
-      `severity=${severity}`,
       `summary="${compactForPrompt(summary, COMPACTION_PROMPT_MAX_TEXT_CHARS)}"`,
     ].join(' ');
   }

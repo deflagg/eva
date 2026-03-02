@@ -10046,3 +10046,101 @@
 
 ### Notes
 - This fix is behavior-preserving for normal synchronized clocks and removes skew-related false negatives in insight triggering.
+
+## Post-Iteration Update (2026-03-01) — Removed false-alarm + insight severity
+
+- Removed Executive insight prompt false-alarm branch/instructions; insight generation now always returns a normal structured insight when surprise gate triggers.
+- Removed `severity` from insight tool contract and insight summary payload:
+  - `packages/eva/executive/src/tools/insight.ts`
+  - `packages/eva/executive/src/prompts/insight.ts`
+  - `packages/eva/executive/src/server.ts` (wm insight record shape and compaction formatting)
+  - `packages/eva/executive/src/memcontext/retrieve_recent_insights.ts`
+  - `packages/eva/vision/app/executive_client.py`
+  - `packages/eva/vision/app/protocol.py`
+  - `packages/eva/src/protocol.ts`
+  - `packages/protocol/schema.json`
+  - `packages/protocol/README.md`
+- Validation:
+  - `cd packages/eva && npm run build`
+  - `cd packages/eva/vision && python3 -m compileall -f app`
+
+## Post-Iteration Fix (2026-03-01) — Insight asset path alignment
+
+### Problem
+- Vision persisted insight clip JPEGs under `packages/eva/vision/assets/insights`.
+- Executive `/insight` only reads frame assets from `packages/eva/memory/working_memory_assets`.
+- Result: Vision insight attempts failed with `INSIGHT_ASSET_MISSING` and no WS insight emission.
+
+### Changes
+- `packages/eva/vision/settings.yaml`
+  - `insight.assets_dir: ../memory/working_memory_assets`
+- `packages/eva/vision/app/config.py`
+  - default `insight.assets_dir` updated to `../memory/working_memory_assets`
+- `packages/eva/vision/README.md`
+  - insight summary example updated (no `severity` field)
+
+### Verification run
+- Used real JPEGs from `packages/eva/vision/assets/insights/...` as source frames.
+- Persisted a synthetic test clip via `ClipAssetsManager` with loaded config.
+- Confirmed clip persisted to:
+  - `/mnt/d/source/vscode/eva/packages/eva/memory/working_memory_assets/<test-clip-id>/...`
+- Called Executive `POST /insight` with those asset refs.
+- Received `200` with valid summary payload (keys: `one_liner`, `what_changed`, `tts_response`, `tags`).
+
+### Build checks
+- `cd packages/eva && npm run build`
+- `cd packages/eva/vision && python3 -m compileall -f app`
+
+## Post-Iteration Fix (2026-03-01) — UI test insight + schema/render alignment
+
+### Issue
+- UI "Test insight" button sent command `insight_test`, but Vision only supported `attention_start`, so no synthetic insight was produced.
+- After removing insight `severity` from backend payloads, UI still rendered `latestInsight.summary.severity`, causing stale/mismatched assumptions.
+
+### Changes
+- `packages/eva/vision/app/main.py`
+  - Added support for command `insight_test` on `/infer`.
+  - Behavior:
+    1. If frame buffer has frames, force-trigger insight on latest frame (bypasses cooldown, still respects in-flight guard).
+    2. If buffer is empty, fallback to latest persisted clip under `insight.assets_dir` and call Executive `/insight` directly.
+  - Added helper `_collect_existing_asset_clip_for_test(...)`.
+  - Refactored insight request/emit into `_request_and_emit_insight(...)` for shared path.
+- `packages/ui/src/types.ts`
+  - Removed `severity` from `InsightSummary` type.
+- `packages/ui/src/main.tsx`
+  - Updated "Latest insight" panel rendering to no longer reference `summary.severity`.
+
+### Validation
+- `cd packages/eva && npm run build`
+- `cd packages/ui && npm run build`
+- `cd packages/eva/vision && python3 -m compileall -f app`
+- Deterministic regression harness (Vision TestClient + mocked Executive):
+  - send `{"type":"command","v":2,"name":"insight_test"}`
+  - receives protocol `insight` message
+  - counters increment (`insight_requested`, `insight_emitted`) with zero insight errors.
+
+## Post-Iteration Fix (2026-03-01) — Insight test reliability (error visibility + timeout + dedupe)
+
+### Observed
+- Manual WS command `insight_test` initially only returned `hello`; no visible result in UI.
+- Runtime diagnosis showed:
+  1) Vision error responses with `frame_id` but no frame-route were being dropped by Eva (`no route ... dropping Vision response`).
+  2) `insight_test` fallback reused existing clip IDs, so Eva insight relay dedupe could suppress repeated test emissions.
+  3) Vision->Executive timeout (`executive.timeout_ms=2000`) was too low for `/insight` model latency, causing frequent `EXECUTIVE_TIMEOUT` errors.
+
+### Changes
+- `packages/eva/src/server.ts`
+  - For Vision `error` messages with `frame_id` and missing frame route, fallback-forward the error to active UI client instead of dropping.
+- `packages/eva/vision/app/main.py`
+  - `insight_test` fallback now generates unique test clip IDs (`insight-test-<uuid>`) to avoid relay dedupe suppression.
+- `packages/eva/vision/settings.yaml`
+  - `executive.timeout_ms` increased from `2000` to `30000`.
+- `packages/eva/vision/app/config.py`
+  - default `executive.timeout_ms` raised to `30000`.
+
+### Validation
+- `cd packages/eva && npm run build`
+- `cd packages/ui && npm run build`
+- `cd packages/eva/vision && python3 -m compileall -f app`
+- Verified direct WS command returns actionable response path:
+  - either `insight` or explicit `error` (no silent drop).

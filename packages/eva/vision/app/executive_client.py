@@ -49,7 +49,6 @@ class ExecutiveInsightSummary(BaseModel):
     one_liner: str = Field(min_length=1)
     tts_response: str = Field(min_length=1)
     what_changed: list[str] = Field(min_length=1)
-    severity: str = Field(pattern="^(low|medium|high)$")
     tags: list[str] = Field(min_length=1)
 
 

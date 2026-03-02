@@ -4,7 +4,7 @@ server:
 
 executive:
   base_url: http://127.0.0.1:8791
-  timeout_ms: 2000
+  timeout_ms: 30000
 
 attention:
   window_ms: 15000
@@ -34,7 +34,7 @@ insight:
   max_frames: 6
   cooldown_ms: 5000
   post_wait_ms: 400
-  assets_dir: assets/insights
+  assets_dir: ../memory/working_memory_assets
   retention:
     max_clips: 200
     max_age_hours: 24

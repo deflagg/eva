@@ -101,7 +101,6 @@ Notes:
     "one_liner": "Two people crossed paths near the entry.",
     "tts_response": "Heads up, two people just crossed near the entry.",
     "what_changed": ["person entered", "person turned toward doorway"],
-    "severity": "medium",
     "tags": ["entry", "motion"]
   },
   "usage": {

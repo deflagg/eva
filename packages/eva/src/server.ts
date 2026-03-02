@@ -1102,12 +1102,20 @@ export function startServer(options: StartServerOptions): Server {
         if (message.type === 'error' && message.frame_id) {
           const targetClient = frameRouter.take(message.frame_id);
 
-          if (!targetClient) {
-            console.warn(`[eva] no route for frame_id ${message.frame_id}; dropping Vision response`);
+          if (targetClient) {
+            sendJson(targetClient, message);
             return;
           }
 
-          sendJson(targetClient, message);
+          if (activeUiClient && activeUiClient.readyState === WebSocket.OPEN) {
+            console.warn(
+              `[eva] no route for frame_id ${message.frame_id}; forwarding Vision error to active UI client`,
+            );
+            sendJson(activeUiClient, message);
+            return;
+          }
+
+          console.warn(`[eva] no route for frame_id ${message.frame_id}; dropping Vision response`);
           return;
         }
 

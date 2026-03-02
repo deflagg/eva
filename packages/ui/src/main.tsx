@@ -1511,10 +1511,7 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
           ) : (
             <>
               <p style={{ marginTop: 0, marginBottom: 8 }}>
-                <strong style={{ color: SEVERITY_COLOR[latestInsight.summary.severity] }}>
-                  {latestInsight.summary.severity.toUpperCase()}
-                </strong>{' '}
-                · {latestInsight.summary.one_liner}
+                {latestInsight.summary.one_liner}
               </p>
               <p style={{ marginTop: 0, marginBottom: 8, color: '#374151' }}>
                 <strong>Spoken line:</strong> {latestInsight.summary.tts_response}

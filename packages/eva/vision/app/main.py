@@ -6,6 +6,7 @@ import io
 import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -320,6 +321,61 @@ def _count_post_frames(clip_frames: list[BufferedFrame], trigger_frame_id: str) 
     return max(len(clip_frames) - trigger_index - 1, 0)
 
 
+def _collect_existing_asset_clip_for_test(
+    *,
+    assets_dir: Path,
+    max_frames: int,
+) -> tuple[str, list[dict[str, Any]]] | None:
+    try:
+        clip_dirs = [candidate for candidate in assets_dir.iterdir() if candidate.is_dir()]
+    except OSError:
+        return None
+
+    clip_dirs_with_mtime: list[tuple[Path, float]] = []
+    for clip_dir in clip_dirs:
+        try:
+            clip_dirs_with_mtime.append((clip_dir, clip_dir.stat().st_mtime))
+        except OSError:
+            continue
+
+    clip_dirs_with_mtime.sort(key=lambda item: item[1], reverse=True)
+
+    for clip_dir, _mtime in clip_dirs_with_mtime:
+        try:
+            frame_files = sorted(
+                [
+                    candidate
+                    for candidate in clip_dir.iterdir()
+                    if candidate.is_file() and candidate.suffix.lower() == ".jpg"
+                ],
+                key=lambda item: item.name,
+            )
+        except OSError:
+            continue
+
+        if not frame_files:
+            continue
+
+        selected_frames = frame_files[: max(1, max_frames)]
+        base_ts_ms = _current_time_ms()
+        refs: list[dict[str, Any]] = []
+        for index, frame_file in enumerate(selected_frames):
+            frame_id = frame_file.stem.strip() or f"frame-{index + 1}"
+            refs.append(
+                {
+                    "frame_id": frame_id,
+                    "ts_ms": base_ts_ms + index,
+                    "mime": "image/jpeg",
+                    "asset_rel_path": f"{clip_dir.name}/{frame_file.name}",
+                }
+            )
+
+        trigger_frame_id = refs[0]["frame_id"]
+        return trigger_frame_id, refs
+
+    return None
+
+
 async def _collect_insight_clip(
     *,
     config: AppConfig,
@@ -361,6 +417,50 @@ async def _collect_insight_clip(
             return []
 
     return clip_frames[: config.insight.max_frames]
+
+
+async def _request_and_emit_insight(
+    *,
+    executive_client: ExecutiveClient,
+    clip_id: str,
+    trigger_frame_id: str,
+    insight_frames: list[dict[str, Any]],
+    send_payload: Any,
+) -> None:
+    insight_response: ExecutiveInsightResponse
+    try:
+        insight_response = await executive_client.post_insight(
+            clip_id=clip_id,
+            trigger_frame_id=trigger_frame_id,
+            frames=insight_frames,
+        )
+    except ExecutiveClientError as exc:
+        _ws_runtime.insight_errors += 1
+        await send_payload(make_error(exc.code, str(exc), frame_id=trigger_frame_id))
+        return
+    except Exception as exc:  # pragma: no cover
+        _ws_runtime.insight_errors += 1
+        await send_payload(
+            make_error(
+                "EXECUTIVE_ERROR",
+                f"Executive /insight request failed: {exc}",
+                frame_id=trigger_frame_id,
+            )
+        )
+        return
+
+    insight_payload = make_insight(
+        clip_id=clip_id,
+        trigger_frame_id=trigger_frame_id,
+        summary=insight_response.summary.model_dump(exclude_none=True),
+        usage=insight_response.usage.model_dump(exclude_none=True),
+    )
+
+    delivered = await send_payload(insight_payload)
+    if delivered:
+        _ws_runtime.insight_emitted += 1
+        _ws_runtime.last_insight_ts_ms = _current_time_ms()
+        _ws_runtime.last_insight_clip_id = clip_id
 
 
 async def _run_insight_for_trigger(
@@ -423,40 +523,13 @@ async def _run_insight_for_trigger(
         for ref in clip_refs
     ]
 
-    insight_response: ExecutiveInsightResponse
-    try:
-        insight_response = await executive_client.post_insight(
-            clip_id=clip_id,
-            trigger_frame_id=trigger_frame_id,
-            frames=insight_frames,
-        )
-    except ExecutiveClientError as exc:
-        _ws_runtime.insight_errors += 1
-        await send_payload(make_error(exc.code, str(exc), frame_id=trigger_frame_id))
-        return
-    except Exception as exc:  # pragma: no cover
-        _ws_runtime.insight_errors += 1
-        await send_payload(
-            make_error(
-                "EXECUTIVE_ERROR",
-                f"Executive /insight request failed: {exc}",
-                frame_id=trigger_frame_id,
-            )
-        )
-        return
-
-    insight_payload = make_insight(
+    await _request_and_emit_insight(
+        executive_client=executive_client,
         clip_id=clip_id,
         trigger_frame_id=trigger_frame_id,
-        summary=insight_response.summary.model_dump(exclude_none=True),
-        usage=insight_response.usage.model_dump(exclude_none=True),
+        insight_frames=insight_frames,
+        send_payload=send_payload,
     )
-
-    delivered = await send_payload(insight_payload)
-    if delivered:
-        _ws_runtime.insight_emitted += 1
-        _ws_runtime.last_insight_ts_ms = _current_time_ms()
-        _ws_runtime.last_insight_clip_id = clip_id
 
 
 def _derive_frame_buffer_max_frames(config: AppConfig) -> int:
@@ -735,23 +808,23 @@ async def infer_socket(websocket: WebSocket) -> None:
             except Exception:
                 return False
 
-    def maybe_start_insight(trigger_frame_id: str) -> None:
+    def maybe_start_insight(trigger_frame_id: str, *, force: bool = False) -> bool:
         if not cfg.insight.enabled:
-            return
+            return False
 
         if executive_client is None:
-            return
-
-        now_ms = _current_time_ms()
-        if insight_state.last_started_ts_ms is not None:
-            elapsed_ms = now_ms - insight_state.last_started_ts_ms
-            if elapsed_ms < cfg.insight.cooldown_ms:
-                _ws_runtime.insight_cooldown_skipped += 1
-                return
+            return False
 
         if insight_state.in_flight_task is not None and not insight_state.in_flight_task.done():
             _ws_runtime.insight_busy_skipped += 1
-            return
+            return False
+
+        now_ms = _current_time_ms()
+        if not force and insight_state.last_started_ts_ms is not None:
+            elapsed_ms = now_ms - insight_state.last_started_ts_ms
+            if elapsed_ms < cfg.insight.cooldown_ms:
+                _ws_runtime.insight_cooldown_skipped += 1
+                return False
 
         insight_state.last_started_ts_ms = now_ms
         _ws_runtime.insight_requested += 1
@@ -783,6 +856,7 @@ async def infer_socket(websocket: WebSocket) -> None:
                 print(f"[vision] warning: unhandled insight task error: {exc}")
 
         task.add_done_callback(on_done)
+        return True
 
     _ws_runtime.connections_opened += 1
     _ws_runtime.active_connections += 1
@@ -939,6 +1013,71 @@ async def infer_socket(websocket: WebSocket) -> None:
                                 f"active_until_ms={active_until_ms} "
                                 f"window_ms={attention.window_ms} "
                                 f"buffer_depth={frame_buffer.stats().depth}"
+                            )
+                            continue
+
+                        if command.name == "insight_test":
+                            latest_frame = frame_buffer.get_latest()
+                            if latest_frame is not None:
+                                started = maybe_start_insight(latest_frame.frame_id, force=True)
+                                if not started:
+                                    await send_payload(
+                                        make_error(
+                                            "INSIGHT_BUSY",
+                                            "Insight test ignored: an insight request is already in flight.",
+                                            frame_id=latest_frame.frame_id,
+                                        )
+                                    )
+                                    continue
+
+                                print(
+                                    "[vision] insight_test: "
+                                    f"trigger_frame_id={latest_frame.frame_id} "
+                                    f"buffer_depth={frame_buffer.stats().depth}"
+                                )
+                                continue
+
+                            if executive_client is None:
+                                await send_payload(
+                                    make_error(
+                                        "EXECUTIVE_UNAVAILABLE",
+                                        "Insight test failed: executive client is unavailable.",
+                                        frame_id=frame_id,
+                                    )
+                                )
+                                continue
+
+                            existing_clip = await asyncio.to_thread(
+                                _collect_existing_asset_clip_for_test,
+                                assets_dir=clip_assets.assets_dir,
+                                max_frames=cfg.insight.max_frames,
+                            )
+                            if existing_clip is None:
+                                await send_payload(
+                                    make_error(
+                                        "INSIGHT_TEST_UNAVAILABLE",
+                                        "Insight test needs buffered frames or existing clip assets.",
+                                        frame_id=frame_id,
+                                    )
+                                )
+                                continue
+
+                            trigger_frame_id, insight_frames = existing_clip
+                            clip_id = f"insight-test-{uuid4()}"
+                            _ws_runtime.insight_requested += 1
+
+                            print(
+                                "[vision] insight_test using existing clip assets: "
+                                f"clip_id={clip_id} "
+                                f"frame_count={len(insight_frames)}"
+                            )
+
+                            await _request_and_emit_insight(
+                                executive_client=executive_client,
+                                clip_id=clip_id,
+                                trigger_frame_id=trigger_frame_id,
+                                insight_frames=insight_frames,
+                                send_payload=send_payload,
                             )
                             continue
 

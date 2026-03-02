@@ -68,7 +68,6 @@ When escalation is triggered and Executive `/insight` succeeds, Vision sends:
     "one_liner": "Something changed near the doorway",
     "tts_response": "I noticed motion near the doorway.",
     "what_changed": ["person entered frame"],
-    "severity": "medium",
     "tags": ["motion", "entryway"]
   },
   "usage": {
