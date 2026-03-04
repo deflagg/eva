@@ -544,9 +544,7 @@ async def listen_socket(ws: WebSocket) -> None:
                                 and presence_snapshot.preson_present
                                 and presence_snapshot.person_facing_me
                             ):
-                                accepted = True
-                                accept_reason = "presence"
-                                wake_match_reason = "presence_bypass"
+                                wake_match_reason = "presence_seen_phrase_required"
                         except ExecutiveClientError as exc:
                             _ws_stats.presence_check_errors += 1
                             wake_match_reason = "presence_error_phrase_required"
@@ -650,9 +648,9 @@ async def listen_socket(ws: WebSocket) -> None:
                                     f"detail={reference_result.detail}"
                                 )
 
-                                # Iteration 212: persist voiceprints only on intentional engagement
-                                # (wake_phrase/presence ACTIVE entry), never from ambient ACTIVE continuations.
-                                if accept_reason in {"wake_phrase", "presence"}:
+                                # Iteration 212: persist voiceprints only on intentional wake engagement
+                                # (wake_phrase ACTIVE entry), never from ambient ACTIVE continuations.
+                                if accept_reason == "wake_phrase":
                                     updated_voiceprint = voiceprint_store.upsert_from_reference(
                                         reference=reference_result.reference,
                                         observed_at_ms=utterance_decision_ts_ms,
@@ -694,8 +692,6 @@ async def listen_socket(ws: WebSocket) -> None:
 
                     if accept_reason == "wake_phrase":
                         _ws_stats.accepted_by_wake_phrase += 1
-                    elif accept_reason == "presence":
-                        _ws_stats.accepted_by_presence += 1
                     elif accept_reason == "active":
                         _ws_stats.accepted_by_active += 1
 

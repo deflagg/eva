@@ -1,0 +1,206 @@
+# Progress
+
+- Iteration 240 — ✅ Completed (2026-03-04)
+  - Cleaned wake-only intent branches/comments in `packages/eva/audio/app/main.py`.
+  - Updated voiceprint-upsert eligibility on new ACTIVE entry:
+    - from `if accept_reason in {"wake_phrase", "presence"}`
+    - to `if accept_reason == "wake_phrase"`
+  - Updated nearby comment language to wake-only entry semantics.
+  - Removed unreachable acceptance counter branch for `accept_reason == "presence"` in accepted-by-reason accounting (presence acceptance is no longer a valid idle-entry path).
+  - Verification:
+    - `cd packages/eva/audio && .venv/bin/python -m pytest -q tests/test_wake_and_gating.py`
+    - `cd packages/eva && npm run build`
+    - quick gating simulations via audio test harness (`.venv/bin/python` inline async snippets):
+      - presence=true/facing=true + no wake phrase => rejected (`messages=['hello']`, `utterances_rejected=1`)
+      - presence=true/facing=true + wake phrase => accepted (`messages=['hello','speech_transcript']`, `accepted_by_wake_phrase=1`).
+
+- Iteration 239 — ✅ Completed (2026-03-04)
+  - Updated wake-gating matrix tests in `packages/eva/audio/tests/test_wake_and_gating.py` to enforce wake-required idle entry policy.
+  - Renamed case:
+    - `test_gating_matrix_presence_true_no_phrase_accepts`
+    - -> `test_gating_matrix_presence_true_no_phrase_rejects`
+  - Updated assertions for presence=true/facing=true + no wake phrase:
+    - no `speech_transcript` emitted
+    - `accepted_by_presence == 0`
+    - `wake_phrase_checks == 1`
+    - `utterances_rejected == 1`
+  - Kept existing matrix coverage unchanged for:
+    - presence=false + phrase match => accepts
+    - presence=false + no phrase => rejects
+    - active-window continuation => accepts active utterances.
+  - Verification:
+    - `cd packages/eva/audio && .venv/bin/python -m pytest -q tests/test_wake_and_gating.py`
+    - `cd packages/eva && npm run build`
+
+- Iteration 238 — ✅ Completed (2026-03-04)
+  - Updated idle gating policy in `packages/eva/audio/app/main.py` to remove direct presence acceptance.
+  - In non-active gating, when presence is `found && preson_present && person_facing_me`, behavior is now diagnostic-only:
+    - sets `wake_match_reason="presence_seen_phrase_required"`
+    - does **not** set `accepted=True`
+    - does **not** set `accept_reason="presence"`
+  - Kept downstream flow unchanged:
+    - STT + wake phrase check still runs when not already accepted
+    - presence telemetry/counters continue to update
+    - `presence_error_phrase_required` behavior unchanged.
+  - Verification:
+    - `cd packages/eva/audio && python3 -m compileall -f app`
+    - `cd packages/eva/audio && .venv/bin/python -m unittest discover -s tests -v`
+      - expected matrix delta observed: old case `test_gating_matrix_presence_true_no_phrase_accepts` now fails because runtime correctly rejects presence-only idle entry (test update is Iteration 239).
+
+- Iteration 229 — ✅ Completed (2026-03-04)
+  - Added `logging` config schema to `packages/eva/src/config.ts` and wired it into `EvaConfigSchema` defaults.
+  - Added committed logging defaults to `packages/eva/eva.config.json`.
+  - Added `.gitignore` rule for `packages/eva/logs/**`.
+  - Verification:
+    - `cd packages/eva && npm run build`
+    - Created `packages/eva/logs/` manually and confirmed it is ignored by git.
+
+- Iteration 230 — ✅ Completed (2026-03-04)
+  - Added initial logging module files:
+    - `packages/eva/src/logging/types.ts`
+    - `packages/eva/src/logging/time.ts`
+    - `packages/eva/src/logging/LogManager.ts`
+  - Updated `packages/eva/src/index.ts` to:
+    - initialize `LogManager` using `config.logging`
+    - write lifecycle markers (`startup begin`, `config loaded`, `startup end`, `shutdown begin`, `shutdown end`)
+    - close log streams during shutdown
+  - Verification:
+    - `cd packages/eva && npm run build`
+    - `cd packages/eva && npm run dev`
+    - confirmed generated artifacts:
+      - `packages/eva/logs/latest.txt` (absolute runDir + trailing newline)
+      - `packages/eva/logs/runs/<runId>/eva.log`
+      - `packages/eva/logs/runs/<runId>/combined.log`
+
+- Iteration 231 — ✅ Completed (2026-03-04)
+  - Updated `packages/eva/src/subprocess/ManagedProcess.ts`:
+    - added `ManagedProcessLine` and optional `onLine` callback in options
+    - replaced chunk logging with `StringDecoder`-based buffered line splitting for stdout/stderr
+    - emits line payloads without trimming and flushes stream remainder on `end`
+    - retained temporary direct console echo per emitted line
+  - Updated `packages/eva/src/index.ts`:
+    - passed `onLine` callback to agent/vision/audio managed subprocesses
+    - wired callback to `logManager.logSubprocessLine(...)`
+  - Verification:
+    - `cd packages/eva && npm run build`
+    - stack run confirmed per-service log files populated:
+      - `packages/eva/logs/runs/<runId>/agent.log`
+      - `packages/eva/logs/runs/<runId>/vision.log`
+      - `packages/eva/logs/runs/<runId>/audio.log`
+    - `combined.log` includes interleaved subprocess records with timestamp + `[service] [stream]` tags
+
+- Iteration 232 — ✅ Completed (2026-03-04)
+  - Added `packages/eva/src/logging/RotatingFileWriter.ts`:
+    - size-based rotate-before-write using `Buffer.byteLength(record, 'utf8')`
+    - backup handling with `maxFiles` semantics (`.1..N` backups, active file separate)
+    - best-effort delete/rename warnings on rotation failures
+    - close-on-rotate and close-on-shutdown stream handling
+  - Updated `packages/eva/src/logging/LogManager.ts`:
+    - replaced plain write streams with `RotatingFileWriter` for all run log files:
+      - `eva.log`, `combined.log`, `agent.log`, `vision.log`, `audio.log`
+    - writes remain best-effort/non-blocking from caller perspective
+  - Verification:
+    - `cd packages/eva && npm run build`
+    - temporary local override with small rotation (`logging.rotation.maxBytes=500`, `maxFiles=2`) and high-volume subprocess output
+    - confirmed rotation artifacts in run dir, including:
+      - `vision.log`, `vision.log.1`, `vision.log.2`
+      - `combined.log`, `combined.log.1`, `combined.log.2`
+    - confirmed backup count never exceeded `maxFiles` (no `vision.log.3`)
+
+- Iteration 233 — ✅ Completed (2026-03-04)
+  - Updated `packages/eva/src/logging/LogManager.ts` to enforce run-directory retention in `init()`:
+    - added `retention` config capture from `LoggingConfig`
+    - added `pruneOldRuns(runsDir)` helper
+    - retention behavior:
+      - reads directories under `<baseDir>/runs`
+      - sorts by directory name ascending
+      - deletes oldest directories beyond `retention.maxRuns`
+      - uses `fs.rmSync(path, { recursive: true, force: true })`
+      - best-effort warnings on failures (never crashes startup)
+  - Verification:
+    - `cd packages/eva && npm run build`
+    - created 5 fake run directories under a temporary logging dir with `retention.maxRuns=3`
+    - started Eva once and confirmed runs were pruned to 3 newest directories
+
+- Iteration 234 — ✅ Completed (2026-03-04)
+  - Added `packages/eva/src/logging/ConsoleRenderer.ts`:
+    - colorized console rendering helper with timestamp support
+    - required public API methods:
+      - `echoEva(...)`
+      - `echoSubprocessLine(...)`
+      - `echoLifecycle(...)`
+  - Updated `packages/eva/src/index.ts` startup console flow:
+    - initializes `ConsoleRenderer` from `logging.console` config
+    - prints organized startup banner including:
+      - `runId`
+      - active log run directory
+      - Eva endpoints
+      - subprocess enabled flags + health URLs
+    - prints per-subprocess lifecycle progression markers:
+      - `starting...`
+      - `waiting for health...`
+      - `healthy...`
+    - prints explicit `eva listening...` lifecycle line after server startup
+  - Verification:
+    - `cd packages/eva && npm run build`
+    - startup run confirms banner + lifecycle markers appear in console
+
+- Iteration 235 — ✅ Completed (2026-03-04)
+  - Updated `packages/eva/src/logging/ConsoleRenderer.ts` to implement console mode filtering:
+    - `follow`: shows all subprocess stdout/stderr
+    - `service:<name>`: shows only that subprocess stream (`agent|vision|audio`), lifecycle always shown
+    - `compact` (default):
+      - always shows lifecycle
+      - always shows subprocess stderr
+      - shows subprocess stdout only when matching `/\b(warn|warning|error|failed|fatal)\b/i`
+      - suppresses empty subprocess lines in console
+  - Updated `packages/eva/src/index.ts` subprocess wiring:
+    - `handleSubprocessLine(...)` now routes subprocess console echo through `consoleRenderer.echoSubprocessLine(...)`
+    - `handleSubprocessLine(...)` continues to persist all subprocess lines via `logManager.logSubprocessLine(...)`
+  - Updated `packages/eva/src/subprocess/ManagedProcess.ts`:
+    - removed direct subprocess console printing from stream handlers
+    - no `console.*` calls remain in `ManagedProcess`
+    - child process `error`/`exit` events are emitted through `onLine` callback for centralized handling
+  - Verification:
+    - `cd packages/eva && npm run build`
+    - mode checks with controlled subprocess output:
+      - `logging.console.mode=compact`: observed lifecycle + stderr + heuristic stdout + exit lines; normal stdout suppressed
+      - `logging.console.mode=follow`: observed all subprocess stdout/stderr (including blank line)
+      - `logging.console.mode=service:vision`: observed only vision subprocess lines plus lifecycle lines
+
+- Iteration 236 — ✅ Completed (2026-03-04)
+  - Updated `packages/eva/src/index.ts` shutdown flow with narrated sequence + timings:
+    - added per-step shutdown narration and timing for:
+      - `close server`
+      - `stop audio`
+      - `stop vision`
+      - `stop agent`
+    - prints total shutdown duration
+    - always prints active log run directory at shutdown end (`shutdown logs: <runDir>`)
+    - ensures log flush path is invoked before process exit via `closeLogsSafely()`
+  - Updated signal handling for clearer force-exit behavior:
+    - second signal during shutdown now emits explicit message:
+      - `received <SIGNAL> during shutdown; forcing immediate exit`
+    - force-terminate path logs reason, force-kills remaining subprocesses, prints runDir, and flushes logs before exit
+  - Flush reliability fix in `packages/eva/src/logging/RotatingFileWriter.ts`:
+    - fixed close behavior so queued writes are not dropped during shutdown flush
+    - introduced `closing`/`closePromise` state to block new writes during close while allowing queued writes to drain first
+  - Verification:
+    - `cd packages/eva && npm run build`
+    - Ctrl+C/INT shutdown run confirms narrated step timings + runDir in console
+    - validated double-signal scenario prints explicit force-exit message during shutdown
+    - confirmed `eva.log` contains shutdown markers including step timings and final shutdown end record
+
+- Iteration 237 — ✅ Completed (2026-03-04)
+  - Updated root `README.md` docs to match current runtime behavior:
+    - corrected one-command subprocess mode note to include Audio startup when enabled
+    - documented centralized log location under `packages/eva/logs/runs/<runId>/`
+    - documented active run pointer file `packages/eva/logs/latest.txt`
+  - Added new runbook: `docs/logging-runbook.md`:
+    - how to switch/use console modes (`compact|follow|service:<name>`)
+    - rotation semantics including `maxFiles` backup-count meaning
+    - where to find per-service logs and combined logs
+    - quick operational checks for active run directory
+  - Verification:
+    - docs render/read cleanly
+    - `cd packages/eva && npm run build`

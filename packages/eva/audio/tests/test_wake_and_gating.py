@@ -313,7 +313,7 @@ class GatingFlowTests(unittest.IsolatedAsyncioTestCase):
 
         return ws, main._ws_stats
 
-    async def test_gating_matrix_presence_true_no_phrase_accepts(self) -> None:
+    async def test_gating_matrix_presence_true_no_phrase_rejects(self) -> None:
         config = _make_config(speaker_enabled=False)
         executive = _StubExecutiveClient(
             [PresenceSnapshot(found=True, preson_present=True, person_facing_me=True, age_ms=20, ts_ms=10)]
@@ -332,12 +332,12 @@ class GatingFlowTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(ws.accepted)
-        self.assertEqual(ws.sent_json[0]["type"], "hello")
-        self.assertTrue(any(msg.get("type") == "speech_transcript" for msg in ws.sent_json))
-        self.assertEqual(stats.accepted_by_presence, 1)
+        self.assertEqual([msg.get("type") for msg in ws.sent_json], ["hello"])
+        self.assertEqual(stats.accepted_by_presence, 0)
         self.assertEqual(stats.accepted_by_wake_phrase, 0)
-        self.assertEqual(stats.wake_phrase_checks, 0)
-        self.assertEqual(stats.utterances_rejected, 0)
+        self.assertEqual(stats.wake_phrase_checks, 1)
+        self.assertEqual(stats.utterances_rejected, 1)
+        self.assertEqual(stats.transcripts_emitted, 0)
         self.assertEqual(executive.calls, 1)
         self.assertEqual(stt.calls, 1)
 
