@@ -1,9 +1,10 @@
-# Eva + Vision + UI + Executive
+# Eva + Vision + Audio + UI + Executive
 
-This repository currently runs four primary components:
+This repository currently runs five primary components:
 
 - `packages/eva` — TypeScript gateway daemon (HTTP + WebSocket)
 - `packages/eva/vision` — Python WS-first vision runtime (`/infer`)
+- `packages/eva/audio` — Python WS-first audio runtime (`/listen`)
 - `packages/eva/executive` — Node executive/agent service
 - `packages/ui` — Vite + React web client
 
@@ -13,6 +14,7 @@ Protocol docs/schema live in `packages/protocol`.
 
 - Eva: `http://127.0.0.1:8787`
 - Vision: `http://127.0.0.1:8792`
+- Audio: `http://127.0.0.1:8793`
 - Executive: `http://127.0.0.1:8791`
 - UI dev server: `http://127.0.0.1:5173`
 
@@ -27,6 +29,11 @@ Protocol docs/schema live in `packages/protocol`.
 
 - `packages/eva/vision/settings.yaml` (committed)
 - `packages/eva/vision/settings.local.yaml` (optional local override, gitignored)
+
+### Audio (Dynaconf)
+
+- `packages/eva/audio/settings.yaml` (committed)
+- `packages/eva/audio/settings.local.yaml` (optional local override, gitignored)
 
 ### Executive (cosmiconfig + zod)
 
@@ -49,6 +56,7 @@ npm run dev
 ```
 
 If your Python path differs, override `subprocesses.vision.command` in `eva.config.local.json`.
+Audio runtime (`packages/eva/audio`) is started separately.
 
 ## Development run instructions
 
@@ -72,7 +80,17 @@ pip install -r requirements.txt
 python -m app.run
 ```
 
-### 3) Eva
+### 3) Audio
+
+```bash
+cd packages/eva/audio
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m app.run
+```
+
+### 4) Eva
 
 ```bash
 cd packages/eva
@@ -82,7 +100,7 @@ npm install
 npm run dev
 ```
 
-### 4) UI
+### 5) UI
 
 ```bash
 cd packages/ui
@@ -97,3 +115,42 @@ npm run dev
 - MotionGate trigger in Eva sends `attention_start` and force-forwards trigger frame to Vision WS.
 - Vision emits `frame_events` (`scene_caption`) and `insight` messages.
 - Eva forwards `scene_caption` events to Executive `/events` (fire-and-forget).
+- UI streams `audio_binary` messages to Eva (`/audio`), and Eva forwards to Audio (`/listen`).
+- Audio emits `speech_transcript` when utterance gating passes.
+
+## Audio wake behavior (transcript + presence bypass)
+
+- Wake activation is transcript-based (`wake.phrases`), not provider-based.
+- Non-active gating is:
+  - presence true/fresh (`preson_present && person_facing_me`) => accept without wake phrase
+  - otherwise STT transcript must match configured wake phrase.
+- See runbook: `docs/audio-transcript-wake-runbook.md`.
+
+## Presence source of truth (final)
+
+- Presence is produced in `insight.summary.presence` (`preson_present`, `person_facing_me`).
+- Executive `/presence` is insight-backed (freshness over latest persisted insight), not `presence_update` telemetry.
+- Vision no longer runs a dedicated OpenCV presence detector path.
+
+## Regression guardrails
+
+Run the static guardrail checks after presence/audio wake changes:
+
+```bash
+cd packages/eva
+npm run check:presence-guardrails
+npm run check:audio-wake-guardrails
+```
+
+`check:presence-guardrails` asserts:
+- protocol insight schema still carries presence fields,
+- Executive `/presence` remains insight-derived,
+- Vision does not depend on OpenCV presence detector plumbing.
+
+`check:audio-wake-guardrails` asserts:
+- no `pvporcupine` dependency in audio runtime,
+- no legacy wake provider keys in committed audio settings,
+- no Porcupine credential/runtime references in active audio runtime surfaces,
+- transcript wake docs/runbook stay aligned.
+
+For manual transcript wake verification steps, see `docs/audio-transcript-wake-runbook.md`.

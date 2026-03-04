@@ -1,6 +1,12 @@
 {
   "eva": {
-    "wsUrl": "ws://localhost:8787/eye"
+    "wsUrl": "ws://localhost:8787/eye",
+    "audioWsUrl": "ws://localhost:8787/audio"
+  },
+  "audioInput": {
+    "enabled": true,
+    "sampleRateHz": 16000,
+    "frameMs": 20
   },
   "speech": {
     "enabled": false,

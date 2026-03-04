@@ -39,7 +39,7 @@ import {
   WORKING_MEMORY_COMPACTION_TOOL_NAME,
   type WorkingMemoryCompactionPayload,
 } from './tools/working_memory_compaction.js';
-import { INSIGHT_TOOL, INSIGHT_TOOL_NAME, type InsightSummary } from './tools/insight.js';
+import { INSIGHT_TOOL, INSIGHT_TOOL_NAME, type InsightPresence, type InsightSummary } from './tools/insight.js';
 import { RESPOND_TOOL, RESPOND_TOOL_NAME, type RespondPayload } from './tools/respond.js';
 import { deriveLanceDbDir, getOrCreateTable, mergeUpsertById, openDb, queryTopK } from './memcontext/long_term/lancedb.js';
 import {
@@ -76,6 +76,7 @@ const RESPOND_LONG_TERM_MEMORY_TOKEN_BUDGET = 320;
 const WM_EVENT_SUMMARY_MAX_CHARS = 180;
 const WM_EVENT_SUMMARY_MAX_DATA_FIELDS = 4;
 const WM_EVENT_SUMMARY_MAX_VALUE_CHARS = 48;
+const PRESENCE_WINDOW_MS_DEFAULT = 1_500;
 const COMPACTION_PROMPT_MAX_ENTRIES = 240;
 const COMPACTION_PROMPT_MAX_LINE_CHARS = 220;
 const COMPACTION_PROMPT_MAX_TEXT_CHARS = 180;
@@ -210,11 +211,37 @@ const ShortTermSummaryRowSchema = z
   })
   .strict();
 
+const InsightPresencePersistenceSchema = z
+  .object({
+    preson_present: z.boolean(),
+    person_facing_me: z.boolean(),
+  })
+  .superRefine((value, ctx) => {
+    if (!value.preson_present && value.person_facing_me) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['person_facing_me'],
+        message: 'person_facing_me cannot be true when preson_present is false.',
+      });
+    }
+  });
+
+const InsightSummaryPersistenceSchema = z
+  .object({
+    one_liner: z.string().trim().min(1),
+    tts_response: z.string().trim().min(1),
+    what_changed: z.array(z.string().trim().min(1)).min(1),
+    tags: z.array(z.string().trim().min(1)).min(1),
+    presence: InsightPresencePersistenceSchema,
+  })
+  .strict();
+
 type InsightRequest = z.infer<typeof InsightRequestSchema>;
 type RespondRequest = z.infer<typeof RespondRequestSchema>;
 type RunJobRequest = z.infer<typeof RunJobRequestSchema>;
 type EventsIngestRequest = z.infer<typeof EventsIngestRequestSchema>;
 type WmEventSeverity = z.infer<typeof WmEventSeveritySchema>;
+type PersistedInsightSummary = z.infer<typeof InsightSummaryPersistenceSchema>;
 
 interface InsightModelFrame {
   frame_id?: string;
@@ -258,7 +285,7 @@ interface InsightUsage {
 }
 
 interface InsightResult {
-  summary: InsightSummary;
+  summary: PersistedInsightSummary;
   usage: InsightUsage;
 }
 
@@ -321,6 +348,8 @@ interface WorkingMemoryWmInsightEntry {
   one_liner: string;
   what_changed: string[];
   tags: string[];
+  presence: InsightPresence;
+  summary: PersistedInsightSummary;
   assets: WorkingMemoryInsightAssetRef[];
   narration?: string;
   usage: InsightUsage;
@@ -387,6 +416,12 @@ interface JobRuntimeState {
   lastCompletedAtMs: number | null;
   lastFailedAtMs: number | null;
   lastError: string | null;
+}
+
+interface LatestPresenceState {
+  ts_ms: number;
+  preson_present: boolean;
+  person_facing_me: boolean;
 }
 
 type JobsRuntimeState = Record<RunJobName, JobRuntimeState>;
@@ -1039,6 +1074,32 @@ function buildWorkingMemoryEventEntries(payload: EventsIngestRequest): WorkingMe
   }));
 }
 
+function parsePresenceWindowMs(rawValue: string | null): number {
+  if (rawValue === null || rawValue.trim().length === 0) {
+    return PRESENCE_WINDOW_MS_DEFAULT;
+  }
+
+  const parsed = Number(rawValue);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new HttpRequestError(400, 'INVALID_REQUEST', 'presence window_ms must be a positive integer.');
+  }
+
+  return parsed;
+}
+
+function validateInsightSummaryForPersistence(summary: unknown): PersistedInsightSummary {
+  const parsed = InsightSummaryPersistenceSchema.safeParse(summary);
+  if (!parsed.success) {
+    throw new HttpRequestError(
+      502,
+      'MODEL_INVALID_TOOL_ARGS',
+      `Invalid insight summary payload from model: ${parsed.error.message}`,
+    );
+  }
+
+  return parsed.data;
+}
+
 function buildWorkingMemoryInsightEntry(
   request: InsightRequest,
   insight: InsightResult,
@@ -1047,7 +1108,18 @@ function buildWorkingMemoryInsightEntry(
   const clipId = request.clip_id?.trim() || `clip-${randomUUID()}`;
   const triggerFrameId = request.trigger_frame_id?.trim() || request.frames[0]?.frame_id?.trim() || 'trigger-unknown';
 
-  const rawNarration = insight.summary.tts_response?.trim();
+  const summary: PersistedInsightSummary = {
+    one_liner: insight.summary.one_liner,
+    tts_response: insight.summary.tts_response,
+    what_changed: [...insight.summary.what_changed],
+    tags: [...insight.summary.tags],
+    presence: {
+      preson_present: insight.summary.presence.preson_present,
+      person_facing_me: insight.summary.presence.person_facing_me,
+    },
+  };
+
+  const rawNarration = summary.tts_response.trim();
 
   return {
     type: 'wm_insight',
@@ -1055,9 +1127,14 @@ function buildWorkingMemoryInsightEntry(
     source: 'vision',
     clip_id: clipId,
     trigger_frame_id: triggerFrameId,
-    one_liner: insight.summary.one_liner,
-    what_changed: [...insight.summary.what_changed],
-    tags: [...insight.summary.tags],
+    one_liner: summary.one_liner,
+    what_changed: [...summary.what_changed],
+    tags: [...summary.tags],
+    presence: {
+      preson_present: summary.presence.preson_present,
+      person_facing_me: summary.presence.person_facing_me,
+    },
+    summary,
     assets: request.frames.map((frame) => ({
       ...(frame.frame_id ? { frame_id: frame.frame_id } : {}),
       ...(typeof frame.ts_ms === 'number' ? { ts_ms: frame.ts_ms } : {}),
@@ -2460,12 +2537,13 @@ async function generateInsight(
   }
 
   const filteredTags = sanitizeInsightTags(summary.tags, tagWhitelist.allowedTagSet, tagWhitelist.fallbackTag);
+  const validatedSummary = validateInsightSummaryForPersistence({
+    ...summary,
+    tags: filteredTags,
+  });
 
   return {
-    summary: {
-      ...summary,
-      tags: filteredTags,
-    },
+    summary: validatedSummary,
     usage: extractUsage(assistantMessage),
   };
 }
@@ -2837,6 +2915,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
     jobName === 'compaction' ? 'COMPACTION_JOB_FAILED' : 'PROMOTION_JOB_FAILED';
 
   let lastInsightRequestAt: number | null = null;
+  let latestPresenceFromInsights: LatestPresenceState | null = null;
 
   const server = createServer((req, res) => {
     void (async () => {
@@ -2894,6 +2973,46 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
             lancedbDir,
             lancedbTables: [VECTOR_STORE_KINDS.experiences, VECTOR_STORE_KINDS.personality],
           },
+        });
+        return;
+      }
+
+      if (method === 'GET' && requestUrl.pathname === '/presence') {
+        let windowMs: number;
+        try {
+          windowMs = parsePresenceWindowMs(requestUrl.searchParams.get('window_ms'));
+        } catch (error) {
+          if (error instanceof HttpRequestError) {
+            sendError(res, error.statusCode, error.code, error.message, error.extra);
+            return;
+          }
+
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(res, 400, 'INVALID_REQUEST', message);
+          return;
+        }
+
+        const nowMs = Date.now();
+        const latestInsightAgeMs = latestPresenceFromInsights
+          ? Math.max(0, nowMs - latestPresenceFromInsights.ts_ms)
+          : windowMs + 1;
+
+        if (!latestPresenceFromInsights || latestInsightAgeMs > windowMs) {
+          sendJson(res, 200, {
+            found: false,
+            preson_present: false,
+            person_facing_me: false,
+            age_ms: latestInsightAgeMs,
+          });
+          return;
+        }
+
+        sendJson(res, 200, {
+          found: true,
+          preson_present: latestPresenceFromInsights.preson_present,
+          person_facing_me: latestPresenceFromInsights.person_facing_me,
+          ts_ms: latestPresenceFromInsights.ts_ms,
+          age_ms: latestInsightAgeMs,
         });
         return;
       }
@@ -3202,6 +3321,12 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
 
           await workingMemoryWriteQueue.run(async () => {
             await appendWorkingMemoryEntries(workingMemoryLogPath, [wmInsightEntry]);
+
+            latestPresenceFromInsights = {
+              ts_ms: wmInsightEntry.ts_ms,
+              preson_present: wmInsightEntry.presence.preson_present,
+              person_facing_me: wmInsightEntry.presence.person_facing_me,
+            };
           });
 
           sendJson(res, 200, {
@@ -3257,6 +3382,7 @@ export function startAgentServer(options: StartAgentServerOptions): Server {
   server.listen(config.server.port, () => {
     console.log(`[agent] listening on http://localhost:${config.server.port}`);
     console.log('[agent] health endpoint GET /health');
+    console.log('[agent] presence endpoint GET /presence?window_ms=1500 (insight-backed presence)');
     console.log('[agent] events endpoint POST /events (wm_event ingest via serial write queue)');
     console.log('[agent] jobs endpoint POST /jobs/run (canonical request values: compaction|promotion)');
     console.log('[agent] respond endpoint POST /respond (model tool-call + memory writes)');

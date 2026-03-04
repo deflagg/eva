@@ -114,6 +114,7 @@ export async function replayWorkingMemoryLog(
     }
 
     stats.parsed_entries += 1;
+
     records.push(normalized.data as ReplayableWorkingMemoryRecord);
   }
 

@@ -2,18 +2,21 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.com/eva/protocol-v2.schema.json",
   "title": "Eva Protocol v2",
-  "description": "JSON message schemas for Eva protocol control/event/messages and binary-frame metadata.",
+  "description": "JSON message schemas for Eva protocol control/event/messages and binary frame/audio metadata.",
   "type": "object",
   "oneOf": [
     { "$ref": "#/$defs/frame_binary_meta" },
+    { "$ref": "#/$defs/audio_binary_meta" },
     { "$ref": "#/$defs/frame_received" },
+    { "$ref": "#/$defs/audio_received" },
     { "$ref": "#/$defs/frame_events" },
     { "$ref": "#/$defs/error" },
     { "$ref": "#/$defs/hello" },
     { "$ref": "#/$defs/command" },
     { "$ref": "#/$defs/insight" },
     { "$ref": "#/$defs/text_output" },
-    { "$ref": "#/$defs/speech_output" }
+    { "$ref": "#/$defs/speech_output" },
+    { "$ref": "#/$defs/speech_transcript" }
   ],
   "$defs": {
     "version": {
@@ -48,6 +51,30 @@
         "image_bytes": { "type": "integer", "minimum": 1 }
       }
     },
+    "audio_binary_meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "v",
+        "chunk_id",
+        "ts_ms",
+        "mime",
+        "sample_rate_hz",
+        "channels",
+        "audio_bytes"
+      ],
+      "properties": {
+        "type": { "const": "audio_binary" },
+        "v": { "$ref": "#/$defs/version" },
+        "chunk_id": { "type": "string", "minLength": 1 },
+        "ts_ms": { "type": "integer", "minimum": 0 },
+        "mime": { "const": "audio/pcm_s16le" },
+        "sample_rate_hz": { "const": 16000 },
+        "channels": { "const": 1 },
+        "audio_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
     "frame_received_motion": {
       "type": "object",
       "additionalProperties": false,
@@ -78,6 +105,28 @@
         "queue_depth": { "type": "integer", "minimum": 0 },
         "dropped": { "type": "integer", "minimum": 0 },
         "motion": { "$ref": "#/$defs/frame_received_motion" }
+      }
+    },
+    "audio_received": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "v",
+        "chunk_id",
+        "ts_ms",
+        "accepted",
+        "queue_depth",
+        "dropped"
+      ],
+      "properties": {
+        "type": { "const": "audio_received" },
+        "v": { "$ref": "#/$defs/version" },
+        "chunk_id": { "type": "string", "minLength": 1 },
+        "ts_ms": { "type": "integer", "minimum": 0 },
+        "accepted": { "type": "boolean" },
+        "queue_depth": { "type": "integer", "minimum": 0 },
+        "dropped": { "type": "integer", "minimum": 0 }
       }
     },
     "event_entry": {
@@ -111,6 +160,15 @@
         }
       }
     },
+    "insight_presence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preson_present", "person_facing_me"],
+      "properties": {
+        "preson_present": { "type": "boolean" },
+        "person_facing_me": { "type": "boolean" }
+      }
+    },
     "insight_summary": {
       "type": "object",
       "additionalProperties": false,
@@ -125,7 +183,8 @@
         "tags": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
-        }
+        },
+        "presence": { "$ref": "#/$defs/insight_presence" }
       }
     },
     "insight_usage": {
@@ -223,6 +282,18 @@
         "meta": { "$ref": "#/$defs/speech_output_meta" }
       }
     },
+    "speech_transcript": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "v", "ts_ms", "text", "confidence"],
+      "properties": {
+        "type": { "const": "speech_transcript" },
+        "v": { "$ref": "#/$defs/version" },
+        "ts_ms": { "type": "integer", "minimum": 0 },
+        "text": { "type": "string", "minLength": 1 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
     "error": {
       "type": "object",
       "additionalProperties": false,
@@ -244,7 +315,7 @@
         "v": { "$ref": "#/$defs/version" },
         "role": {
           "type": "string",
-          "enum": ["ui", "eva", "vision"]
+          "enum": ["ui", "eva", "vision", "audio"]
         },
         "ts_ms": { "type": "integer", "minimum": 0 }
       }

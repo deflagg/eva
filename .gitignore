@@ -14,6 +14,8 @@ packages/ui/vite.config.d.ts
 packages/eva/vision/.venv/
 packages/eva/vision/**/__pycache__/
 packages/eva/vision/*.pt
+packages/eva/audio/.venv/
+packages/eva/audio/**/__pycache__/
 *.pyc
 
 # Local overrides / secrets

@@ -61,6 +61,7 @@ async function main(): Promise<void> {
 
   let agent: ManagedProcess | null = null;
   let vision: ManagedProcess | null = null;
+  let audio: ManagedProcess | null = null;
   let server: Server | null = null;
 
   let shutdownInFlight: Promise<void> | null = null;
@@ -81,6 +82,15 @@ async function main(): Promise<void> {
           console.error(`[eva] failed to close server: ${message}`);
         } finally {
           server = null;
+        }
+      }
+
+      if (audio) {
+        console.log('[eva] stopping audio...');
+        try {
+          await audio.stop();
+        } finally {
+          audio = null;
         }
       }
 
@@ -131,6 +141,12 @@ async function main(): Promise<void> {
       }
 
       server = null;
+    }
+
+    if (audio) {
+      console.warn('[eva] force-killing audio...');
+      audio.forceKill();
+      audio = null;
     }
 
     if (vision) {
@@ -232,10 +248,34 @@ async function main(): Promise<void> {
       console.log(`[eva] vision healthy at ${visionConfig.healthUrl}`);
     }
 
+    if (config.subprocesses.enabled && config.subprocesses.audio.enabled) {
+      const audioConfig = config.subprocesses.audio;
+      const audioCwd = resolveRepoPath(audioConfig.cwd);
+
+      console.log(`[eva] starting audio subprocess: ${audioConfig.command.join(' ')} (cwd=${audioCwd})`);
+
+      audio = new ManagedProcess({
+        name: 'audio',
+        cwd: audioCwd,
+        command: audioConfig.command,
+        healthUrl: audioConfig.healthUrl,
+        readyTimeoutMs: audioConfig.readyTimeoutMs,
+        shutdownTimeoutMs: audioConfig.shutdownTimeoutMs,
+      });
+
+      audio.start();
+
+      console.log(`[eva] waiting for audio health at ${audioConfig.healthUrl}...`);
+      await audio.waitForHealthy();
+      console.log(`[eva] audio healthy at ${audioConfig.healthUrl}`);
+    }
+
     server = startServer({
       port: config.server.port,
       eyePath: config.server.eyePath,
+      audioPath: config.server.audioPath,
       visionWsUrl: config.vision.wsUrl,
+      audioWsUrl: config.audio.wsUrl,
       stream: config.stream,
       motionGate: config.motionGate,
       insightRelay: config.insightRelay,

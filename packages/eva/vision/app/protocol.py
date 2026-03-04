@@ -82,11 +82,17 @@ class FrameEventsMessage(ProtocolMessage):
     events: list[EventEntry]
 
 
+class InsightPresence(BaseModel):
+    preson_present: bool
+    person_facing_me: bool
+
+
 class InsightSummary(BaseModel):
     one_liner: str = Field(min_length=1)
     tts_response: str = Field(min_length=1)
     what_changed: list[str]
     tags: list[str]
+    presence: InsightPresence | None = None
 
 
 class InsightUsage(BaseModel):

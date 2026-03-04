@@ -6,13 +6,17 @@ import { z } from 'zod';
 import {
   BinaryFrameDecodeError,
   CommandMessageSchema,
+  decodeBinaryAudioEnvelope,
   decodeBinaryFrameEnvelope,
+  makeAudioReceived,
   makeError,
   makeFrameReceived,
   makeHello,
   PROTOCOL_VERSION,
+  SpeechTranscriptMessageSchema,
   VisionInboundMessageSchema,
 } from './protocol.js';
+import { createAudioClient } from './audioClient.js';
 import { createVisionClient } from './visionClient.js';
 import { FrameRouter } from './router.js';
 import { FrameBroker } from './broker/frameBroker.js';
@@ -24,6 +28,7 @@ const AGENT_EVENTS_INGEST_TIMEOUT_MS = 400;
 const AGENT_EVENTS_INGEST_VERSION = 1;
 const AGENT_EVENTS_INGEST_WARN_COOLDOWN_MS = 10_000;
 const MOTION_TRIGGER_WARN_COOLDOWN_MS = 10_000;
+const AUDIO_ACK_SAMPLE_EVERY_N = 10;
 
 class RequestBodyTooLargeError extends Error {
   constructor(maxBodyBytes: number) {
@@ -63,7 +68,9 @@ class AgentRequestTimeoutError extends AgentRequestError {
 export interface StartServerOptions {
   port: number;
   eyePath: string;
+  audioPath: string;
   visionWsUrl: string;
+  audioWsUrl: string;
   stream: {
     broker: {
       enabled: boolean;
@@ -578,10 +585,12 @@ async function callAgentEventsIngest(agentBaseUrl: string, payload: AgentEventsI
 }
 
 export function startServer(options: StartServerOptions): Server {
-  const { port, eyePath, visionWsUrl, stream, motionGate, insightRelay, agent, text, speech } = options;
+  const { port, eyePath, audioPath, visionWsUrl, audioWsUrl, stream, motionGate, insightRelay, agent, text, speech } =
+    options;
 
   let lastSpeechRequestStartedAtMs: number | null = null;
   let activeUiClient: WebSocket | null = null;
+  let activeAudioClient: WebSocket | null = null;
   let lastAgentEventsIngestWarningAtMs: number | null = null;
 
   const speechCache = new Map<string, SpeechCacheEntry>();
@@ -1147,6 +1156,91 @@ export function startServer(options: StartServerOptions): Server {
 
   visionClient.connect();
 
+  const audioClient = createAudioClient({
+    url: audioWsUrl,
+    handlers: {
+      onOpen: () => {
+        console.log(`[eva] connected to Audio Runtime at ${audioWsUrl}`);
+      },
+      onClose: () => {
+        console.warn('[eva] Audio Runtime connection closed');
+      },
+      onReconnectScheduled: (delayMs) => {
+        console.warn(`[eva] scheduling Audio Runtime reconnect in ${delayMs}ms`);
+      },
+      onError: (error) => {
+        console.error(`[eva] Audio Runtime connection error: ${error.message}`);
+      },
+      onMessage: (payload) => {
+        if (!isRecord(payload)) {
+          return;
+        }
+
+        const type = payload.type;
+        if (type === 'hello') {
+          return;
+        }
+
+        if (type === 'error') {
+          const code = typeof payload.code === 'string' ? payload.code : 'UNKNOWN';
+          const message = typeof payload.message === 'string' ? payload.message : 'Unknown error';
+          console.warn(`[eva] Audio Runtime error: code=${code} message=${message}`);
+          return;
+        }
+
+        if (type === 'speech_transcript') {
+          const parsedTranscript = SpeechTranscriptMessageSchema.safeParse(payload);
+          if (!parsedTranscript.success) {
+            console.warn('[eva] Audio Runtime speech_transcript failed schema validation; dropping payload');
+            return;
+          }
+
+          const transcriptText = parsedTranscript.data.text.trim();
+          if (!transcriptText) {
+            console.warn('[eva] Audio Runtime speech_transcript was empty after trim; dropping payload');
+            return;
+          }
+
+          console.log(
+            `[eva] speech transcript received ts_ms=${parsedTranscript.data.ts_ms} confidence=${parsedTranscript.data.confidence.toFixed(3)}`,
+          );
+
+          void (async () => {
+            let agentResponse: AgentRespondResponse;
+            try {
+              agentResponse = await callAgentRespond(agent, {
+                text: transcriptText,
+                source: 'audio',
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              console.warn(`[eva] failed to process speech_transcript via agent /respond: ${message}`);
+              return;
+            }
+
+            const textOutputMessage = makeTextOutputMessage(agentResponse);
+
+            if (activeUiClient && activeUiClient.readyState === WebSocket.OPEN) {
+              sendJson(activeUiClient, textOutputMessage);
+              return;
+            }
+
+            console.warn(
+              `[eva] speech_transcript produced response request_id=${textOutputMessage.request_id}, but no active UI client was connected`,
+            );
+          })();
+
+          return;
+        }
+      },
+      onInvalidMessage: (raw) => {
+        console.warn(`[eva] received non-JSON payload from Audio Runtime: ${raw}`);
+      },
+    },
+  });
+
+  audioClient.connect();
+
   const sendAttentionStartToVision = (): boolean => {
     return visionClient.sendJson({
       type: 'command',
@@ -1167,7 +1261,8 @@ export function startServer(options: StartServerOptions): Server {
     return true;
   };
 
-  const wss = new WebSocketServer({ noServer: true });
+  const wssEye = new WebSocketServer({ noServer: true });
+  const wssAudio = new WebSocketServer({ noServer: true });
 
   const cleanupClientRoutes = (client: WebSocket, reason: string): void => {
     const removed = frameRouter.deleteByClient(client);
@@ -1179,17 +1274,24 @@ export function startServer(options: StartServerOptions): Server {
   server.on('upgrade', (request, socket, head) => {
     const requestUrl = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
 
-    if (requestUrl.pathname !== eyePath) {
-      socket.destroy();
+    if (requestUrl.pathname === eyePath) {
+      wssEye.handleUpgrade(request, socket, head, (ws) => {
+        wssEye.emit('connection', ws, request);
+      });
       return;
     }
 
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit('connection', ws, request);
-    });
+    if (requestUrl.pathname === audioPath) {
+      wssAudio.handleUpgrade(request, socket, head, (ws) => {
+        wssAudio.emit('connection', ws, request);
+      });
+      return;
+    }
+
+    socket.destroy();
   });
 
-  wss.on('connection', (ws) => {
+  wssEye.on('connection', (ws) => {
     if (activeUiClient && activeUiClient.readyState === WebSocket.OPEN) {
       sendJson(ws, makeError('SINGLE_CLIENT_ONLY', 'Only one UI client is supported in this iteration.'));
       ws.close(1008, 'single-client-only');
@@ -1380,9 +1482,80 @@ export function startServer(options: StartServerOptions): Server {
     });
   });
 
+  wssAudio.on('connection', (ws) => {
+    if (activeAudioClient && activeAudioClient.readyState === WebSocket.OPEN) {
+      sendJson(ws, makeError('SINGLE_AUDIO_CLIENT_ONLY', 'Only one audio client is supported in this iteration.'));
+      ws.close(1008, 'single-audio-client-only');
+      return;
+    }
+
+    activeAudioClient = ws;
+    sendJson(ws, makeHello('eva'));
+
+    let receivedAudioChunks = 0;
+    let droppedAudioChunks = 0;
+
+    ws.on('message', (data, isBinary) => {
+      if (!isBinary) {
+        // Iteration 200: ignore JSON/text payloads on /audio.
+        return;
+      }
+
+      const binaryPayload = rawDataToBuffer(data);
+
+      let decodedAudio;
+      try {
+        decodedAudio = decodeBinaryAudioEnvelope(binaryPayload);
+      } catch (error) {
+        droppedAudioChunks += 1;
+        const message = error instanceof Error ? error.message : 'Invalid binary audio payload.';
+        sendJson(ws, makeError('INVALID_AUDIO_BINARY', message));
+        return;
+      }
+
+      receivedAudioChunks += 1;
+
+      const accepted = audioClient.isConnected() && audioClient.sendBinary(binaryPayload);
+      if (!accepted) {
+        droppedAudioChunks += 1;
+      }
+
+      const shouldAck =
+        receivedAudioChunks === 1 || receivedAudioChunks % AUDIO_ACK_SAMPLE_EVERY_N === 0;
+
+      if (!shouldAck) {
+        return;
+      }
+
+      sendJson(
+        ws,
+        makeAudioReceived(decodedAudio.meta.chunk_id, {
+          accepted,
+          queue_depth: 0,
+          dropped: droppedAudioChunks,
+        }),
+      );
+    });
+
+    ws.on('close', () => {
+      if (activeAudioClient === ws) {
+        activeAudioClient = null;
+      }
+    });
+
+    ws.on('error', () => {
+      if (activeAudioClient === ws) {
+        activeAudioClient = null;
+      }
+    });
+  });
+
   server.listen(port, () => {
     console.log(`[eva] listening on http://localhost:${port}`);
     console.log(`[eva] websocket endpoint ws://localhost:${port}${eyePath}`);
+    console.log(`[eva] audio websocket endpoint ws://localhost:${port}${audioPath}`);
+    console.log(`[eva] audio ACK sampling first+everyN=${AUDIO_ACK_SAMPLE_EVERY_N}`);
+    console.log(`[eva] Audio Runtime target ${audioClient.getUrl()}`);
     console.log(`[eva] Vision target ${visionClient.getUrl()}`);
     console.log(
       `[eva] stream broker enabled=${stream.broker.enabled} maxFrames=${stream.broker.maxFrames} maxAgeMs=${stream.broker.maxAgeMs} maxBytes=${stream.broker.maxBytes}`,
@@ -1422,7 +1595,9 @@ export function startServer(options: StartServerOptions): Server {
     inFlightSpeechSynthesis.clear();
 
     visionClient.disconnect();
-    wss.close();
+    audioClient.disconnect();
+    wssEye.close();
+    wssAudio.close();
   });
 
   return server;

@@ -45,11 +45,17 @@ class ExecutiveInsightRequest(BaseModel):
     frames: list[ExecutiveClipFrame] = Field(min_length=1)
 
 
+class ExecutiveInsightPresence(BaseModel):
+    preson_present: bool
+    person_facing_me: bool
+
+
 class ExecutiveInsightSummary(BaseModel):
     one_liner: str = Field(min_length=1)
     tts_response: str = Field(min_length=1)
     what_changed: list[str] = Field(min_length=1)
     tags: list[str] = Field(min_length=1)
+    presence: ExecutiveInsightPresence | None = None
 
 
 class ExecutiveInsightUsage(BaseModel):

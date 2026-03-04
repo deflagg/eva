@@ -25,10 +25,18 @@ export interface UiSpeechConfig {
   autoSpeak: UiSpeechAutoSpeakConfig;
 }
 
+export interface UiAudioInputConfig {
+  enabled: boolean;
+  sampleRateHz: 16000;
+  frameMs: number;
+}
+
 export interface UiRuntimeConfig {
   eva: {
     wsUrl: string;
+    audioWsUrl: string;
   };
+  audioInput: UiAudioInputConfig;
   speech: UiSpeechConfig;
   debugOverlay?: UiDebugOverlayConfig;
 }
@@ -37,9 +45,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function assertWsUrl(value: unknown, sourcePath: string): string {
+function assertWsUrl(value: unknown, key: string, sourcePath: string): string {
   if (typeof value !== 'string' || value.trim() === '') {
-    throw new Error(`Invalid UI runtime config in ${sourcePath}: eva.wsUrl must be a non-empty string`);
+    throw new Error(`Invalid UI runtime config in ${sourcePath}: ${key} must be a non-empty string`);
   }
 
   const wsUrl = value.trim();
@@ -48,11 +56,11 @@ function assertWsUrl(value: unknown, sourcePath: string): string {
   try {
     parsed = new URL(wsUrl);
   } catch {
-    throw new Error(`Invalid UI runtime config in ${sourcePath}: eva.wsUrl must be a valid URL`);
+    throw new Error(`Invalid UI runtime config in ${sourcePath}: ${key} must be a valid URL`);
   }
 
   if (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') {
-    throw new Error(`Invalid UI runtime config in ${sourcePath}: eva.wsUrl must use ws:// or wss://`);
+    throw new Error(`Invalid UI runtime config in ${sourcePath}: ${key} must use ws:// or wss://`);
   }
 
   return wsUrl;
@@ -85,6 +93,14 @@ function assertNonEmptyString(value: unknown, key: string, sourcePath: string): 
 function assertNonNegativeInt(value: unknown, key: string, sourcePath: string): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
     throw new Error(`Invalid UI runtime config in ${sourcePath}: ${key} must be a non-negative integer`);
+  }
+
+  return value;
+}
+
+function assertPositiveInt(value: unknown, key: string, sourcePath: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`Invalid UI runtime config in ${sourcePath}: ${key} must be a positive integer`);
   }
 
   return value;
@@ -136,6 +152,41 @@ function parseDebugOverlay(value: unknown, sourcePath: string): UiDebugOverlayCo
   return {
     regions: parseOverlayMap(value.regions, 'debugOverlay.regions', sourcePath),
     lines: parseOverlayMap(value.lines, 'debugOverlay.lines', sourcePath),
+  };
+}
+
+function parseAudioInputConfig(value: unknown, sourcePath: string): UiAudioInputConfig {
+  if (value !== undefined && value !== null && !isRecord(value)) {
+    throw new Error(`Invalid UI runtime config in ${sourcePath}: audioInput must be an object`);
+  }
+
+  const audioInput = isRecord(value) ? value : {};
+
+  const enabled =
+    audioInput.enabled === undefined
+      ? true
+      : assertBoolean(audioInput.enabled, 'audioInput.enabled', sourcePath);
+
+  const sampleRateHzRaw =
+    audioInput.sampleRateHz === undefined
+      ? 16_000
+      : assertPositiveInt(audioInput.sampleRateHz, 'audioInput.sampleRateHz', sourcePath);
+
+  if (sampleRateHzRaw !== 16_000) {
+    throw new Error(`Invalid UI runtime config in ${sourcePath}: audioInput.sampleRateHz must be 16000`);
+  }
+
+  const sampleRateHz: 16000 = 16_000;
+
+  const frameMs =
+    audioInput.frameMs === undefined
+      ? 20
+      : assertPositiveInt(audioInput.frameMs, 'audioInput.frameMs', sourcePath);
+
+  return {
+    enabled,
+    sampleRateHz,
+    frameMs,
   };
 }
 
@@ -213,10 +264,25 @@ function parseRuntimeConfig(raw: unknown, sourcePath: string): UiRuntimeConfig {
     throw new Error(`Invalid UI runtime config in ${sourcePath}: missing eva section`);
   }
 
+  const wsUrl = assertWsUrl(eva.wsUrl, 'eva.wsUrl', sourcePath);
+
+  const audioWsUrl =
+    eva.audioWsUrl === undefined
+      ? (() => {
+          const parsed = new URL(wsUrl);
+          parsed.pathname = '/audio';
+          parsed.search = '';
+          parsed.hash = '';
+          return parsed.toString();
+        })()
+      : assertWsUrl(eva.audioWsUrl, 'eva.audioWsUrl', sourcePath);
+
   return {
     eva: {
-      wsUrl: assertWsUrl(eva.wsUrl, sourcePath),
+      wsUrl,
+      audioWsUrl,
     },
+    audioInput: parseAudioInputConfig(raw.audioInput, sourcePath),
     speech: parseSpeechConfig(raw.speech, sourcePath),
     debugOverlay: parseDebugOverlay(raw.debugOverlay, sourcePath),
   };

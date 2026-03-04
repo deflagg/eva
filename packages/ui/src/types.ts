@@ -3,7 +3,7 @@ export type InsightSeverity = 'low' | 'medium' | 'high';
 export interface HelloMessage {
   type: 'hello';
   v: 2;
-  role: 'ui' | 'eva' | 'vision';
+  role: 'ui' | 'eva' | 'vision' | 'audio';
   ts_ms: number;
 }
 
@@ -18,6 +18,17 @@ export interface FrameBinaryMeta {
   image_bytes: number;
 }
 
+export interface AudioBinaryMeta {
+  type: 'audio_binary';
+  v: 2;
+  chunk_id: string;
+  ts_ms: number;
+  mime: 'audio/pcm_s16le';
+  sample_rate_hz: 16000;
+  channels: 1;
+  audio_bytes: number;
+}
+
 export interface FrameReceivedMessage {
   type: 'frame_received';
   v: 2;
@@ -30,6 +41,16 @@ export interface FrameReceivedMessage {
     mad: number;
     triggered: boolean;
   };
+}
+
+export interface AudioReceivedMessage {
+  type: 'audio_received';
+  v: 2;
+  chunk_id: string;
+  ts_ms: number;
+  accepted: boolean;
+  queue_depth: number;
+  dropped: number;
 }
 
 export interface ErrorMessage {
@@ -63,11 +84,17 @@ export interface FrameEventsMessage {
   events: EventEntry[];
 }
 
+export interface InsightPresence {
+  preson_present: boolean;
+  person_facing_me: boolean;
+}
+
 export interface InsightSummary {
   one_liner: string;
   tts_response: string;
   what_changed: string[];
   tags: string[];
+  presence?: InsightPresence;
 }
 
 export interface InsightUsage {
@@ -128,6 +155,7 @@ export interface SpeechOutputMessage {
 export type ProtocolMessage =
   | HelloMessage
   | FrameReceivedMessage
+  | AudioReceivedMessage
   | FrameEventsMessage
   | ErrorMessage
   | InsightMessage

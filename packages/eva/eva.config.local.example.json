@@ -1,10 +1,14 @@
 {
   "server": {
     "port": 8787,
-    "eyePath": "/eye"
+    "eyePath": "/eye",
+    "audioPath": "/audio"
   },
   "vision": {
     "wsUrl": "ws://127.0.0.1:8792/infer"
+  },
+  "audio": {
+    "wsUrl": "ws://127.0.0.1:8793/listen"
   },
   "stream": {
     "broker": {
@@ -78,6 +82,18 @@
         "app.run"
       ],
       "healthUrl": "http://127.0.0.1:8792/health",
+      "readyTimeoutMs": 120000,
+      "shutdownTimeoutMs": 10000
+    },
+    "audio": {
+      "enabled": true,
+      "cwd": "packages/eva/audio",
+      "command": [
+        ".venv/bin/python",
+        "-m",
+        "app.run"
+      ],
+      "healthUrl": "http://127.0.0.1:8793/health",
       "readyTimeoutMs": 120000,
       "shutdownTimeoutMs": 10000
     }

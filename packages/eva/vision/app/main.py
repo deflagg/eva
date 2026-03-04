@@ -244,26 +244,26 @@ def _warn_executive_forward_failure(reason: str) -> None:
         return
 
     _last_executive_warning_ts_ms = now_ms
-    print(f"[vision] warning: failed to forward scene_caption to executive /events: {reason}")
+    print(f"[vision] warning: failed to forward event to executive /events: {reason}")
 
 
-def _normalize_scene_caption_for_events_ingest(scene_caption_event: dict[str, object]) -> dict[str, object]:
-    name = scene_caption_event.get("name")
-    ts_ms = scene_caption_event.get("ts_ms")
-    severity = scene_caption_event.get("severity")
-    data = scene_caption_event.get("data")
+def _normalize_event_for_events_ingest(event: dict[str, object]) -> dict[str, object]:
+    name = event.get("name")
+    ts_ms = event.get("ts_ms")
+    severity = event.get("severity")
+    data = event.get("data")
 
     if not isinstance(name, str) or not name.strip():
-        raise ValueError("scene_caption event name is invalid")
+        raise ValueError("event name is invalid")
 
     if not isinstance(ts_ms, int) or ts_ms < 0:
-        raise ValueError("scene_caption event ts_ms is invalid")
+        raise ValueError("event ts_ms is invalid")
 
     if severity not in {"low", "medium", "high"}:
-        raise ValueError("scene_caption event severity is invalid")
+        raise ValueError("event severity is invalid")
 
     if not isinstance(data, dict):
-        raise ValueError("scene_caption event data is invalid")
+        raise ValueError("event data is invalid")
 
     return {
         "name": name,
@@ -273,20 +273,20 @@ def _normalize_scene_caption_for_events_ingest(scene_caption_event: dict[str, ob
     }
 
 
-async def _forward_scene_caption_event_to_executive(
+async def _forward_event_to_executive(
     *,
     executive_client: ExecutiveClient | None,
     frame_id: str,
-    scene_caption_event: dict[str, object],
+    event: dict[str, object],
 ) -> None:
     if executive_client is None:
         return
 
     try:
-        normalized_event = _normalize_scene_caption_for_events_ingest(scene_caption_event)
+        normalized_event = _normalize_event_for_events_ingest(event)
     except Exception as exc:
         _ws_runtime.executive_events_failed += 1
-        _warn_executive_forward_failure(f"invalid scene_caption event shape: {exc}")
+        _warn_executive_forward_failure(f"invalid event shape: {exc}")
         return
 
     try:
@@ -449,11 +449,14 @@ async def _request_and_emit_insight(
         )
         return
 
+    summary_payload = insight_response.summary.model_dump(exclude_none=True)
+    usage_payload = insight_response.usage.model_dump(exclude_none=True)
+
     insight_payload = make_insight(
         clip_id=clip_id,
         trigger_frame_id=trigger_frame_id,
-        summary=insight_response.summary.model_dump(exclude_none=True),
-        usage=insight_response.usage.model_dump(exclude_none=True),
+        summary=summary_payload,
+        usage=usage_payload,
     )
 
     delivered = await send_payload(insight_payload)
@@ -924,6 +927,7 @@ async def infer_socket(websocket: WebSocket) -> None:
                     )
 
                 events: list[dict[str, object]] = []
+
                 try:
                     scene_caption_emission = await _build_scene_caption_event(
                         caption_cfg=cfg.caption,
@@ -962,10 +966,10 @@ async def infer_socket(websocket: WebSocket) -> None:
                     )
 
                     asyncio.create_task(
-                        _forward_scene_caption_event_to_executive(
+                        _forward_event_to_executive(
                             executive_client=executive_client,
                             frame_id=envelope.meta.frame_id,
-                            scene_caption_event=scene_caption_emission.event,
+                            event=scene_caption_emission.event,
                         )
                     )
 

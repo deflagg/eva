@@ -1,16 +1,20 @@
 # Eva Protocol (v2)
 
-Control/events are JSON over WebSocket. Frame transport (UI -> Eva -> Vision) uses a binary envelope.
+Control/events are JSON over WebSocket. Binary transport (for camera frames and mic chunks) uses a shared envelope format.
+
+## Binary Envelope Format
+
+A binary payload is sent as one WebSocket message with layout:
+
+1. 4-byte unsigned big-endian metadata length `N`
+2. `N` bytes UTF-8 JSON metadata
+3. Remaining bytes raw payload bytes
+
+---
 
 ## Message Types
 
 ### 1) `frame_binary` envelope (UI -> Eva -> Vision)
-
-Each frame is sent as one binary WebSocket message with layout:
-
-1. 4-byte unsigned big-endian metadata length `N`
-2. `N` bytes UTF-8 JSON metadata
-3. Remaining bytes raw JPEG payload
 
 Metadata shape:
 
@@ -31,7 +35,28 @@ Rules:
 - `image_bytes` must match payload byte length.
 - `mime` is currently fixed to `image/jpeg`.
 
-### 2) `frame_received` (Eva -> UI)
+### 2) `audio_binary` envelope (UI -> Eva -> Audio Runtime)
+
+Metadata shape:
+
+```json
+{
+  "type": "audio_binary",
+  "v": 2,
+  "chunk_id": "550e8400-e29b-41d4-a716-446655440000",
+  "ts_ms": 1700000000000,
+  "mime": "audio/pcm_s16le",
+  "sample_rate_hz": 16000,
+  "channels": 1,
+  "audio_bytes": 640
+}
+```
+
+Rules:
+- `audio_bytes` must match payload byte length.
+- Transport is PCM16 little-endian mono at 16kHz (`mime=audio/pcm_s16le`, `sample_rate_hz=16000`, `channels=1`).
+
+### 3) `frame_received` (Eva -> UI)
 
 Ingress ACK emitted by Eva immediately after frame enqueue/reject decision.
 
@@ -55,7 +80,23 @@ Notes:
 - This is a receipt signal, not Vision inference completion.
 - `motion` is optional MotionGate telemetry.
 
-### 3) `frame_events` (Vision -> Eva -> UI)
+### 4) `audio_received` (Eva -> UI)
+
+Ingress ACK emitted by Eva after audio chunk decode/accept decision.
+
+```json
+{
+  "type": "audio_received",
+  "v": 2,
+  "chunk_id": "550e8400-e29b-41d4-a716-446655440000",
+  "ts_ms": 1700000000001,
+  "accepted": true,
+  "queue_depth": 0,
+  "dropped": 0
+}
+```
+
+### 5) `frame_events` (Vision -> Eva -> UI)
 
 ```json
 {
@@ -88,7 +129,7 @@ Notes:
 }
 ```
 
-### 4) `insight` (Vision -> Eva -> UI)
+### 6) `insight` (Vision -> Eva -> UI)
 
 ```json
 {
@@ -101,7 +142,11 @@ Notes:
     "one_liner": "Two people crossed paths near the entry.",
     "tts_response": "Heads up, two people just crossed near the entry.",
     "what_changed": ["person entered", "person turned toward doorway"],
-    "tags": ["entry", "motion"]
+    "tags": ["entry", "motion"],
+    "presence": {
+      "preson_present": true,
+      "person_facing_me": true
+    }
   },
   "usage": {
     "input_tokens": 812,
@@ -111,7 +156,25 @@ Notes:
 }
 ```
 
-### 5) `text_output` (Eva -> UI)
+Notes:
+- `summary.presence` is part of the canonical insight summary shape.
+- `summary.presence` must include both `preson_present` and `person_facing_me`.
+- `person_facing_me` should be `false` when `preson_present` is `false`.
+- Field name is intentionally `preson_present` (compatibility spelling).
+
+### 7) `speech_transcript` (Audio Runtime -> Eva)
+
+```json
+{
+  "type": "speech_transcript",
+  "v": 2,
+  "ts_ms": 1700000000000,
+  "text": "what time is it",
+  "confidence": 0.8
+}
+```
+
+### 8) `text_output` (Eva -> UI)
 
 ```json
 {
@@ -130,7 +193,7 @@ Notes:
 }
 ```
 
-### 6) `speech_output` (Eva -> UI)
+### 9) `speech_output` (Eva -> UI)
 
 ```json
 {
@@ -152,7 +215,7 @@ Notes:
 }
 ```
 
-### 7) `command` (UI -> Eva -> Vision)
+### 10) `command` (UI -> Eva -> Vision)
 
 ```json
 {
@@ -162,7 +225,7 @@ Notes:
 }
 ```
 
-### 8) `error` (any direction)
+### 11) `error` (any direction)
 
 ```json
 {
@@ -174,16 +237,18 @@ Notes:
 }
 ```
 
-### 9) `hello` (optional/debug)
+### 12) `hello` (optional/debug)
 
 ```json
 {
   "type": "hello",
   "v": 2,
-  "role": "vision",
+  "role": "audio",
   "ts_ms": 1700000000000
 }
 ```
+
+Valid roles: `ui | eva | vision | audio`
 
 ## Notes
 

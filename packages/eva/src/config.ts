@@ -28,6 +28,10 @@ const VisionWsConfigSchema = z.object({
   wsUrl: WsUrlSchema,
 });
 
+const AudioWsConfigSchema = z.object({
+  wsUrl: WsUrlSchema.default('ws://127.0.0.1:8793/listen'),
+});
+
 const CommandSchema = z
   .array(z.string().trim().min(1, 'command entries must be non-empty strings'))
   .min(1, 'command must contain at least one entry');
@@ -98,6 +102,15 @@ const VisionSubprocessConfigSchema = z.object({
   shutdownTimeoutMs: PositiveTimeoutMsSchema.default(10_000),
 });
 
+const AudioSubprocessConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  cwd: z.string().trim().min(1).default('packages/eva/audio'),
+  command: CommandSchema.default(['.venv/bin/python', '-m', 'app.run']),
+  healthUrl: HttpUrlSchema.default('http://127.0.0.1:8793/health'),
+  readyTimeoutMs: PositiveTimeoutMsSchema.default(120_000),
+  shutdownTimeoutMs: PositiveTimeoutMsSchema.default(10_000),
+});
+
 const SubprocessesConfigSchema = z.object({
   enabled: z.boolean().default(false),
   agent: AgentSubprocessConfigSchema.default({
@@ -113,6 +126,14 @@ const SubprocessesConfigSchema = z.object({
     cwd: 'packages/eva/vision',
     command: ['.venv/bin/python', '-m', 'app.run'],
     healthUrl: 'http://127.0.0.1:8792/health',
+    readyTimeoutMs: 120_000,
+    shutdownTimeoutMs: 10_000,
+  }),
+  audio: AudioSubprocessConfigSchema.default({
+    enabled: true,
+    cwd: 'packages/eva/audio',
+    command: ['.venv/bin/python', '-m', 'app.run'],
+    healthUrl: 'http://127.0.0.1:8793/health',
     readyTimeoutMs: 120_000,
     shutdownTimeoutMs: 10_000,
   }),
@@ -166,8 +187,16 @@ const EvaConfigSchema = z.object({
       .min(1)
       .default('/eye')
       .refine((value) => value.startsWith('/'), 'server.eyePath must start with "/"'),
+    audioPath: z
+      .string()
+      .min(1)
+      .default('/audio')
+      .refine((value) => value.startsWith('/'), 'server.audioPath must start with "/"'),
   }),
   vision: VisionWsConfigSchema,
+  audio: AudioWsConfigSchema.default({
+    wsUrl: 'ws://127.0.0.1:8793/listen',
+  }),
   stream: StreamConfigSchema.default({
     broker: {
       enabled: true,
@@ -232,6 +261,14 @@ const EvaConfigSchema = z.object({
       cwd: 'packages/eva/vision',
       command: ['.venv/bin/python', '-m', 'app.run'],
       healthUrl: 'http://127.0.0.1:8792/health',
+      readyTimeoutMs: 120_000,
+      shutdownTimeoutMs: 10_000,
+    },
+    audio: {
+      enabled: true,
+      cwd: 'packages/eva/audio',
+      command: ['.venv/bin/python', '-m', 'app.run'],
+      healthUrl: 'http://127.0.0.1:8793/health',
       readyTimeoutMs: 120_000,
       shutdownTimeoutMs: 10_000,
     },

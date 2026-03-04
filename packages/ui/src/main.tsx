@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 
 import { captureJpegFrame, isCameraSupported, startCamera, stopCamera } from './camera';
 import { loadUiRuntimeConfig, type UiDebugOverlayConfig, type UiRuntimeConfig } from './config';
+import { encodeBinaryAudioEnvelope } from './audioBinary';
 import { encodeBinaryFrameEnvelope } from './frameBinary';
 import { clearOverlay, drawDebugGeometryOverlay } from './overlay';
 import {
@@ -12,6 +13,8 @@ import {
   type SpeechClient,
 } from './speech';
 import type {
+  AudioBinaryMeta,
+  AudioReceivedMessage,
   EventEntry,
   FrameBinaryMeta,
   FrameEventsMessage,
@@ -25,6 +28,7 @@ import { createEvaWsClient, type EvaWsClient, type WsConnectionStatus } from './
 
 type LogDirection = 'system' | 'outgoing' | 'incoming';
 type CameraStatus = 'idle' | 'starting' | 'running' | 'error';
+type MicStatus = 'idle' | 'starting' | 'running' | 'error';
 
 interface AppProps {
   runtimeConfig: UiRuntimeConfig;
@@ -94,6 +98,13 @@ const CAMERA_STATUS_COLOR: Record<CameraStatus, string> = {
   error: '#b91c1c',
 };
 
+const MIC_STATUS_COLOR: Record<MicStatus, string> = {
+  idle: '#374151',
+  starting: '#92400e',
+  running: '#166534',
+  error: '#b91c1c',
+};
+
 const SEVERITY_COLOR: Record<InsightSeverity, string> = {
   low: '#166534',
   medium: '#92400e',
@@ -104,6 +115,8 @@ const FRAME_TIMEOUT_MS = 500;
 const FRAME_LOOP_INTERVAL_MS = 100;
 const EVENT_FEED_LIMIT = 60;
 const SURPRISE_FEED_LIMIT = 30;
+const AUDIO_ACK_LOG_SAMPLE_EVERY_N = 10;
+const MIC_PROCESSOR_BUFFER_SIZE = 4096;
 
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -204,6 +217,124 @@ function isFrameReceivedMessage(message: unknown): message is FrameReceivedMessa
   );
 }
 
+function isAudioReceivedMessage(message: unknown): message is AudioReceivedMessage {
+  if (!message || typeof message !== 'object') {
+    return false;
+  }
+
+  const candidate = message as Record<string, unknown>;
+
+  return (
+    candidate.type === 'audio_received' &&
+    candidate.v === 2 &&
+    typeof candidate.chunk_id === 'string' &&
+    typeof candidate.ts_ms === 'number' &&
+    typeof candidate.accepted === 'boolean' &&
+    typeof candidate.queue_depth === 'number' &&
+    typeof candidate.dropped === 'number'
+  );
+}
+
+type AudioContextConstructor = new (contextOptions?: AudioContextOptions) => AudioContext;
+
+function isMicSupported(): boolean {
+  if (typeof navigator === 'undefined' || typeof window === 'undefined') {
+    return false;
+  }
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return false;
+  }
+
+  const contextCtor = (window.AudioContext ??
+    (window as unknown as { webkitAudioContext?: AudioContextConstructor }).webkitAudioContext) as
+    | AudioContextConstructor
+    | undefined;
+
+  return typeof contextCtor === 'function';
+}
+
+function createBrowserAudioContext(sampleRateHz: number): AudioContext {
+  const contextCtor = (window.AudioContext ??
+    (window as unknown as { webkitAudioContext?: AudioContextConstructor }).webkitAudioContext) as
+    | AudioContextConstructor
+    | undefined;
+
+  if (!contextCtor) {
+    throw new Error('AudioContext API is unavailable in this browser.');
+  }
+
+  return new contextCtor({ sampleRate: sampleRateHz });
+}
+
+function downsampleFloat32Mono(
+  input: Float32Array,
+  inputSampleRateHz: number,
+  outputSampleRateHz: number,
+): Float32Array {
+  if (outputSampleRateHz <= 0 || inputSampleRateHz <= 0) {
+    throw new Error('Invalid sample rate provided for downsampling.');
+  }
+
+  if (inputSampleRateHz === outputSampleRateHz) {
+    return input.slice();
+  }
+
+  if (inputSampleRateHz < outputSampleRateHz) {
+    throw new Error(
+      `Upsampling is not supported (input=${inputSampleRateHz}Hz, output=${outputSampleRateHz}Hz).`,
+    );
+  }
+
+  if (input.length === 0) {
+    return new Float32Array(0);
+  }
+
+  const sampleRateRatio = inputSampleRateHz / outputSampleRateHz;
+  const outputLength = Math.floor(input.length / sampleRateRatio);
+  const output = new Float32Array(outputLength);
+
+  let inputIndex = 0;
+
+  for (let outputIndex = 0; outputIndex < outputLength; outputIndex += 1) {
+    const nextInputIndex = Math.min(input.length, Math.round((outputIndex + 1) * sampleRateRatio));
+
+    let sum = 0;
+    let count = 0;
+
+    for (; inputIndex < nextInputIndex; inputIndex += 1) {
+      sum += input[inputIndex];
+      count += 1;
+    }
+
+    output[outputIndex] = count > 0 ? sum / count : 0;
+  }
+
+  return output;
+}
+
+function convertFloat32ToPcm16Bytes(samples: Float32Array): Uint8Array {
+  const outputBuffer = new ArrayBuffer(samples.length * 2);
+  const view = new DataView(outputBuffer);
+
+  for (let index = 0; index < samples.length; index += 1) {
+    const clamped = Math.max(-1, Math.min(1, samples[index]));
+    const scaled = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+    view.setInt16(index * 2, Math.round(scaled), true);
+  }
+
+  return new Uint8Array(outputBuffer);
+}
+
+function isInsightPresence(value: unknown): value is NonNullable<InsightMessage['summary']['presence']> {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.preson_present === 'boolean' && typeof candidate.person_facing_me === 'boolean';
+}
+
 function isInsightMessage(message: unknown): message is InsightMessage {
   if (!message || typeof message !== 'object') {
     return false;
@@ -218,6 +349,14 @@ function isInsightMessage(message: unknown): message is InsightMessage {
   }
 
   const summaryRecord = summary as Record<string, unknown>;
+  const whatChanged = summaryRecord.what_changed;
+  const tags = summaryRecord.tags;
+  const presence = summaryRecord.presence;
+
+  const whatChangedValid =
+    Array.isArray(whatChanged) && whatChanged.every((item) => typeof item === 'string' && item.trim().length > 0);
+  const tagsValid = Array.isArray(tags) && tags.every((item) => typeof item === 'string' && item.trim().length > 0);
+  const presenceValid = presence === undefined || isInsightPresence(presence);
 
   return (
     candidate.type === 'insight' &&
@@ -225,7 +364,10 @@ function isInsightMessage(message: unknown): message is InsightMessage {
     typeof candidate.clip_id === 'string' &&
     typeof candidate.trigger_frame_id === 'string' &&
     typeof summaryRecord.one_liner === 'string' &&
-    typeof summaryRecord.tts_response === 'string'
+    typeof summaryRecord.tts_response === 'string' &&
+    whatChangedValid &&
+    tagsValid &&
+    presenceValid
   );
 }
 
@@ -446,6 +588,8 @@ function normalizeSpeechText(text: string): string {
 
 function App({ runtimeConfig }: AppProps): JSX.Element {
   const evaWsUrl = runtimeConfig.eva.wsUrl;
+  const audioWsUrl = runtimeConfig.eva.audioWsUrl;
+  const audioInputConfig = runtimeConfig.audioInput;
   const debugOverlayConfig = runtimeConfig.debugOverlay;
   const speechConfig = runtimeConfig.speech;
 
@@ -457,6 +601,9 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   );
 
   const [status, setStatus] = React.useState<WsConnectionStatus>('connecting');
+  const [audioStatus, setAudioStatus] = React.useState<WsConnectionStatus>(
+    audioInputConfig.enabled ? 'connecting' : 'disconnected',
+  );
   const [logs, setLogs] = React.useState<LogEntry[]>([]);
   const [connectionAttempt, setConnectionAttempt] = React.useState(0);
 
@@ -467,6 +614,13 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const [cameraStatus, setCameraStatus] = React.useState<CameraStatus>('idle');
   const [cameraError, setCameraError] = React.useState<string | null>(null);
   const [streamingEnabled, setStreamingEnabled] = React.useState(false);
+
+  const [micStatus, setMicStatus] = React.useState<MicStatus>('idle');
+  const [micError, setMicError] = React.useState<string | null>(null);
+  const [audioChunksSent, setAudioChunksSent] = React.useState(0);
+  const [audioChunksAcked, setAudioChunksAcked] = React.useState(0);
+  const [audioDropped, setAudioDropped] = React.useState(0);
+  const [lastAudioAckQueueDepth, setLastAudioAckQueueDepth] = React.useState<number | null>(null);
 
   const [framesSent, setFramesSent] = React.useState(0);
   const [framesAcked, setFramesAcked] = React.useState(0);
@@ -488,13 +642,24 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const [speechBusy, setSpeechBusy] = React.useState(false);
 
   const cameraSupported = React.useMemo(() => isCameraSupported(), []);
+  const micSupported = React.useMemo(() => isMicSupported(), []);
+  const audioFrameSamples = React.useMemo(
+    () => Math.max(1, Math.round((audioInputConfig.sampleRateHz * audioInputConfig.frameMs) / 1000)),
+    [audioInputConfig.frameMs, audioInputConfig.sampleRateHz],
+  );
   const debugOverlayConfigured = React.useMemo(() => hasDebugOverlayGeometry(debugOverlayConfig), [debugOverlayConfig]);
 
   const clientRef = React.useRef<EvaWsClient | null>(null);
+  const audioClientRef = React.useRef<EvaWsClient | null>(null);
   const speechClientRef = React.useRef<SpeechClient | null>(null);
   const alertAudioRef = React.useRef<HTMLAudioElement>(new Audio());
   const alertAudioObjectUrlRef = React.useRef<string | null>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
+  const micStreamRef = React.useRef<MediaStream | null>(null);
+  const micAudioContextRef = React.useRef<AudioContext | null>(null);
+  const micSourceNodeRef = React.useRef<MediaStreamAudioSourceNode | null>(null);
+  const micProcessorNodeRef = React.useRef<ScriptProcessorNode | null>(null);
+  const micSampleBufferRef = React.useRef<number[]>([]);
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
   const captureCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const overlayCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
@@ -511,6 +676,8 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
   const framesAckedRef = React.useRef(0);
   const framesDroppedByBrokerRef = React.useRef(0);
   const framesTimedOutRef = React.useRef(0);
+  const audioChunksSentRef = React.useRef(0);
+  const audioChunksAckedRef = React.useRef(0);
   const activeSpeechAbortControllerRef = React.useRef<AbortController | null>(null);
   const lastSpokenTextOutputRequestIdRef = React.useRef<string | null>(null);
   const chatAutoSpeakLastStartedAtMsRef = React.useRef<number | null>(null);
@@ -639,6 +806,93 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       );
     },
     [clearOverlayCanvas, debugOverlayConfig, debugOverlayEnabled],
+  );
+
+  const cleanupMicResources = React.useCallback(async (): Promise<void> => {
+    const processorNode = micProcessorNodeRef.current;
+    if (processorNode) {
+      processorNode.onaudioprocess = null;
+      try {
+        processorNode.disconnect();
+      } catch {
+        // Best-effort cleanup.
+      }
+      micProcessorNodeRef.current = null;
+    }
+
+    const sourceNode = micSourceNodeRef.current;
+    if (sourceNode) {
+      try {
+        sourceNode.disconnect();
+      } catch {
+        // Best-effort cleanup.
+      }
+      micSourceNodeRef.current = null;
+    }
+
+    const micStream = micStreamRef.current;
+    if (micStream) {
+      for (const track of micStream.getTracks()) {
+        track.stop();
+      }
+      micStreamRef.current = null;
+    }
+
+    const audioContext = micAudioContextRef.current;
+    if (audioContext) {
+      try {
+        await audioContext.close();
+      } catch {
+        // Best-effort cleanup.
+      }
+      micAudioContextRef.current = null;
+    }
+
+    micSampleBufferRef.current = [];
+  }, []);
+
+  const sendAudioChunk = React.useCallback(
+    (pcm16Bytes: Uint8Array): boolean => {
+      const audioClient = audioClientRef.current;
+      if (!audioClient || audioClient.getStatus() !== 'connected') {
+        return false;
+      }
+
+      const chunkId = crypto.randomUUID();
+      const audioMeta: AudioBinaryMeta = {
+        type: 'audio_binary',
+        v: 2,
+        chunk_id: chunkId,
+        ts_ms: Date.now(),
+        mime: 'audio/pcm_s16le',
+        sample_rate_hz: audioInputConfig.sampleRateHz,
+        channels: 1,
+        audio_bytes: pcm16Bytes.byteLength,
+      };
+
+      const envelope = encodeBinaryAudioEnvelope({
+        meta: audioMeta,
+        audioBytes: pcm16Bytes,
+      });
+
+      const sent = audioClient.sendBinary(envelope);
+      if (!sent) {
+        return false;
+      }
+
+      audioChunksSentRef.current += 1;
+      setAudioChunksSent(audioChunksSentRef.current);
+
+      if (shouldSampleFrameLog(audioChunksSentRef.current)) {
+        appendLog(
+          'outgoing',
+          `audio_binary chunk_id=${audioMeta.chunk_id} bytes=${audioMeta.audio_bytes} sampleRate=${audioMeta.sample_rate_hz}Hz frameMs=${audioInputConfig.frameMs}`,
+        );
+      }
+
+      return true;
+    },
+    [appendLog, audioInputConfig.frameMs, audioInputConfig.sampleRateHz],
   );
 
   React.useEffect(() => {
@@ -912,6 +1166,12 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
         if (insightMessage) {
           setLatestInsight(insightMessage);
+
+          const presenceText = insightMessage.summary.presence
+            ? `preson_present=${insightMessage.summary.presence.preson_present} person_facing_me=${insightMessage.summary.presence.person_facing_me}`
+            : 'presence=missing';
+
+          appendLog('system', `Insight received clip_id=${insightMessage.clip_id} ${presenceText}.`);
         }
 
         if (textOutputMessage) {
@@ -993,6 +1253,66 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     playSpeechOutputAlert,
     renderDebugOverlay,
   ]);
+
+  React.useEffect(() => {
+    if (!audioInputConfig.enabled) {
+      setAudioStatus('disconnected');
+      return;
+    }
+
+    const audioClient = createEvaWsClient(audioWsUrl, {
+      onOpen: () => {
+        setAudioStatus('connected');
+        appendLog('system', 'Connected to Eva audio WebSocket endpoint.');
+      },
+      onClose: () => {
+        setAudioStatus('disconnected');
+        appendLog('system', 'Disconnected from Eva audio WebSocket endpoint.');
+      },
+      onMessage: (message) => {
+        const audioReceived = isAudioReceivedMessage(message) ? message : null;
+
+        if (audioReceived) {
+          audioChunksAckedRef.current += 1;
+          setAudioChunksAcked(audioChunksAckedRef.current);
+          setAudioDropped(audioReceived.dropped);
+          setLastAudioAckQueueDepth(audioReceived.queue_depth);
+
+          const shouldLogAck =
+            audioChunksAckedRef.current <= 3 ||
+            audioChunksAckedRef.current % AUDIO_ACK_LOG_SAMPLE_EVERY_N === 0;
+
+          if (shouldLogAck) {
+            appendLog('incoming', summarizeMessage(message));
+            appendLog(
+              'system',
+              `Audio ACK chunk_id=${audioReceived.chunk_id} accepted=${audioReceived.accepted} queue_depth=${audioReceived.queue_depth} dropped=${audioReceived.dropped}`,
+            );
+          }
+
+          return;
+        }
+
+        appendLog('incoming', summarizeMessage(message));
+      },
+      onParseError: (raw) => {
+        appendLog('system', `Received non-JSON audio message: ${raw}`);
+      },
+      onError: () => {
+        appendLog('system', 'Audio WebSocket error occurred.');
+      },
+    });
+
+    audioClientRef.current = audioClient;
+    setAudioStatus('connecting');
+    appendLog('system', `Connecting to ${audioWsUrl} (audio) ...`);
+    audioClient.connect();
+
+    return () => {
+      audioClient.disconnect();
+      audioClientRef.current = null;
+    };
+  }, [appendLog, audioInputConfig.enabled, audioWsUrl, connectionAttempt]);
 
   const handleSendTestMessage = React.useCallback(() => {
     const payload = {
@@ -1222,6 +1542,125 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
     appendLog('system', 'Camera stopped.');
   }, [appendLog, clearOverlayCanvas, dropInFlight]);
 
+  const handleStartMic = React.useCallback(async () => {
+    if (!audioInputConfig.enabled) {
+      appendLog('system', 'Audio input is disabled in UI runtime config.');
+      return;
+    }
+
+    if (!micSupported) {
+      setMicStatus('error');
+      setMicError('Microphone capture API is unavailable in this browser.');
+      appendLog('system', 'Microphone capture API is unavailable in this browser.');
+      return;
+    }
+
+    if (micStatus === 'starting' || micStatus === 'running') {
+      return;
+    }
+
+    setMicStatus('starting');
+    setMicError(null);
+
+    audioChunksSentRef.current = 0;
+    setAudioChunksSent(0);
+    audioChunksAckedRef.current = 0;
+    setAudioChunksAcked(0);
+    setAudioDropped(0);
+    setLastAudioAckQueueDepth(null);
+    micSampleBufferRef.current = [];
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: audioInputConfig.sampleRateHz,
+        },
+        video: false,
+      });
+
+      const audioContext = createBrowserAudioContext(audioInputConfig.sampleRateHz);
+      await audioContext.resume();
+
+      const sourceNode = audioContext.createMediaStreamSource(stream);
+      const processorNode = audioContext.createScriptProcessor(MIC_PROCESSOR_BUFFER_SIZE, 1, 1);
+
+      processorNode.onaudioprocess = (event) => {
+        const inputSamples = event.inputBuffer.getChannelData(0);
+        const outputSamples = event.outputBuffer.getChannelData(0);
+        outputSamples.fill(0);
+
+        if (inputSamples.length === 0) {
+          return;
+        }
+
+        let monoSamples: Float32Array;
+        try {
+          monoSamples = downsampleFloat32Mono(
+            inputSamples,
+            audioContext.sampleRate,
+            audioInputConfig.sampleRateHz,
+          );
+        } catch (error) {
+          const message = toErrorMessage(error);
+          setMicStatus('error');
+          setMicError(message);
+          appendLog('system', `Mic processing failed: ${message}`);
+          void cleanupMicResources();
+          return;
+        }
+
+        const sampleBuffer = micSampleBufferRef.current;
+        for (let index = 0; index < monoSamples.length; index += 1) {
+          sampleBuffer.push(monoSamples[index]);
+        }
+
+        while (sampleBuffer.length >= audioFrameSamples) {
+          const chunkSamples = sampleBuffer.splice(0, audioFrameSamples);
+          const pcm16Bytes = convertFloat32ToPcm16Bytes(Float32Array.from(chunkSamples));
+          void sendAudioChunk(pcm16Bytes);
+        }
+      };
+
+      sourceNode.connect(processorNode);
+      processorNode.connect(audioContext.destination);
+
+      micStreamRef.current = stream;
+      micAudioContextRef.current = audioContext;
+      micSourceNodeRef.current = sourceNode;
+      micProcessorNodeRef.current = processorNode;
+
+      setMicStatus('running');
+      appendLog(
+        'system',
+        `Mic capture started (${audioInputConfig.sampleRateHz}Hz mono, ${audioInputConfig.frameMs}ms chunks).`,
+      );
+    } catch (error) {
+      await cleanupMicResources();
+      const message = toErrorMessage(error);
+      setMicStatus('error');
+      setMicError(message);
+      appendLog('system', `Failed to start microphone: ${message}`);
+    }
+  }, [
+    appendLog,
+    audioFrameSamples,
+    audioInputConfig.enabled,
+    audioInputConfig.frameMs,
+    audioInputConfig.sampleRateHz,
+    cleanupMicResources,
+    micStatus,
+    micSupported,
+    sendAudioChunk,
+  ]);
+
+  const handleStopMic = React.useCallback(async () => {
+    await cleanupMicResources();
+    setMicStatus('idle');
+    setMicError(null);
+    appendLog('system', 'Microphone stopped.');
+  }, [appendLog, cleanupMicResources]);
+
   const handleToggleStreaming = React.useCallback(() => {
     if (!streamingEnabled) {
       if (cameraStatus !== 'running') {
@@ -1361,9 +1800,10 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
 
       stopCamera(streamRef.current);
       streamRef.current = null;
+      void cleanupMicResources();
       clearOverlayCanvas();
     };
-  }, [clearOverlayCanvas]);
+  }, [cleanupMicResources, clearOverlayCanvas]);
 
   // Insights are rendered silently (no spoken line).
 
@@ -1372,11 +1812,12 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
       <h1>Eva UI (Iteration 79)</h1>
 
       <p>
-        WebSocket target: <code>{evaWsUrl}</code>
+        Vision WebSocket target: <code>{evaWsUrl}</code> · Audio WebSocket target: <code>{audioWsUrl}</code>
       </p>
       <p>
-        Connection status:{' '}
-        <strong style={{ color: STATUS_COLOR[status], textTransform: 'capitalize' }}>{status}</strong>
+        Vision WS status:{' '}
+        <strong style={{ color: STATUS_COLOR[status], textTransform: 'capitalize' }}>{status}</strong> · Audio WS status:{' '}
+        <strong style={{ color: STATUS_COLOR[audioStatus], textTransform: 'capitalize' }}>{audioStatus}</strong>
       </p>
 
       <p>
@@ -1384,22 +1825,30 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         <strong style={{ color: CAMERA_STATUS_COLOR[cameraStatus], textTransform: 'capitalize' }}>
           {cameraStatus}
         </strong>{' '}
-        · Streaming: <strong>{streamingEnabled ? 'on' : 'off'}</strong> · Debug overlay:{' '}
-        <strong>
-          {debugOverlayEnabled ? 'on' : debugOverlayConfigured ? 'off' : 'not configured'}
-        </strong>
+        · Streaming: <strong>{streamingEnabled ? 'on' : 'off'}</strong> · Mic support:{' '}
+        <strong>{micSupported ? 'yes' : 'no'}</strong> · Mic status:{' '}
+        <strong style={{ color: MIC_STATUS_COLOR[micStatus], textTransform: 'capitalize' }}>{micStatus}</strong> ·
+        Debug overlay: <strong>{debugOverlayEnabled ? 'on' : debugOverlayConfigured ? 'off' : 'not configured'}</strong>
       </p>
 
       <p>
         Eva HTTP base: <code>{evaHttpBaseUrl}</code> · Text endpoint: <code>{textEndpointUrl}</code> · Speech endpoint:{' '}
-        <code>{speechEndpointUrl}</code> · Speech: <strong>{speechConfig.enabled ? 'enabled' : 'disabled'}</strong> ·
-        Auto Speak: <strong>{autoSpeakEnabled ? 'on' : 'off'}</strong> · Audio unlock:{' '}
+        <code>{speechEndpointUrl}</code> · Audio input: <strong>{audioInputConfig.enabled ? 'enabled' : 'disabled'}</strong>{' '}
+        ({audioInputConfig.sampleRateHz}Hz, {audioInputConfig.frameMs}ms) · Speech:{' '}
+        <strong>{speechConfig.enabled ? 'enabled' : 'disabled'}</strong> · Auto Speak:{' '}
+        <strong>{autoSpeakEnabled ? 'on' : 'off'}</strong> · Audio unlock:{' '}
         <strong style={{ color: audioLocked ? '#b91c1c' : '#166534' }}>{audioLocked ? 'required' : 'ready'}</strong>
       </p>
 
       {cameraError ? (
         <p style={{ color: '#b91c1c' }}>
           <strong>Camera error:</strong> {cameraError}
+        </p>
+      ) : null}
+
+      {micError ? (
+        <p style={{ color: '#b91c1c' }}>
+          <strong>Mic error:</strong> {micError}
         </p>
       ) : null}
 
@@ -1447,6 +1896,12 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
         </button>
         <button type="button" onClick={handleStopCamera} disabled={cameraStatus !== 'running'}>
           Stop camera
+        </button>
+        <button type="button" onClick={() => void handleStartMic()} disabled={!audioInputConfig.enabled || !micSupported || micStatus === 'running' || micStatus === 'starting'}>
+          Start mic
+        </button>
+        <button type="button" onClick={() => void handleStopMic()} disabled={micStatus !== 'running' && micStatus !== 'error'}>
+          Stop mic
         </button>
         <button type="button" onClick={handleToggleStreaming} disabled={cameraStatus !== 'running'}>
           {streamingEnabled ? 'Pause streaming' : 'Start streaming'}
@@ -1539,6 +1994,11 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
           ) : null}
         </p>
         <p style={{ marginTop: 4, marginBottom: 0 }}>
+          Audio chunks sent: <strong>{audioChunksSent}</strong> · audio ACKs: <strong>{audioChunksAcked}</strong> · dropped:{' '}
+          <strong>{audioDropped}</strong> · last queue depth:{' '}
+          <strong>{lastAudioAckQueueDepth === null ? 'n/a' : lastAudioAckQueueDepth}</strong>
+        </p>
+        <p style={{ marginTop: 4, marginBottom: 0 }}>
           <strong>Latest caption:</strong>{' '}
           {latestCaption ? (
             <>
@@ -1601,6 +2061,17 @@ function App({ runtimeConfig }: AppProps): JSX.Element {
               </p>
               <p style={{ marginTop: 0, marginBottom: 8, color: '#374151' }}>
                 <strong>Spoken line:</strong> {latestInsight.summary.tts_response}
+              </p>
+              <p style={{ marginTop: 0, marginBottom: 8 }}>
+                <strong>Presence:</strong>{' '}
+                {latestInsight.summary.presence ? (
+                  <>
+                    preson_present={latestInsight.summary.presence.preson_present ? 'true' : 'false'} · person_facing_me=
+                    {latestInsight.summary.presence.person_facing_me ? 'true' : 'false'}
+                  </>
+                ) : (
+                  <em>missing</em>
+                )}
               </p>
               <p style={{ marginTop: 0, marginBottom: 8 }}>
                 Tags:{' '}

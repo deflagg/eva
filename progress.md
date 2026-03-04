@@ -10171,3 +10171,1877 @@
   - Added note when no semantic samples are available yet.
 - Validation:
   - `cd packages/ui && npm run build`
+
+## Iteration 198 (Audio) — Eva: add `/audio` WS endpoint path + upgrade routing (no audio runtime yet)
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Updated Eva config schema in `packages/eva/src/config.ts`:
+  - added `server.audioPath`
+  - default: `"/audio"`
+  - path validation: must start with `/`
+- Updated committed runtime config `packages/eva/eva.config.json`:
+  - added `"audioPath": "/audio"` under `server`
+- Updated local example config `packages/eva/eva.config.local.example.json` to include the same `server.audioPath` field.
+- Updated server startup wiring in `packages/eva/src/index.ts` to pass `audioPath` into `startServer(...)`.
+- Updated Eva WS routing in `packages/eva/src/server.ts`:
+  - split no-server WS instances into:
+    - `wssEye` for `server.eyePath`
+    - `wssAudio` for `server.audioPath`
+  - `server.on('upgrade', ...)` now routes by pathname:
+    - `eyePath` -> UI WS handler
+    - `audioPath` -> audio WS handler
+    - anything else -> socket destroy
+- Added separate single-client enforcement for audio WS:
+  - new `activeAudioClient` (independent of existing `activeUiClient`)
+  - second concurrent audio connection receives `SINGLE_AUDIO_CLIENT_ONLY` and closes.
+- Added basic `/audio` WS handshake behavior:
+  - on connect, Eva sends protocol `hello` message.
+  - audio message handling is intentionally stubbed/no-op in this iteration.
+- Updated startup logs to include:
+  - `audio websocket endpoint ws://localhost:<port><audioPath>`
+
+### Files changed
+- `packages/eva/src/config.ts`
+- `packages/eva/eva.config.json`
+- `packages/eva/eva.config.local.example.json`
+- `packages/eva/src/index.ts`
+- `packages/eva/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva && npm run build`
+- Manual WS smoke test (temporary standalone server harness) passes:
+  - connected to `ws://127.0.0.1:8899/audio`
+  - received `hello` payload from Eva:
+    - `{"type":"hello","v":2,"role":"eva",...}`
+
+### Manual run steps
+1. Build Eva:
+   - `cd packages/eva && npm run build`
+2. Start Eva (normal run):
+   - `npm run dev`
+3. Connect a WS client to:
+   - `ws://localhost:8787/audio`
+4. Confirm first inbound message is `hello`.
+5. Open a second `/audio` connection and confirm it is rejected with `SINGLE_AUDIO_CLIENT_ONLY`.
+
+### Notes
+- Iteration 198 intentionally adds only endpoint/config/routing scaffolding.
+- `hello.role="audio"` and audio payload protocol types are deferred to Iteration 199.
+- No audio frame decode/ack/forwarding is implemented yet.
+
+## Iteration 199 (Audio) — Protocol: add `audio_binary`, `audio_received`, `speech_transcript`, and `hello.role=audio`
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Updated canonical protocol schema in `packages/protocol/schema.json`:
+  - added `$defs/audio_binary_meta`
+  - added `$defs/audio_received`
+  - added `$defs/speech_transcript`
+  - updated top-level `oneOf` to include the new message/meta definitions
+  - updated `$defs/hello.role` enum to include `"audio"`
+- Updated protocol docs in `packages/protocol/README.md`:
+  - documented shared binary envelope framing
+  - documented `audio_binary` metadata shape
+  - documented `audio_received` ACK shape
+  - documented `speech_transcript` shape
+  - documented `hello` valid roles including `audio`
+- Updated Eva TypeScript protocol in `packages/eva/src/protocol.ts`:
+  - added `AudioBinaryMetaSchema`
+  - added `AudioReceivedMessageSchema` + `makeAudioReceived(...)`
+  - added `SpeechTranscriptMessageSchema`
+  - updated `HelloMessageSchema.role` union to include `audio`
+  - added `decodeBinaryAudioEnvelope(...)` mirroring frame envelope decode semantics
+  - added `BinaryAudioDecodeError`, `AudioBinaryMeta`, `AudioReceivedMessage`, and `SpeechTranscriptMessage` types
+- Updated UI protocol types in `packages/ui/src/types.ts`:
+  - added `AudioBinaryMeta`
+  - added `AudioReceivedMessage`
+  - updated `HelloMessage.role` union to include `audio`
+  - included `AudioReceivedMessage` in `ProtocolMessage` union
+  - intentionally did **not** add `speech_transcript` to UI message unions in this iteration.
+
+### Files changed
+- `packages/protocol/schema.json`
+- `packages/protocol/README.md`
+- `packages/eva/src/protocol.ts`
+- `packages/ui/src/types.ts`
+- `progress.md`
+
+### Verification
+- Eva build passes:
+  - `cd packages/eva && npm run build`
+- UI build passes:
+  - `cd packages/ui && npm run build`
+- Protocol schema JSON validates:
+  - `python3 -m json.tool packages/protocol/schema.json`
+
+### Manual run steps
+1. Build Eva and UI:
+   - `cd packages/eva && npm run build`
+   - `cd packages/ui && npm run build`
+2. Inspect protocol docs/schema:
+   - `packages/protocol/README.md`
+   - `packages/protocol/schema.json`
+3. Confirm `hello.role` now allows `audio` and new audio message definitions are present.
+
+### Notes
+- This iteration is schema/types/docs only; no Eva audio payload handling logic changed here.
+- Audio frame ingest/ACK behavior is implemented in Iteration 200.
+
+## Iteration 200 (Audio) — Eva: accept `audio_binary` on `/audio` and emit sampled `audio_received` ACK
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Updated Eva audio WS handler in `packages/eva/src/server.ts` (`wssAudio`):
+  - on binary payload:
+    - decodes audio envelope via `decodeBinaryAudioEnvelope(...)`
+    - tracks counters:
+      - `receivedAudioChunks`
+      - `droppedAudioChunks` (decode failures)
+    - emits sampled `audio_received` ACKs with semantics:
+      - first successfully decoded frame is ACKed immediately
+      - then sampled every `N=10` frames (`AUDIO_ACK_SAMPLE_EVERY_N = 10`)
+      - `accepted: true` for successfully decoded audio chunks
+      - `queue_depth: 0` in this iteration
+      - `dropped` carries cumulative dropped decode-failure count
+  - on binary decode failure:
+    - increments dropped counter
+    - returns `error` with code `INVALID_AUDIO_BINARY`
+  - on JSON/text payload:
+    - ignored intentionally in this iteration (no-op)
+- Added startup log visibility for ACK sampling configuration:
+  - `audio ACK sampling first+everyN=10`
+
+### Files changed
+- `packages/eva/src/server.ts`
+- `progress.md`
+
+### Verification
+- Build check passes:
+  - `cd packages/eva && npm run build`
+- Manual WS smoke test (temporary standalone server harness) passes:
+  - connect to `ws://127.0.0.1:8900/audio`
+  - send one valid `audio_binary` envelope with 640-byte PCM payload
+  - received:
+    - `hello`
+    - `audio_received` with `accepted=true`, `queue_depth=0`, `dropped=0`
+
+### Manual run steps
+1. Build Eva:
+   - `cd packages/eva && npm run build`
+2. Start Eva:
+   - `npm run dev`
+3. Connect WS client to:
+   - `ws://localhost:8787/audio`
+4. Send a valid binary envelope (`type: audio_binary`, `v:2`, PCM16 mono 16k metadata).
+5. Confirm `audio_received` ACK is returned for first chunk.
+6. Continue sending chunks and confirm ACK sampling behavior (every 10 chunks after first).
+
+### Notes
+- No forwarding to Audio Runtime yet; this iteration is Eva ingress + ACK only.
+- `accepted=true` currently means “decoded successfully in Eva.”
+- Later iterations will extend drop reasons when forwarding/runtime availability is added.
+
+## Iteration 201 (Audio) — UI: mic capture + `/audio` WS client + audio envelope encoder
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Updated UI runtime config defaults in `packages/ui/public/config.json`:
+  - added `eva.audioWsUrl` (`ws://localhost:8787/audio`)
+  - added `audioInput` block:
+    - `enabled: true`
+    - `sampleRateHz: 16000`
+    - `frameMs: 20`
+- Extended UI config parser/types in `packages/ui/src/config.ts`:
+  - added `UiAudioInputConfig`
+  - extended `UiRuntimeConfig` with:
+    - `eva.audioWsUrl`
+    - `audioInput`
+  - validates `eva.audioWsUrl` as ws/wss URL
+  - parses/validates audio input settings with defaults
+  - enforces `audioInput.sampleRateHz === 16000` for protocol compatibility
+  - fallback behavior for older local configs:
+    - if `eva.audioWsUrl` is omitted, derives from `eva.wsUrl` host/port with pathname `/audio`
+- Added binary audio envelope encoder in `packages/ui/src/audioBinary.ts`:
+  - `encodeBinaryAudioEnvelope({ meta, audioBytes })`
+  - framing mirrors `frameBinary.ts`:
+    - 4-byte big-endian metadata length
+    - UTF-8 JSON metadata
+    - raw PCM payload bytes
+- Updated UI app runtime in `packages/ui/src/main.tsx`:
+  - added second WS client connection to `audioWsUrl` (independent from `/eye` client)
+  - added audio WS status + logging
+  - parses and tracks `audio_received` ACKs:
+    - counters for acked/dropped/queue depth
+    - sampled inbound ACK logs
+  - added microphone capture workflow:
+    - **Start mic** / **Stop mic** controls
+    - captures mic with `getUserMedia({ audio: { channelCount: 1, sampleRate: 16000 } })`
+    - creates WebAudio pipeline via `AudioContext` + `ScriptProcessorNode`
+    - downsamples input stream to 16kHz when needed
+    - converts Float32 mono samples to PCM16 little-endian bytes
+    - emits fixed 20ms chunks (`320` samples at 16kHz)
+    - wraps each chunk in `audio_binary` envelope and sends over `/audio` WS
+  - added UI visibility for audio path:
+    - audio WS target + status
+    - mic support/status
+    - audio chunk counters (`sent`, `ACKed`, `dropped`, `last queue depth`)
+
+### Files changed
+- `packages/ui/public/config.json`
+- `packages/ui/src/config.ts`
+- `packages/ui/src/audioBinary.ts` (new)
+- `packages/ui/src/main.tsx`
+- `progress.md`
+
+### Verification
+- UI build passes:
+  - `cd packages/ui && npm run build`
+
+### Manual run steps
+1. Start Eva:
+   - `cd packages/eva && npm run dev`
+2. Start UI:
+   - `cd packages/ui && npm run dev`
+3. Open UI in browser and confirm audio WS status becomes `connected`.
+4. Click **Start mic** and allow microphone permission.
+5. Confirm audio counters start changing:
+   - `Audio chunks sent` increases continuously
+   - `audio ACKs` increases in sampled cadence
+6. Confirm logs include sampled `audio_received` entries.
+7. Click **Stop mic** and confirm mic status returns to `idle`.
+
+### Notes
+- This iteration only adds browser capture + transport to Eva `/audio`.
+- No VAD/STT/transcript in UI; those remain in Audio Runtime iterations.
+
+## Iteration 202 (Audio Runtime) — WS-first skeleton (`/listen`) + run entrypoint mirroring Vision
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Added new Python Audio Runtime package scaffold at `packages/eva/audio/`:
+  - `requirements.txt`
+  - `settings.yaml`
+  - `app/__init__.py`
+  - `app/config.py`
+  - `app/protocol.py`
+  - `app/main.py`
+  - `app/run.py`
+- Implemented config loader (`packages/eva/audio/app/config.py`) using Dynaconf layered files:
+  - loads `settings.yaml` + `settings.local.yaml`
+  - typed app config for `server.host` + `server.port`
+  - defaults:
+    - host `127.0.0.1`
+    - port `8793`
+- Implemented protocol helpers in `packages/eva/audio/app/protocol.py`:
+  - binary envelope decode for `audio_binary` with 4-byte big-endian metadata length prefix
+  - pydantic validation for audio metadata shape:
+    - `type=audio_binary`
+    - `v=2`
+    - `chunk_id`
+    - `mime=audio/pcm_s16le`
+    - `sample_rate_hz=16000`
+    - `channels=1`
+    - `audio_bytes` payload length match
+  - helper messages:
+    - `make_hello(role="audio")`
+    - `make_error(...)`
+- Implemented WS-first FastAPI service in `packages/eva/audio/app/main.py`:
+  - `GET /health` returns service/config/runtime WS counters
+  - `WS /listen`:
+    - accepts connection
+    - sends protocol hello with role `audio`
+    - receives binary chunks, decodes envelope, updates counters, logs chunk metadata
+    - ignores text/JSON payloads in this iteration
+    - emits `INVALID_AUDIO_BINARY` error on decode failures
+- Added run entrypoint in `packages/eva/audio/app/run.py` mirroring Vision style:
+  - `python -m app.run` uses config host/port via `uvicorn.run(...)`
+
+### Files changed
+- `packages/eva/audio/requirements.txt` (new)
+- `packages/eva/audio/settings.yaml` (new)
+- `packages/eva/audio/app/__init__.py` (new)
+- `packages/eva/audio/app/config.py` (new)
+- `packages/eva/audio/app/protocol.py` (new)
+- `packages/eva/audio/app/main.py` (new)
+- `packages/eva/audio/app/run.py` (new)
+- `progress.md`
+
+### Verification
+- Python compile check passes:
+  - `cd packages/eva/audio && python3 -m compileall app`
+- Manual health smoke passes (using temporary venv):
+  - `cd packages/eva/audio`
+  - `python3 -m venv /tmp/eva-audio-venv`
+  - `source /tmp/eva-audio-venv/bin/activate`
+  - `pip install -r requirements.txt`
+  - `python -m app.run`
+  - `curl -sS http://127.0.0.1:8793/health`
+  - returned `{"service":"audio","status":"ok",...}`
+
+### Manual run steps
+1. Create/activate venv and install deps:
+   - `cd packages/eva/audio`
+   - `python3 -m venv .venv`
+   - `source .venv/bin/activate`
+   - `pip install -r requirements.txt`
+2. Run Audio Runtime:
+   - `python -m app.run`
+3. Check health:
+   - `curl -sS http://127.0.0.1:8793/health`
+4. Optionally connect WS client to:
+   - `ws://127.0.0.1:8793/listen`
+   - confirm first message is `hello` with `role: "audio"`.
+
+### Notes
+- This iteration is runtime skeleton only; no Eva forwarding integration yet.
+- VAD/wake/gating/STT are deferred to later iterations.
+
+## Iteration 203 (Audio Runtime integration) — Eva ⇄ Audio Runtime WS client + forward audio frames
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Added new Eva Audio Runtime client `packages/eva/src/audioClient.ts`:
+  - mirrors Vision client reconnect behavior
+  - exponential reconnect backoff (`250ms` -> `5000ms` cap)
+  - supports `sendJson(...)`, `sendBinary(...)`, connection status, URL getter
+  - parses inbound JSON with invalid-payload callbacks
+- Extended Eva config schema in `packages/eva/src/config.ts`:
+  - added `audio.wsUrl` with default:
+    - `ws://127.0.0.1:8793/listen`
+  - added `subprocesses.audio` block (mirrors `subprocesses.vision` shape):
+    - default cwd: `packages/eva/audio`
+    - default command: `[".venv/bin/python", "-m", "app.run"]`
+    - default health URL: `http://127.0.0.1:8793/health`
+    - default ready/shutdown timeouts: `120000 / 10000`
+- Updated committed/local example Eva configs:
+  - `packages/eva/eva.config.json`
+  - `packages/eva/eva.config.local.example.json`
+  - both now include:
+    - top-level `audio.wsUrl`
+    - `subprocesses.audio` block
+- Updated Eva runtime process orchestration in `packages/eva/src/index.ts`:
+  - starts/stops `subprocesses.audio` like agent/vision
+  - waits for audio `/health` readiness before starting Eva server
+  - includes audio process in graceful shutdown + force-kill paths
+  - passes `audioWsUrl` into `startServer(...)`
+- Updated Eva server integration in `packages/eva/src/server.ts`:
+  - added `audioWsUrl` to `StartServerOptions`
+  - creates/connects Audio Runtime WS client with reconnect logs
+  - `/audio` WS handler forwarding behavior:
+    - decode `audio_binary`
+    - if Audio Runtime connected: `audioClient.sendBinary(binaryPayload)`
+    - if disconnected/forward failed: mark dropped
+    - sampled `audio_received` ACK now sets:
+      - `accepted = decoded && forwarded`
+      - `queue_depth = 0`
+      - `dropped` includes decode failures + forward failures/unavailable runtime
+  - server startup logs now include Audio Runtime target URL
+  - server close now disconnects audio client
+- Added ignore rules for local audio Python environments/artifacts in `.gitignore`:
+  - `packages/eva/audio/.venv/`
+  - `packages/eva/audio/**/__pycache__/`
+
+### Files changed
+- `packages/eva/src/audioClient.ts` (new)
+- `packages/eva/src/config.ts`
+- `packages/eva/eva.config.json`
+- `packages/eva/eva.config.local.example.json`
+- `packages/eva/src/index.ts`
+- `packages/eva/src/server.ts`
+- `.gitignore`
+- `progress.md`
+
+### Verification
+- Eva TypeScript build passes:
+  - `cd packages/eva && npm run build`
+- Audio Runtime Python compile passes:
+  - `cd packages/eva/audio && python3 -m compileall app`
+- Manual forwarding integration smoke (temporary harness) passes:
+  - started Audio Runtime (`python -m app.run`)
+  - started Eva server harness with:
+    - `audioWsUrl=ws://127.0.0.1:8793/listen`
+  - sent valid `audio_binary` chunk to Eva `/audio`
+  - received Eva ACK with `accepted=true`
+  - confirmed Audio Runtime `/health` counters advanced:
+    - `audio_chunks_received: 1`
+    - `audio_bytes_received: 640`
+
+### Manual run steps
+1. Start Audio Runtime:
+   - `cd packages/eva/audio`
+   - `python3 -m venv .venv`
+   - `source .venv/bin/activate`
+   - `pip install -r requirements.txt`
+   - `python -m app.run`
+2. Start Eva:
+   - `cd packages/eva`
+   - `npm run dev`
+3. Start UI and mic stream:
+   - `cd packages/ui && npm run dev`
+   - open UI, click **Start mic**
+4. Confirm:
+   - UI `audio_received` ACKs show `accepted=true` (when Audio Runtime connected)
+   - Audio Runtime logs show received chunk bytes
+   - `curl -sS http://127.0.0.1:8793/health` shows increasing audio chunk counters
+
+### Notes
+- This iteration only wires transport forwarding (Eva `/audio` -> Audio Runtime `/listen`).
+- Transcript handling (`speech_transcript` back into Eva) remains for Iteration 209.
+
+## Iteration 204 (Audio Runtime) — VAD utterance segmentation (`webrtcvad`) with explicit knobs
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Added VAD dependency in `packages/eva/audio/requirements.txt`:
+  - `webrtcvad>=2.0,<3.0`
+  - added `setuptools>=68,<81` to satisfy `pkg_resources` import used by `webrtcvad` runtime module
+- Added VAD defaults to `packages/eva/audio/settings.yaml`:
+  - `vad.aggressiveness: 2`
+  - `vad.preroll_ms: 200`
+  - `vad.end_silence_ms: 400`
+  - `vad.min_utterance_ms: 300`
+- Extended audio config loader in `packages/eva/audio/app/config.py`:
+  - added typed `VADConfig` and `AppConfig.vad`
+  - validation:
+    - `vad.aggressiveness` integer in `[0..3]`
+    - `vad.preroll_ms` integer `>= 0`
+    - `vad.end_silence_ms` integer `>= 20`
+    - `vad.min_utterance_ms` integer `>= 20`
+  - `/health` config summary now includes `vad` block
+- Added VAD state-machine module `packages/eva/audio/app/vad.py`:
+  - fixed frame contract for transport spec:
+    - PCM16 mono 16kHz
+    - 20ms frames (`640` bytes)
+  - implements per-frame segmentation with:
+    - preroll buffering (`preroll_ms`)
+    - speech start trigger on consecutive voiced frames
+    - utterance end after consecutive unvoiced frames meeting `end_silence_ms`
+    - min-utterance guard using `min_utterance_ms`
+  - returns completed utterances with:
+    - `audio_bytes`
+    - `started_server_ts_ms`
+    - `utterance_end_server_ts_ms`
+    - `duration_ms`
+- Integrated VAD into WS `/listen` in `packages/eva/audio/app/main.py`:
+  - removed per-chunk spam logging
+  - per-connection VAD segmenter processes binary audio frames
+  - supports chunk splitting by 20ms frame size
+  - tracks runtime counters:
+    - `vad_frames_processed`
+    - `vad_frames_invalid`
+    - `utterances_emitted`
+    - `utterances_dropped_short`
+    - `last_utterance_duration_ms`
+    - `last_utterance_end_server_ts_ms`
+  - logs VAD lifecycle events:
+    - `speech_start`
+    - `utterance_end` with duration and `utterance_end_server_ts_ms`
+    - short-utterance drops (no transcript emitted)
+  - still ignores text/JSON payloads (WS-first binary path)
+
+### Files changed
+- `packages/eva/audio/requirements.txt`
+- `packages/eva/audio/settings.yaml`
+- `packages/eva/audio/app/config.py`
+- `packages/eva/audio/app/vad.py` (new)
+- `packages/eva/audio/app/main.py`
+- `progress.md`
+
+### Verification
+- Python compile check passes:
+  - `cd packages/eva/audio && python3 -m compileall app`
+- Runtime smoke passes (temporary venv):
+  - `cd packages/eva/audio`
+  - `source /tmp/eva-audio-venv/bin/activate`
+  - `pip install -r requirements.txt`
+  - `python -m app.run`
+  - `curl -sS http://127.0.0.1:8793/health`
+  - response includes VAD config + VAD runtime counters
+
+### Manual run steps
+1. Install/update audio deps:
+   - `cd packages/eva/audio`
+   - `source .venv/bin/activate`
+   - `pip install -r requirements.txt`
+2. Start Audio Runtime:
+   - `python -m app.run`
+3. Start Eva + UI and begin mic streaming.
+4. Speak a short phrase; confirm Audio Runtime logs:
+   - `vad speech_start ...`
+   - `vad utterance_end ... duration_ms=... utterance_end_server_ts_ms=...`
+5. Stay silent and confirm no per-frame/per-chunk spam logs.
+6. Check health counters:
+   - `curl -sS http://127.0.0.1:8793/health`
+   - verify `vad_frames_processed` increases and utterance counters update when speaking.
+
+### Notes
+- This iteration only segments utterances (no wake/gating/STT yet).
+- `utterance_end_server_ts_ms` is recorded from server wall-clock time at VAD finalization.
+
+## Iteration 205 (Audio Runtime) — Porcupine wake-word detection with correct frame adapter
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Added wake-word dependency in `packages/eva/audio/requirements.txt`:
+  - `pvporcupine>=3.0,<4.0`
+- Added wake-word defaults in `packages/eva/audio/settings.yaml`:
+  - `wake.provider: porcupine`
+  - `wake.keyword_path: ./wakewords/eva.ppn`
+  - `wake.sensitivity: 0.6`
+  - `wake.access_key_env: PV_ACCESS_KEY`
+- Extended audio config in `packages/eva/audio/app/config.py`:
+  - added typed `WakeConfig` on `AppConfig`:
+    - `provider`
+    - `keyword_path`
+    - `sensitivity`
+    - `access_key_env`
+    - optional `access_key` (for local settings override)
+  - added wake config validation and summary reporting in `/health` config payload.
+- Added wake-word runtime module `packages/eva/audio/app/wake.py`:
+  - `WakeWordDetector` wrapper with Porcupine backend
+  - resolves access key from:
+    - `wake.access_key` (if provided), else
+    - env var named by `wake.access_key_env`
+  - validates keyword `.ppn` path
+  - initializes Porcupine engine and exposes runtime status
+  - includes required utterance adapter implementation:
+    - input utterance PCM16LE bytes -> int16 samples
+    - iterate in exact `porcupine.frame_length` sample windows
+    - call `porcupine.process(chunk)`
+    - `wake_detected=true` if any call returns `>= 0`
+- Integrated wake detector into `packages/eva/audio/app/main.py`:
+  - startup initializes detector and logs wake runtime readiness
+  - shutdown closes detector handle cleanly
+  - `/health` now includes `wake_runtime` status:
+    - `ready`
+    - `reason`
+    - `frame_length`
+    - `sample_rate_hz`
+  - on each completed VAD utterance:
+    - runs Porcupine detection on utterance bytes
+    - updates counters:
+      - `wake_checks`
+      - `wake_detected`
+      - `last_wake_detected`
+    - logs wake detection result with utterance timing metadata
+- Added wakeword asset hygiene:
+  - created `packages/eva/audio/wakewords/.gitkeep`
+  - updated `.gitignore` to ignore checked-in keyword binaries:
+    - `packages/eva/audio/wakewords/*.ppn`
+
+### Files changed
+- `packages/eva/audio/requirements.txt`
+- `packages/eva/audio/settings.yaml`
+- `packages/eva/audio/app/config.py`
+- `packages/eva/audio/app/wake.py` (new)
+- `packages/eva/audio/app/main.py`
+- `packages/eva/audio/wakewords/.gitkeep` (new)
+- `.gitignore`
+- `progress.md`
+
+### Verification
+- Python compile check passes:
+  - `cd packages/eva/audio && python3 -m compileall app`
+- Runtime health smoke passes:
+  - `source /tmp/eva-audio-venv/bin/activate`
+  - `python -m app.run`
+  - `curl -sS http://127.0.0.1:8793/health`
+  - confirms wake config + wake runtime status fields are present
+
+### Manual run steps
+1. Install/update deps:
+   - `cd packages/eva/audio`
+   - `source .venv/bin/activate`
+   - `pip install -r requirements.txt`
+2. Provide Porcupine assets/secrets:
+   - place keyword file at `packages/eva/audio/wakewords/eva.ppn`
+   - set access key via env:
+     - `export PV_ACCESS_KEY=...`
+     - or set `wake.access_key` in `settings.local.yaml` (gitignored)
+3. Start Audio Runtime:
+   - `python -m app.run`
+4. Confirm wake runtime is ready:
+   - `curl -sS http://127.0.0.1:8793/health`
+   - check `wake_runtime.ready == true`
+5. Stream mic audio through Eva/UI and speak utterances:
+   - without wake phrase (“what time is it”) -> observe `wake_detected=false`
+   - with wake phrase (“Eva what time is it”) -> observe `wake_detected=true`
+
+### Notes
+- Wake detection is now real Porcupine KWS over VAD-produced utterance audio (no text matching hack).
+- If access key or keyword file is missing, runtime stays up and reports wake runtime unavailable in `/health` with explicit reason.
+
+## Iteration 206 (Vision presence) — emit `presence_update` events into working memory with emission policy (no spam)
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Added presence runtime dependency in Vision requirements:
+  - `packages/eva/vision/requirements.txt`
+  - added `opencv-python-headless>=4.10,<5.0`
+- Added presence defaults to Vision settings:
+  - `packages/eva/vision/settings.yaml`
+  - new `presence` block:
+    - `enabled: true`
+    - `sample_every_ms: 200`
+    - `emit_every_ms: 500`
+    - `emit_on_change: true`
+    - `emit_on_false_transition: true`
+- Extended Vision config model in `packages/eva/vision/app/config.py`:
+  - added typed `PresenceConfig`
+  - added `AppConfig.presence`
+  - validates presence settings via existing typed readers
+  - includes presence section in `config_summary(...)`
+- Added new presence detector module `packages/eva/vision/app/presence.py`:
+  - OpenCV Haar face detector (`haarcascade_frontalface_default.xml`)
+  - JPEG decode + grayscale processing
+  - v1 presence semantics:
+    - `in_view = face_detected`
+    - `facing = face_detected`
+  - method tag: `opencv_haar_v1`
+- Updated Vision runtime integration in `packages/eva/vision/app/main.py`:
+  - startup:
+    - loads presence detector when `presence.enabled=true` (fail-fast on load/init errors)
+    - logs presence config and runtime readiness
+  - health:
+    - exposes presence config/runtime metadata (`presence_enabled`, `presence_runtime_ready`, method/cascade path)
+    - exposes presence runtime counters in `ws_runtime`
+  - frame processing (`/infer`, binary path):
+    - presence sampling runs on every frame stream independent of attention/caption, at `presence.sample_every_ms` cadence
+    - emission policy implemented exactly as requested:
+      - emit on state change when `emit_on_change=true`
+      - emit keepalive when `in_view=true` and `emit_every_ms` elapsed
+      - emit once on true->false transition when `emit_on_false_transition=true`
+    - each emitted presence event is forwarded Vision -> Executive `/events` with shape:
+      - `name: "presence_update"`
+      - `ts_ms: <server_now_ms>`
+      - `severity: "low"`
+      - `data: { in_view, facing, method: "opencv_haar_v1" }`
+    - forwarding uses existing Executive events client path (Vision-only forwarding)
+  - observability:
+    - added presence sample/emission/error counters and last-state timestamps
+- Generalized Vision event forwarding helper:
+  - replaced scene-caption-specific normalizer/forwarder with generic event normalizer/forwarder for `/events` ingestion.
+
+### Files changed
+- `packages/eva/vision/requirements.txt`
+- `packages/eva/vision/settings.yaml`
+- `packages/eva/vision/app/config.py`
+- `packages/eva/vision/app/presence.py` (new)
+- `packages/eva/vision/app/main.py`
+- `progress.md`
+
+### Verification
+- Vision Python compile check passes:
+  - `cd packages/eva/vision && python3 -m compileall -f app`
+- Eva TypeScript build remains passing:
+  - `cd packages/eva && npm run build`
+
+### Manual run steps
+1. Install/update Vision deps (includes OpenCV):
+   - `cd packages/eva/vision`
+   - `source .venv/bin/activate`
+   - `pip install -r requirements.txt`
+2. Start Executive + Vision + Eva/UI stack.
+3. Stream frames into Vision (`/infer`) via normal UI camera flow.
+4. Verify Vision emits presence updates without flooding:
+   - watch Vision logs for `presence_update emitted ...`
+   - confirm cadence follows `sample_every_ms` + `emit_every_ms` policy.
+5. Verify working memory ingestion:
+   - inspect `packages/eva/memory/working_memory.log`
+   - confirm `wm_event` records with `name: "presence_update"` appear.
+6. Confirm no Eva TS duplicate presence forwarding path was added (presence should be Vision -> Executive only).
+
+### Notes
+- Presence detection runs independently of caption attention gating.
+- Presence telemetry forwarding is active now; replay-context filtering for `presence_update` is scheduled in Iteration 207.
+
+## Iteration 207 (Executive presence API + replay filtering) — add `/presence` query and exclude presence telemetry from `/respond` replay
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Updated Executive server in `packages/eva/executive/src/server.ts`:
+  - added in-memory latest presence cache:
+    - `latestPresence: { ts_ms, in_view, facing } | null`
+  - added helper extraction from ingested events:
+    - `extractLatestPresenceFromEvents(...)`
+    - only accepts `wm_event` entries where:
+      - `name === "presence_update"`
+      - `data.in_view` and `data.facing` are booleans
+  - latest presence cache update now occurs **only after successful `/events` append** and only for qualifying `presence_update` events.
+  - added new endpoint:
+    - `GET /presence?window_ms=1500`
+    - `window_ms` parsing/validation (positive integer, default `1500`)
+    - response behavior:
+      - if no cached presence or stale (`age_ms > window_ms`):
+        - `{ found:false, in_view:false, facing:false, age_ms }`
+      - if fresh:
+        - `{ found:true, in_view, facing, ts_ms, age_ms }`
+  - added startup log line documenting `/presence` endpoint.
+- Updated replay filter in `packages/eva/executive/src/memcontext/working_memory_replay.ts`:
+  - added `isPresenceTelemetryRecord(...)`
+  - before replay record push, skips:
+    - `record.type === "wm_event" && record.name === "presence_update"`
+  - result: presence telemetry no longer enters `/respond` replay context.
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/src/memcontext/working_memory_replay.ts`
+- `progress.md`
+
+### Verification
+- Executive TypeScript build passes:
+  - `cd packages/eva/executive && npm run build`
+- Manual presence/replay harness passes:
+  - started Executive on a temp test port with temp memory dir
+  - posted `/events` containing both:
+    - `presence_update`
+    - non-presence `scene_caption`
+  - confirmed:
+    - `GET /presence?window_ms=1500` -> `found:true` with `in_view/facing`
+    - `GET /presence?window_ms=1` shortly after -> `found:false` (stale)
+    - `replayWorkingMemoryLog(...)` result excludes `presence_update` and retains non-presence event
+
+### Manual run steps
+1. Start Executive:
+   - `cd packages/eva/executive && npm run dev`
+2. Emit presence events through normal Vision flow (`POST /events` from Vision).
+3. Query presence freshness:
+   - `curl "http://127.0.0.1:8791/presence?window_ms=1500"`
+4. Confirm stale behavior by using a very small window (or waiting beyond window):
+   - `curl "http://127.0.0.1:8791/presence?window_ms=1"`
+5. Confirm `/respond` still works and does not include `presence_update` telemetry in replay context.
+
+### Notes
+- `/presence` uses in-memory cache for O(1) lookups and does not scan JSONL per request.
+- Cache is intentionally updated only on successful `/events` writes for consistency with persisted working memory.
+
+## Iteration 208 (Audio Runtime) — apply gating rule (wake OR presence-window) + Local Whisper STT
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Added Local Whisper dependency in `packages/eva/audio/requirements.txt`:
+  - `faster-whisper>=1.0,<2.0`
+- Extended audio runtime config in `packages/eva/audio/app/config.py` and `packages/eva/audio/settings.yaml` with:
+  - `executive.base_url` and `executive.timeout_ms` (for `/presence` checks)
+  - `gating.presence_window_ms` (default `1500`)
+  - `stt.model_id` (default `small.en`)
+  - `stt.device` (default `cpu`)
+  - `stt.compute_type` (default `int8`)
+  - `stt.cache_dir` (default `../memory/models/whisper`)
+- Added Executive `/presence` client in `packages/eva/audio/app/executive_client.py`:
+  - typed response validation
+  - timeout/unreachable/error handling
+- Added Local Whisper transcriber module in `packages/eva/audio/app/stt.py`:
+  - initializes `WhisperModel(model_id, device, compute_type)` once
+  - sets Whisper download/cache root to configured `stt.cache_dir`
+  - converts utterance PCM16LE -> float32 audio
+  - transcribes accepted utterances asynchronously (`asyncio.to_thread`)
+  - returns transcript text + confidence estimate
+- Extended audio protocol helpers in `packages/eva/audio/app/protocol.py`:
+  - added `speech_transcript` message model
+  - added `make_speech_transcript(...)`
+- Updated audio WS runtime flow in `packages/eva/audio/app/main.py`:
+  - gating decision now occurs at utterance end (server-side timing):
+    1. run wake detection on utterance bytes
+    2. if wake detected -> accept
+    3. else call Executive `GET /presence?window_ms=...`
+    4. accept only when `found && in_view && facing`
+  - STT executes **only for accepted utterances**
+  - rejected utterances do not run Whisper and emit no transcript
+  - accepted+transcribed utterances emit protocol message over Eva<->Audio WS:
+    - `type: "speech_transcript"`
+  - `/health` now exposes gating/presence/STT runtime stats and status fields.
+
+### Files changed
+- `packages/eva/audio/requirements.txt`
+- `packages/eva/audio/settings.yaml`
+- `packages/eva/audio/app/config.py`
+- `packages/eva/audio/app/executive_client.py` (new)
+- `packages/eva/audio/app/stt.py` (new)
+- `packages/eva/audio/app/protocol.py`
+- `packages/eva/audio/app/main.py`
+- `progress.md`
+
+### Verification
+- Audio Runtime Python compile check passes:
+  - `cd packages/eva/audio && python3 -m compileall app`
+- Eva TypeScript build remains passing:
+  - `cd packages/eva && npm run build`
+
+### Manual run steps
+1. Install/update audio deps:
+   - `cd packages/eva/audio`
+   - `source .venv/bin/activate`
+   - `pip install -r requirements.txt`
+2. Start Executive, Vision presence stream, Eva, and Audio Runtime:
+   - `cd packages/eva/executive && npm run dev`
+   - `cd packages/eva/vision && python -m app.run`
+   - `cd packages/eva && npm run dev`
+   - `cd packages/eva/audio && python -m app.run`
+3. Confirm runtime readiness:
+   - `curl -sS http://127.0.0.1:8793/health`
+   - verify `stt_runtime.ready` and wake status fields.
+4. Out of view test:
+   - speak: “what time is it”
+   - expect rejection (no `speech_transcript` emitted).
+5. Wake bypass test (out of view):
+   - speak: “Eva what time is it”
+   - expect accepted utterance + emitted `speech_transcript`.
+6. Presence window test (in view + facing):
+   - with fresh Vision `presence_update`, speak without wake word
+   - expect accepted utterance + emitted `speech_transcript`.
+
+### Notes
+- Gating correctness uses Executive `/presence` freshness (`age_ms`) and does not depend on browser chunk timestamps.
+- Transcript-to-agent reply plumbing in Eva remains Iteration 209.
+
+## Iteration 209 (Eva) — `speech_transcript` -> Executive `/respond` -> UI `text_output`
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Updated Eva Audio Runtime message handling in `packages/eva/src/server.ts`:
+  - added protocol validation for inbound audio-runtime `speech_transcript` messages using `SpeechTranscriptMessageSchema`
+  - on valid transcript:
+    - calls existing `callAgentRespond(...)` path (same agent `/respond` flow used by `/text`)
+    - builds standard `text_output` payload via `makeTextOutputMessage(...)`
+    - forwards the resulting `text_output` to the active UI client on `/eye` when connected
+  - on invalid transcript shape:
+    - logs and drops payload safely (no crash)
+  - on agent call failure:
+    - logs warning and skips UI emit for that transcript
+- Updated Eva protocol imports in `packages/eva/src/server.ts` to include `SpeechTranscriptMessageSchema`.
+
+### Files changed
+- `packages/eva/src/server.ts`
+- `progress.md`
+
+### Verification
+- Eva TypeScript build passes:
+  - `cd packages/eva && npm run build`
+- Audio Runtime Python compile remains passing:
+  - `cd packages/eva/audio && python3 -m compileall app`
+
+### Manual run steps
+1. Start Executive:
+   - `cd packages/eva/executive && npm run dev`
+2. Start Audio Runtime:
+   - `cd packages/eva/audio && python -m app.run`
+3. Start Eva + UI:
+   - `cd packages/eva && npm run dev`
+   - `cd packages/ui && npm run dev`
+4. In UI, start mic and produce an accepted utterance (wake or presence-gated).
+5. Confirm flow:
+   - Audio Runtime emits `speech_transcript`
+   - Eva calls Executive `/respond`
+   - UI receives and displays `text_output` assistant reply.
+
+### Notes
+- This iteration keeps behavior minimal: speech transcript replies are routed through the same core `/respond` path as typed chat.
+- Optional `speech_input` UI event emission was intentionally not added.
+
+## Iteration 210 (Audio Runtime) — Conversation ACTIVE state machine + timeout
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Extended audio runtime config with ACTIVE timeout:
+  - `packages/eva/audio/app/config.py`
+  - `packages/eva/audio/settings.yaml`
+  - added `conversation.active_timeout_ms` (default `25000`)
+- Updated Audio Runtime utterance acceptance flow in `packages/eva/audio/app/main.py`:
+  - added per-connection ACTIVE state (`active_until_ms`)
+  - ACTIVE rules implemented:
+    - enter ACTIVE whenever an utterance is accepted (`wake` or `presence`)
+    - while ACTIVE and not expired, accept utterances directly (`accept_reason=active`) without wake or presence checks
+    - on every accepted utterance, extend `active_until_ms = utterance_end_ts + active_timeout_ms`
+    - expire ACTIVE when `utterance_end_ts > active_until_ms`
+- Added ACTIVE observability counters in `/health` (`ws` section):
+  - `accepted_by_active`
+  - `conversation_active_entries`
+  - `conversation_active_exits`
+  - `last_active_until_ts_ms`
+- Startup config logging now includes `conversation.active_timeout_ms`.
+
+### Files changed
+- `packages/eva/audio/app/config.py`
+- `packages/eva/audio/settings.yaml`
+- `packages/eva/audio/app/main.py`
+- `progress.md`
+
+### Verification
+- Audio Runtime Python compile check passes:
+  - `cd packages/eva/audio && python3 -m compileall app`
+- Eva TypeScript build remains passing:
+  - `cd packages/eva && npm run build`
+
+### Manual run steps
+1. Start Executive, Vision, Eva, UI, and Audio Runtime.
+2. Trigger one accepted utterance (wake phrase or valid presence gate).
+3. Within `conversation.active_timeout_ms`, speak follow-up utterances without wake phrase and with no guaranteed fresh presence.
+4. Confirm follow-ups are accepted with `accept_reason=active` and transcripts continue to emit.
+5. Pause longer than `conversation.active_timeout_ms`.
+6. Speak again without wake/presence and confirm rejection until wake/presence re-engages ACTIVE.
+
+### Notes
+- ACTIVE state is scoped to the current `/listen` WebSocket connection.
+- Gating rules from Iteration 208 remain the entry condition for starting ACTIVE conversation mode.
+
+## Iteration 211 (Audio Runtime) — Speaker lock-on in ACTIVE mode (SpeechBrain ECAPA; torch pinned)
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Added speaker-lock dependencies in `packages/eva/audio/requirements.txt`:
+  - `speechbrain>=1.0,<2.0`
+  - `torch>=2.6,<2.7`
+  - `torchaudio>=2.6,<2.7`
+- Extended audio runtime config in `packages/eva/audio/app/config.py` and `packages/eva/audio/settings.yaml` with speaker settings:
+  - `speaker.model_id` (default `speechbrain/spkrec-ecapa-voxceleb`)
+  - `speaker.device` (default `cpu`)
+  - `speaker.cache_dir` (default `../memory/models/speechbrain`)
+  - `speaker.similarity_threshold` (default `0.75`)
+  - `speaker.min_check_utterance_ms` (default `500`)
+  - `speaker.max_voiced_ms` (default `2000`)
+  - `speaker.short_utterance_policy` (default `require_rewake`)
+- Added new speaker verification module `packages/eva/audio/app/speaker.py`:
+  - initializes SpeechBrain ECAPA model once
+  - converts PCM16 -> float32 in `[-1, 1]`
+  - extracts voiced-only audio window using 20ms WebRTC VAD frames
+  - uses first `min(2000ms, utterance_duration)` of voiced audio for embedding
+  - computes cosine similarity against active speaker reference
+- Integrated speaker lock into ACTIVE flow in `packages/eva/audio/app/main.py`:
+  - on ACTIVE entry (`wake`/`presence` accepted utterance), captures speaker reference embedding
+  - while ACTIVE, accepted path now requires speaker verification match (`similarity >= threshold`)
+  - non-matching speakers are rejected during ACTIVE (`accept_reason` not granted)
+  - short utterances (`<500ms`) in ACTIVE follow chosen policy:
+    - `require_rewake` (implemented): reject utterance and clear ACTIVE state so wake/presence is required again
+- Added speaker runtime observability:
+  - startup logs include speaker config/runtime readiness
+  - `/health` includes `speaker_runtime` and additional speaker-lock counters:
+    - checks, matches, rejections, short-utterance count
+    - reference set/clear counts
+    - last similarity/decision
+
+### Files changed
+- `packages/eva/audio/requirements.txt`
+- `packages/eva/audio/settings.yaml`
+- `packages/eva/audio/app/config.py`
+- `packages/eva/audio/app/speaker.py` (new)
+- `packages/eva/audio/app/main.py`
+- `progress.md`
+
+### Verification
+- Audio Runtime Python compile check passes:
+  - `cd packages/eva/audio && python3 -m compileall app`
+- Eva TypeScript build remains passing:
+  - `cd packages/eva && npm run build`
+
+### Manual run steps
+1. Install/update audio deps:
+   - `cd packages/eva/audio`
+   - `source .venv/bin/activate`
+   - `pip install -r requirements.txt`
+2. Start Executive, Vision, Eva, UI, and Audio Runtime.
+3. Engage ACTIVE once (wake or presence-gated utterance accepted).
+4. While ACTIVE, have a different speaker talk:
+   - confirm utterance is rejected by speaker lock.
+5. Original speaker talks again:
+   - confirm utterance is accepted and transcript flow continues.
+6. Optionally test short utterance in ACTIVE (`<500ms`):
+   - confirm it is rejected and ACTIVE is cleared (`require_rewake` policy).
+
+### Notes
+- Speaker lock is scoped per `/listen` connection and paired with the ACTIVE conversation state.
+- If speaker runtime/reference is unavailable, ACTIVE is cleared for safety and wake/presence re-engagement is required.
+
+## Iteration 212 (Audio Runtime) — Persist voiceprints only on intentional engagement
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Added voiceprint persistence config in `packages/eva/audio/app/config.py` and `packages/eva/audio/settings.yaml`:
+  - `voiceprints.dir` default: `../memory/voiceprints`
+  - `voiceprints.ema_alpha` default: `0.35`
+- Added new persistence module `packages/eva/audio/app/voiceprints.py`:
+  - loads persisted voiceprint on startup (if present)
+  - stores payload fields:
+    - `embedding` vector
+    - `createdAt`
+    - `lastSeen`
+    - `sampleCount`
+  - persists atomically to:
+    - `voiceprints.dir/default.json`
+  - updates existing embedding via EMA blend:
+    - `blended = alpha * current + (1 - alpha) * old`
+    - then normalizes embedding
+- Integrated voiceprint store into runtime flow in `packages/eva/audio/app/main.py`:
+  - startup now initializes voiceprint store and logs load status
+  - `/health` now exposes `voiceprint_runtime` details
+  - on ACTIVE entry with intentional engagement (`accept_reason` = `wake` or `presence`):
+    - if speaker reference embedding is available, update persisted voiceprint
+    - **no persistence** occurs on ambient ACTIVE continuation utterances
+  - when speaker reference capture is unavailable at ACTIVE entry, runtime can fallback to loaded persisted voiceprint reference.
+- Added voiceprint observability counters in `/health` (`ws` section):
+  - `voiceprint_updates`
+  - `voiceprint_update_errors`
+  - `voiceprint_fallback_uses`
+  - `last_voiceprint_sample_count`
+
+### Files changed
+- `packages/eva/audio/settings.yaml`
+- `packages/eva/audio/app/config.py`
+- `packages/eva/audio/app/voiceprints.py` (new)
+- `packages/eva/audio/app/main.py`
+- `progress.md`
+
+### Verification
+- Audio Runtime Python compile check passes:
+  - `cd packages/eva/audio && python3 -m compileall app`
+- Eva TypeScript build remains passing:
+  - `cd packages/eva && npm run build`
+
+### Manual run steps
+1. Start full stack and trigger intentional engagement (wake or presence-gated utterance).
+2. Confirm voiceprint file appears:
+   - `packages/eva/memory/voiceprints/default.json`
+3. Confirm file includes:
+   - `embedding`, `createdAt`, `lastSeen`, `sampleCount`
+4. Restart Audio Runtime (or full stack).
+5. Re-engage ACTIVE and verify speaker lock behavior still works (voice recognition persists across restart).
+
+### Notes
+- Voiceprint persistence is intentionally restricted to intentional engagement paths (`wake`/`presence`) to avoid learning ambient/by-stander audio.
+- ACTIVE-session speaker checks continue to use runtime lock-on behavior from Iteration 211.
+
+## Iteration 213 — Protocol shape extension for insight presence (optional-first)
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Updated canonical protocol schema in `packages/protocol/schema.json`:
+  - added `$defs/insight_presence`
+  - added optional `summary.presence` under `$defs/insight_summary`
+  - presence shape:
+    - `preson_present: boolean`
+    - `person_facing_me: boolean`
+- Updated protocol docs in `packages/protocol/README.md`:
+  - insight example now includes `summary.presence`
+  - documented transition behavior that `summary.presence` is optional for compatibility.
+- Updated Executive insight tool model in `packages/eva/executive/src/tools/insight.ts`:
+  - added `InsightPresenceSchema`
+  - extended `InsightSummarySchema` with optional `presence`
+  - updated tool description to include optional presence payload.
+- Updated Vision runtime models:
+  - `packages/eva/vision/app/protocol.py`:
+    - added `InsightPresence`
+    - `InsightSummary.presence` optional
+  - `packages/eva/vision/app/executive_client.py`:
+    - added `ExecutiveInsightPresence`
+    - `ExecutiveInsightSummary.presence` optional
+- Updated Eva/UI TypeScript protocol types:
+  - `packages/eva/src/protocol.ts`:
+    - added `InsightPresenceSchema`
+    - `InsightSummarySchema.presence` optional
+    - exported `InsightPresence` type
+  - `packages/ui/src/types.ts`:
+    - added `InsightPresence` interface
+    - `InsightSummary.presence` optional
+
+### Files changed
+- `packages/protocol/schema.json`
+- `packages/protocol/README.md`
+- `packages/eva/executive/src/tools/insight.ts`
+- `packages/eva/vision/app/protocol.py`
+- `packages/eva/vision/app/executive_client.py`
+- `packages/eva/src/protocol.ts`
+- `packages/ui/src/types.ts`
+- `progress.md`
+
+### Verification
+- Eva build passes:
+  - `cd packages/eva && npm run build`
+- UI build passes:
+  - `cd packages/ui && npm run build`
+- Vision Python compile check passes:
+  - `cd packages/eva/vision && python3 -m compileall -f app`
+
+### Manual run steps
+1. Build Eva and UI:
+   - `cd packages/eva && npm run build`
+   - `cd packages/ui && npm run build`
+2. Compile Vision app:
+   - `cd packages/eva/vision && python3 -m compileall -f app`
+3. Optional protocol sanity check:
+   - validate that both insight forms are accepted by consumers:
+     - without `summary.presence` (legacy shape)
+     - with `summary.presence = { preson_present, person_facing_me }`.
+
+### Notes
+- This iteration is shape/type/docs only; no source-of-truth migration or gating behavior changed yet.
+- `summary.presence` is intentionally optional in this step to preserve backward compatibility during rollout.
+
+## Iteration 214 — Executive insight generation returns presence fields
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Updated Executive insight tool schema in `packages/eva/executive/src/tools/insight.ts`:
+  - changed `InsightSummarySchema.presence` from optional to required
+  - tool description now explicitly requires:
+    - `presence.preson_present`
+    - `presence.person_facing_me`
+- Updated insight prompt requirements in `packages/eva/executive/src/prompts/insight.ts`:
+  - added required field instructions for `summary.presence.*`
+  - added hard consistency rules:
+    - always include both booleans
+    - if no person is visible: `preson_present=false` and `person_facing_me=false`
+    - `person_facing_me=true` only when `preson_present=true`
+- Updated Executive insight handling in `packages/eva/executive/src/server.ts`:
+  - added strict persistence/response validation schema for insight summaries (`InsightSummaryPersistenceSchema`), including presence consistency checks
+  - `generateInsight(...)` now validates the final summary (after tag sanitization) before returning
+  - `wm_insight` write path now persists presence fields explicitly:
+    - top-level `presence`
+    - nested `summary` object containing `one_liner`, `tts_response`, `what_changed`, `tags`, and `presence`
+  - retained existing top-level fields (`one_liner`, `what_changed`, `tags`, `narration`) for backward compatibility with current consumers.
+
+### Files changed
+- `packages/eva/executive/src/tools/insight.ts`
+- `packages/eva/executive/src/prompts/insight.ts`
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Executive build passes:
+  - `cd packages/eva/executive && npm run build`
+
+### Manual run steps
+1. Start Executive with valid model credentials.
+2. Submit a normal insight request:
+   - `POST /insight` with valid clip frames payload.
+3. Confirm response includes:
+   - `summary.presence.preson_present`
+   - `summary.presence.person_facing_me`
+4. Inspect latest `wm_insight` entry in working memory log and confirm persisted presence fields are present in both:
+   - top-level `presence`
+   - `summary.presence`.
+
+### Notes
+- This iteration makes presence required in Executive model tool output while keeping protocol-level optionality from Iteration 213 for transitional compatibility.
+- Presence shape names remain intentionally aligned to plan (`preson_present`, `person_facing_me`).
+
+## Iteration 215 — Vision→Eva→UI plumbing for enriched insight summary
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Updated Vision insight relay path in `packages/eva/vision/app/main.py` to make summary forwarding explicit and unchanged:
+  - extracted `summary_payload = insight_response.summary.model_dump(exclude_none=True)`
+  - passed the summary payload directly into `make_insight(...)`
+  - no field reshaping/stripping is applied in Vision before emit.
+- Confirmed Eva protocol shape in `packages/eva/src/protocol.ts` continues to include optional `summary.presence` (`InsightSummarySchema.presence`) so relayed `insight` messages preserve presence fields.
+- Confirmed UI protocol types in `packages/ui/src/types.ts` include optional `InsightSummary.presence` with:
+  - `preson_present`
+  - `person_facing_me`
+- Updated UI runtime handling in `packages/ui/src/main.tsx`:
+  - hardened `isInsightMessage(...)` validation to accept/validate optional `summary.presence`
+  - added lightweight insight-receipt log line including presence values (or missing)
+  - updated “Latest insight” panel to display presence fields when present.
+
+### Files changed
+- `packages/eva/vision/app/main.py`
+- `packages/ui/src/main.tsx`
+- `progress.md`
+
+### Verification
+- Eva build passes:
+  - `cd packages/eva && npm run build`
+- UI build passes:
+  - `cd packages/ui && npm run build`
+- Vision Python compile check passes (post-change sanity):
+  - `cd packages/eva/vision && python3 -m compileall -f app`
+
+### Manual run steps
+1. Start Executive, Vision, Eva, and UI.
+2. Trigger an insight run.
+3. Confirm UI receives an `insight` message whose `summary` includes:
+   - `presence.preson_present`
+   - `presence.person_facing_me`
+4. Confirm “Latest insight” panel renders the presence booleans.
+
+### Notes
+- This iteration keeps protocol compatibility: UI still accepts insight messages where presence is missing (transition safety), but now explicitly surfaces presence when provided.
+
+## Iteration 216 — Executive `/presence` source migration to insight summaries
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Updated Executive `/presence` source logic in `packages/eva/executive/src/server.ts`:
+  - added insight-backed presence cache updated on successful `/insight` writes
+  - cache source is `wm_insight.presence` (derived from `wm_insight.summary.presence` at write time)
+- Migrated `/presence` API response shape to plan-standard fields:
+  - `{ found, preson_present, person_facing_me, ts_ms?, age_ms }`
+  - removed `in_view` / `facing` from API responses.
+- Kept one-iteration transitional fallback path from legacy telemetry:
+  - `/events` ingestion still parses `presence_update` and updates a legacy fallback cache
+  - `/presence` now prefers fresh insight-backed cache and only uses legacy cache when needed
+  - legacy fallback is mapped to new fields as:
+    - `preson_present = in_view`
+    - `person_facing_me = in_view && facing`
+- Updated startup endpoint log to clarify source model:
+  - presence endpoint is now insight-backed with events fallback.
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `progress.md`
+
+### Verification
+- Executive build passes:
+  - `cd packages/eva/executive && npm run build`
+
+### Manual run steps
+1. Start Executive and trigger at least one successful `/insight` request that includes `summary.presence`.
+2. Query:
+   - `GET /presence?window_ms=1500`
+3. Confirm response shape is:
+   - `found`
+   - `preson_present`
+   - `person_facing_me`
+   - optional `ts_ms` when found
+   - `age_ms`
+4. Confirm values track latest insight-derived presence.
+
+### Notes
+- This iteration intentionally keeps legacy `presence_update` cache handling as fallback safety for one step.
+- API output is now standardized to `preson_present` / `person_facing_me` only.
+
+## Iteration 217 — Audio gating verification against migrated `/presence`
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Updated Audio Executive presence client in `packages/eva/audio/app/executive_client.py`:
+  - migrated `/presence` response model to new fields:
+    - `preson_present`
+    - `person_facing_me`
+  - updated `PresenceSnapshot` shape accordingly.
+- Updated Audio Runtime gating logic in `packages/eva/audio/app/main.py`:
+  - migrated acceptance condition from:
+    - `found && in_view && facing`
+  - to:
+    - `found && preson_present && person_facing_me`
+  - updated runtime observability fields in `/health` (`ws`) to match migrated naming:
+    - `last_presence_preson_present`
+    - `last_presence_person_facing_me`
+  - updated rejection logging details to print migrated field names.
+
+### Files changed
+- `packages/eva/audio/app/executive_client.py`
+- `packages/eva/audio/app/main.py`
+- `progress.md`
+
+### Verification
+- Audio Runtime Python compile check passes:
+  - `cd packages/eva/audio && python3 -m compileall app`
+
+### Manual run steps
+1. Start Executive (with Iteration 216 `/presence` API), Vision, Eva, UI, and Audio Runtime.
+2. Validate gating matrix:
+   - wake bypass (should accept)
+   - no wake + fresh presence with `preson_present=true` and `person_facing_me=true` (should accept)
+   - stale/no presence or false presence fields (should reject)
+3. Confirm Audio Runtime logs and `/health` (`ws`) show migrated presence field names.
+
+### Notes
+- This iteration keeps runtime behavior stable while aligning field reads/logging to migrated `/presence` response shape.
+
+## Iteration 218 — Remove Vision dedicated presence detector + OpenCV dependency
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Removed dedicated Vision presence detector runtime path in `packages/eva/vision/app/main.py`:
+  - removed presence detector imports and initialization path
+  - removed presence sampling/emission logic from `/infer` frame loop
+  - removed `presence_update` forwarding path from Vision
+  - removed presence-related runtime counters/log fields from `/health` and disconnect summary.
+- Removed Vision presence config surface:
+  - `packages/eva/vision/app/config.py`
+    - removed `PresenceConfig`
+    - removed `AppConfig.presence`
+    - removed `presence.*` settings parsing
+    - removed `presence` section from `config_summary(...)`
+  - `packages/eva/vision/settings.yaml`
+    - removed active `presence:` settings block.
+- Removed OpenCV dependency from Vision:
+  - `packages/eva/vision/requirements.txt`
+  - dropped `opencv-python-headless` dependency line.
+- Removed obsolete detector module:
+  - deleted `packages/eva/vision/app/presence.py`.
+
+### Files changed
+- `packages/eva/vision/app/main.py`
+- `packages/eva/vision/app/config.py`
+- `packages/eva/vision/settings.yaml`
+- `packages/eva/vision/requirements.txt`
+- `packages/eva/vision/app/presence.py` (removed)
+- `progress.md`
+
+### Verification
+- Vision Python compile check passes:
+  - `cd packages/eva/vision && python3 -m compileall -f app`
+- Eva TypeScript build remains passing:
+  - `cd packages/eva && npm run build`
+
+### Manual run steps
+1. Install/update Vision deps:
+   - `cd packages/eva/vision`
+   - `source .venv/bin/activate`
+   - `pip install -r requirements.txt`
+2. Start Executive + Vision + Eva/UI stack.
+3. Stream frames via normal UI camera flow.
+4. Confirm no Vision `presence_update` emission appears in logs.
+5. Confirm `/infer` continues to emit scene caption / insight flow normally.
+
+### Notes
+- This iteration removes the dedicated OpenCV face path only; presence for `/presence` now comes from insight summaries per Iterations 214–216.
+- Legacy `presence_update` fallback handling still exists on Executive side for one transition iteration and will be removed in Iteration 219.
+
+## Iteration 219 — Remove remaining `presence_update` plumbing + cleanup
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Removed remaining Executive legacy `presence_update` fallback plumbing in `packages/eva/executive/src/server.ts`:
+  - deleted legacy event fallback cache types/helpers
+  - `/presence` now reads **only** from latest insight-derived presence cache
+  - `/events` ingestion no longer parses or updates any presence fallback cache.
+- Removed obsolete replay filter branch in `packages/eva/executive/src/memcontext/working_memory_replay.ts`:
+  - dropped special-case exclusion for `wm_event` records with `name === "presence_update"`.
+- Cleaned operational endpoint note to reflect final source-of-truth:
+  - startup log now labels `/presence` as `insight-backed presence` (no events fallback wording).
+
+### Files changed
+- `packages/eva/executive/src/server.ts`
+- `packages/eva/executive/src/memcontext/working_memory_replay.ts`
+- `progress.md`
+
+### Verification
+- Executive build passes:
+  - `cd packages/eva/executive && npm run build`
+
+### Manual run steps
+1. Start Executive + Vision + Eva/UI stack.
+2. Trigger at least one successful `/insight` call containing `summary.presence`.
+3. Query `GET /presence?window_ms=1500` and confirm:
+   - it returns insight-derived values (`preson_present`, `person_facing_me`)
+   - stale/found behavior is driven by insight freshness only.
+4. Post non-presence `wm_event`s to `/events` and confirm `/presence` behavior does not change unless a new insight is written.
+
+### Notes
+- This removes the final runtime dependency on `presence_update` ingestion for `/presence`.
+- End-to-end behavior is now aligned with the Iteration 213–220 target: presence source-of-truth is insight summaries.
+
+## Iteration 220 — Regression guardrails + docs/runbook update
+
+**Status:** ✅ Completed (2026-03-02)
+
+### Completed
+- Added static regression guardrails to prevent reintroduction of legacy presence paths:
+  - new script: `packages/eva/scripts/check-presence-migration-guardrails.mjs`
+  - new npm script: `packages/eva/package.json` → `check:presence-guardrails`
+- Guardrail assertions now enforce:
+  - protocol schema still includes insight presence shape (`preson_present`, `person_facing_me`)
+  - Executive `/presence` remains insight-derived (no `presence_update` dependency)
+  - Vision has no OpenCV presence detector dependency/path (`opencv-python-headless` removed, `app/presence.py` absent).
+- Updated protocol docs and operational docs:
+  - `packages/protocol/README.md` insight notes now document canonical presence shape semantics.
+  - root `README.md` now documents final presence source-of-truth and guardrail command.
+  - added operational runbook: `docs/presence-insight-runbook.md` with build checks + end-to-end checklist.
+
+### Files changed
+- `packages/eva/scripts/check-presence-migration-guardrails.mjs`
+- `packages/eva/package.json`
+- `packages/protocol/README.md`
+- `README.md`
+- `docs/presence-insight-runbook.md`
+- `progress.md`
+
+### Verification
+- Guardrail regression check passes:
+  - `cd packages/eva && npm run check:presence-guardrails`
+- Eva TypeScript build passes:
+  - `cd packages/eva && npm run build`
+- Executive TypeScript build passes:
+  - `cd packages/eva/executive && npm run build`
+- Vision Python compile check passes:
+  - `cd packages/eva/vision && python3 -m compileall -f app`
+
+### Manual run steps (final E2E checklist)
+1. Start Executive + Vision + Eva + UI.
+2. Trigger insight with person visible/facing camera and verify:
+   - `summary.presence = { preson_present: true, person_facing_me: true }`
+3. Trigger insight with no person and verify:
+   - `summary.presence = { preson_present: false, person_facing_me: false }`
+4. Query `GET /presence?window_ms=1500` and verify freshness reflects latest insight-derived presence.
+5. Validate Audio no-wake gating respects `/presence` outcome.
+6. Confirm no Vision `presence_update` telemetry stream and no OpenCV presence dependency.
+
+### Notes
+- This locks the final migrated behavior with explicit static checks + operational verification docs.
+
+## Iteration 221 — Config schema hard cut from Porcupine to transcript wake
+
+**Status:** ✅ Completed (2026-03-03)
+
+### Completed
+- Updated `packages/eva/audio/app/config.py` to hard-cut wake config schema from Porcupine fields to transcript wake fields:
+  - `wake.phrases` (required non-empty list of non-empty strings)
+  - `wake.match_mode` (`contains|exact|word_boundary`)
+  - `wake.case_sensitive` (boolean)
+  - `wake.min_confidence` (number, bounded `0..1`)
+- Removed Porcupine-specific config validation:
+  - deleted `wake.provider == porcupine` enforcement path
+  - removed config fields `keyword_path`, `sensitivity`, `access_key_env`, `access_key`
+- Added config helper validation/readers used by transcript wake schema:
+  - `_read_bool(...)`
+  - `_read_non_empty_string_list(...)`
+- Updated `config_summary()` wake section to report transcript-wake config only.
+- Updated committed defaults in `packages/eva/audio/settings.yaml` to transcript wake shape.
+
+### Files changed
+- `packages/eva/audio/app/config.py`
+- `packages/eva/audio/settings.yaml`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/audio && python3 -m compileall -f app`
+- Empty-phrase-list fail-fast check (config loader) passes:
+  - with temporary `settings.local.yaml` override:
+    - `wake.phrases: '@reset []'`
+  - `load_app_config(force_reload=True)` raises:
+    - `RuntimeError: Audio config error: wake.phrases must contain at least one phrase`
+
+### Manual run steps
+1. Compile modules:
+   - `cd packages/eva/audio`
+   - `python3 -m compileall -f app`
+2. Validate empty phrase list rejection:
+   - create temporary `settings.local.yaml` containing:
+     - `wake.phrases: '@reset []'`
+   - run:
+     - `.venv/bin/python -c "from app.config import load_app_config; load_app_config(force_reload=True)"`
+   - confirm startup/config load fails with `Audio config error: wake.phrases must contain at least one phrase`
+   - remove temporary `settings.local.yaml` override.
+
+### Notes
+- Dynaconf list merge behavior means plain `wake.phrases: []` in `settings.local.yaml` merges with base defaults; use reset syntax when explicitly testing empty-list validation.
+- Runtime wake detector is still Porcupine-backed at this point; runtime replacement is handled in Iteration 222.
+
+## Iteration 222 — Replace `wake.py` with transcript matcher runtime
+
+**Status:** ✅ Completed (2026-03-03)
+
+### Completed
+- Replaced Porcupine wake runtime implementation in `packages/eva/audio/app/wake.py` with transcript wake phrase matching.
+- Removed Porcupine-specific classes/imports/runtime paths:
+  - removed `WakeWordUnavailableError`
+  - removed `PorcupineWakeDetector`
+  - removed `pvporcupine` import/runtime init path
+  - removed PCM frame-window detection logic.
+- Added transcript wake matcher runtime with:
+  - text normalization (trim + whitespace collapse)
+  - optional case-folding (`case_sensitive=false` path)
+  - phrase matching modes:
+    - `contains`
+    - `exact`
+    - `word_boundary`
+  - confidence gating (`wake.min_confidence`) applied when confidence is available.
+- Added typed wake match/status models for runtime logging/stats consumption:
+  - `WakePhraseMatchResult`
+  - extended `WakeDetectorStatus` with matcher metadata (`phrase_count`, `match_mode`, `case_sensitive`, `min_confidence`).
+- Added transcript matcher APIs on detector:
+  - `match_transcript(...) -> WakePhraseMatchResult`
+  - `detect_wake_phrase(...) -> bool`
+- Kept temporary compatibility shim:
+  - `detect_wake_word(...)` remains present and returns `False` while non-active gating migration is still in progress (moved in Iteration 223).
+
+### Files changed
+- `packages/eva/audio/app/wake.py`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/audio && python3 -m compileall -f app`
+- Manual matcher checks pass (contains/exact/word_boundary + confidence gate):
+  - `cd packages/eva/audio && .venv/bin/python - <<'PY' ...`
+  - output: `PASS: transcript wake matcher modes + confidence gating`
+
+### Manual run steps
+1. Compile modules:
+   - `cd packages/eva/audio`
+   - `python3 -m compileall -f app`
+2. Run manual matcher sanity checks in REPL/script:
+   - instantiate `WakeWordDetector` with each `match_mode`
+   - verify expected positive/negative transcript matches
+   - verify `min_confidence` rejects low-confidence transcripts but allows `confidence=None`.
+
+### Notes
+- This iteration changes wake runtime to transcript matching only.
+- Non-active utterance gating in `main.py` is still on the pre-refactor flow and will be updated in Iteration 223 (presence-first + transcript-wake fallback).
+
+## Iteration 223 — Gating flow refactor: presence-first + transcript wake fallback
+
+**Status:** ✅ Completed (2026-03-03)
+
+### Completed
+- Updated non-active utterance gating flow in `packages/eva/audio/app/main.py` to presence-first + transcript wake fallback:
+  1. check Executive `/presence`
+  2. accept immediately when `found && preson_present && person_facing_me` (`accept_reason="presence"`)
+  3. when not accepted by presence, run STT
+  4. apply transcript wake matcher (`wake_detector.match_transcript(...)`) and accept only on phrase match (`accept_reason="wake_phrase"`)
+- Removed non-active PCM wake-word detection usage from runtime path:
+  - replaced `wake_detector.detect_wake_word(utterance.audio_bytes)` call with transcript-based matcher flow.
+- Standardized acceptance reason values in runtime decisioning:
+  - `presence`
+  - `wake_phrase`
+  - `active`
+- Preserved active-window + speaker-lock behavior:
+  - active-window timeout/entry/exit logic unchanged
+  - active speaker verification + rejection handling unchanged
+  - speaker reference/voiceprint flow preserved for non-active intentional entries (`wake_phrase` / `presence`).
+- Prevented duplicate STT work for wake-phrase path:
+  - if STT was already run for phrase gating, reuse transcript for emit path instead of transcribing twice.
+- Updated startup config logging fields in `main.py` to current wake config shape (`match_mode`, `case_sensitive`, `min_confidence`, `phrase_count`) so startup no longer references removed wake config keys.
+
+### Files changed
+- `packages/eva/audio/app/main.py`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/audio && python3 -m compileall -f app`
+
+### Manual test matrix (runbook)
+1. **presence=true, no wake phrase**
+   - Ensure `/presence` returns `found=true`, `preson_present=true`, `person_facing_me=true`.
+   - Speak an utterance without configured wake phrase.
+   - Expected: accepted, `accept_reason=presence`, transcript emitted.
+2. **presence=false, phrase match**
+   - Ensure `/presence` is stale/false for current window.
+   - Speak an utterance containing configured wake phrase.
+   - Expected: STT runs, wake phrase matches, accepted with `accept_reason=wake_phrase`, transcript emitted.
+3. **presence=false, no phrase**
+   - Ensure `/presence` is stale/false for current window.
+   - Speak an utterance without configured wake phrase.
+   - Expected: STT runs, wake phrase does not match, utterance rejected (no transcript emitted).
+
+### Notes
+- Existing ws stat field names are unchanged in this iteration (for compatibility) even though accept reason now uses `wake_phrase`; telemetry surface cleanup/renaming is handled in Iteration 224.
+- Presence check errors now naturally fall through to the transcript-wake-required path for non-active utterances.
+
+## Iteration 224 — Startup/health/telemetry cleanup for new architecture
+
+**Status:** ✅ Completed (2026-03-03)
+
+### Completed
+- Updated audio observability in `packages/eva/audio/app/main.py` to reflect transcript wake architecture only.
+- Startup logging cleanup:
+  - replaced wake runtime log wording with transcript matcher wording (`wake matcher ready/unavailable`)
+  - removed wake runtime provider/frame-size/sample-rate startup log fields
+  - startup config wake fields remain transcript-focused (`match_mode`, `case_sensitive`, `min_confidence`, `phrase_count`).
+- `/health` wake section cleanup:
+  - updated `wake_runtime` payload to transcript matcher fields only:
+    - `ready`
+    - `reason`
+    - `phrase_count`
+    - `match_mode`
+    - `case_sensitive`
+    - `min_confidence`
+  - removed obsolete wake runtime fields:
+    - `provider`
+    - `frame_length`
+    - `sample_rate_hz`
+- WS telemetry rename/update:
+  - renamed counters/fields:
+    - `wake_checks` -> `wake_phrase_checks`
+    - `wake_detected` -> `wake_phrase_matches`
+    - `accepted_by_wake` -> `accepted_by_wake_phrase`
+  - added phrase detail field:
+    - `last_wake_phrase` (last matched configured phrase, or `null`)
+  - removed obsolete wake boolean field:
+    - `last_wake_detected`
+- Runtime gating stats updates now write the renamed wake-phrase fields.
+
+### Files changed
+- `packages/eva/audio/app/main.py`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/audio && python3 -m compileall -f app`
+- `/health` shape check passes (transcript wake only):
+  - validated wake section has no `provider`/`frame_length`/`sample_rate_hz`
+  - validated ws stats expose `wake_phrase_checks`, `wake_phrase_matches`, `last_wake_phrase`
+  - output: `PASS: /health wake/telemetry shape is transcript-wake-only`
+- Startup log string audit in `main.py`:
+  - no `porcupine` or `PV_ACCESS_KEY` references remain.
+
+### Manual run steps
+1. Start Audio runtime:
+   - `cd packages/eva/audio`
+   - `.venv/bin/python -m app.run`
+2. Check startup logs:
+   - confirm wake logs use `wake matcher ...` wording.
+   - confirm no `porcupine` or `PV_ACCESS_KEY` appears.
+3. Query health:
+   - `curl -sS http://127.0.0.1:8793/health`
+4. Confirm:
+   - `wake_runtime` reports transcript matcher keys only
+   - `ws` wake telemetry uses `wake_phrase_*` keys and `last_wake_phrase`.
+
+### Notes
+- This iteration is observability/telemetry surface cleanup only; gating behavior changes were introduced in Iteration 223.
+
+## Iteration 225 — Dependency and asset hard cleanup
+
+**Status:** ✅ Completed (2026-03-03)
+
+### Completed
+- Updated audio dependency surface in `packages/eva/audio/requirements.txt`:
+  - removed `pvporcupine`
+  - added explicit `requests>=2.31,<3.0` for speechbrain runtime compatibility in this environment.
+- Retired wakeword asset path usage:
+  - removed wakeword-specific ignore rules from root `.gitignore`:
+    - `packages/eva/audio/wakewords/*.ppn`
+    - `!packages/eva/audio/wakewords/.gitkeep`
+  - added `packages/eva/audio/wakewords/README.md` documenting the directory as deprecated historical baggage (no runtime usage).
+- Cleared active-runtime/setup references to Porcupine in non-historical surfaces:
+  - after this iteration, non-plan/non-progress files contain no `pvporcupine`, `PV_ACCESS_KEY`, or `wake.provider` references.
+
+### Files changed
+- `.gitignore`
+- `packages/eva/audio/requirements.txt`
+- `packages/eva/audio/wakewords/README.md`
+- `progress.md`
+
+### Verification
+- Fresh venv install from updated requirements succeeds without any Porcupine key setup:
+  - `cd packages/eva/audio`
+  - `python3 -m venv /tmp/eva-audio-iter225-venv`
+  - `source /tmp/eva-audio-iter225-venv/bin/activate`
+  - `pip install -r requirements.txt`
+  - `python -m compileall -f app`
+  - `python -c "from app.config import load_app_config; c=load_app_config(force_reload=True); print(c.wake.match_mode, c.wake.phrases)"`
+- Audio startup log check shows no Porcupine/PV key runtime errors:
+  - `cd packages/eva/audio`
+  - `PYTHONUNBUFFERED=1 timeout 20s .venv/bin/python -m app.run`
+  - startup includes transcript wake matcher logs and no `porcupine` / `PV_ACCESS_KEY` references.
+- Active-surface repo scan (excluding historical plan/progress docs) shows no Porcupine config/dependency refs:
+  - `grep -RIn --exclude-dir=.venv --exclude-dir=node_modules --exclude-dir=.git --exclude=progress.md --exclude='implementation-plan-*.md' -E 'porcupine|pvporcupine|PV_ACCESS_KEY|wake\.provider|wake\.keyword_path|wake\.sensitivity|wake\.access_key' /mnt/d/source/vscode/eva`
+  - output: no matches.
+
+### Manual run steps
+1. Recreate local audio virtualenv from `requirements.txt`.
+2. Start audio runtime (`python -m app.run`) and inspect startup logs.
+3. Confirm no Porcupine credential/runtime setup is required.
+4. Confirm transcript wake config loads from `wake.phrases` settings without extra keys.
+
+### Notes
+- Historical implementation-plan/progress documents still describe earlier Porcupine-era iterations as historical record; runtime/setup surfaces are now hard-cut away from Porcupine.
+
+## Iteration 226 — Runtime streamlining pass (no behavior change)
+
+**Status:** ✅ Completed (2026-03-03)
+
+### Completed
+- Added optional speaker subsystem toggle in audio config:
+  - `speaker.enabled` (default `true`)
+  - wired in `packages/eva/audio/app/config.py`
+  - added to committed defaults in `packages/eva/audio/settings.yaml`
+  - exposed in `config_summary()`.
+- Implemented clean speaker-disable runtime path in `packages/eva/audio/app/speaker.py`:
+  - moved `webrtcvad` import into runtime init path (so disabled mode skips importing/initializing speaker deps)
+  - `SpeakerRuntimeStatus` now reports `enabled`
+  - when disabled, status reason is explicit (`disabled by config (speaker.enabled=false)`).
+- Updated `packages/eva/audio/app/main.py` runtime flow to respect `speaker.enabled=false` cleanly:
+  - startup uses concise subsystem summary + actionable warnings only
+  - startup now clearly reports `speaker=disabled|ready|unavailable`
+  - active-window path bypasses speaker verification when disabled (accepts active continuation without lock checks)
+  - active-entry path skips speaker reference build/update when disabled
+  - speaker `/health` payload now includes `speaker_runtime.enabled`.
+- Streamlined STT runtime options in `packages/eva/audio/app/stt.py`:
+  - extracted static Whisper transcribe options into module constant (`_WHISPER_TRANSCRIBE_OPTIONS`) to reduce repeated inline config noise (no behavior change).
+
+### Files changed
+- `packages/eva/audio/app/config.py`
+- `packages/eva/audio/settings.yaml`
+- `packages/eva/audio/app/speaker.py`
+- `packages/eva/audio/app/stt.py`
+- `packages/eva/audio/app/main.py`
+- `progress.md`
+
+### Verification
+- Compile check passes:
+  - `cd packages/eva/audio && python3 -m compileall -f app`
+- Startup log shows concise subsystem summary and actionable warning lines:
+  - with default config (`speaker.enabled=true`):
+    - `[audio] startup summary ... speaker=unavailable ...`
+    - `[audio][warn] speaker runtime unavailable ...`
+  - with local override (`speaker.enabled=false`):
+    - `[audio] startup summary ... speaker=disabled ...`
+    - `[audio] speaker subsystem disabled by config (speaker.enabled=false)`
+- Health payload includes `speaker_runtime.enabled`.
+
+### Manual run steps
+1. Compile:
+   - `cd packages/eva/audio`
+   - `python3 -m compileall -f app`
+2. Verify default startup summary:
+   - run `PYTHONUNBUFFERED=1 .venv/bin/python -m app.run`
+   - confirm single concise startup summary and only actionable warnings.
+3. Verify disabled speaker mode:
+   - create `settings.local.yaml` with:
+     ```yaml
+     speaker:
+       enabled: false
+     ```
+   - restart runtime and confirm startup explicitly reports `speaker=disabled`.
+
+### Notes
+- Default behavior remains unchanged (`speaker.enabled=true`).
+- `speaker.enabled=false` intentionally skips speaker-lock initialization and checks, allowing active-window continuation without speaker verification.
+
+## Iteration 227 — Test coverage for transcript wake + presence bypass
+
+**Status:** ✅ Completed (2026-03-03)
+
+### Completed
+- Added audio test suite under `packages/eva/audio/tests/` with 8 targeted tests:
+  - transcript matcher modes + normalization
+  - confidence threshold gating behavior
+  - non-active gating matrix:
+    - presence=true + no phrase => accept
+    - presence=false + phrase match => accept
+    - presence=false + no phrase => reject
+  - active-window continuation remains functional (`accept_reason=active`) after wake activation.
+- Implemented lightweight integration-style gating tests by invoking `listen_socket(...)` with stubs/fakes for:
+  - Executive `/presence`
+  - STT results
+  - VAD segmentation
+  - speaker verifier / voiceprint store
+- Added Porcupine regression assertions in tests:
+  - wake config summary/runtime shape no longer exposes legacy Porcupine keys.
+  - legacy `wake.provider` config is explicitly rejected.
+- Hardened config loader regression guard (`packages/eva/audio/app/config.py`):
+  - added `_reject_legacy_wake_keys(...)` so legacy keys fail fast with clear config error:
+    - `wake.provider`
+    - `wake.keyword_path`
+    - `wake.sensitivity`
+    - `wake.access_key_env`
+    - `wake.access_key`
+
+### Files changed
+- `packages/eva/audio/tests/test_wake_and_gating.py` (new)
+- `packages/eva/audio/tests/__init__.py` (new)
+- `packages/eva/audio/app/config.py`
+- `progress.md`
+
+### Verification
+- Audio test suite passes:
+  - `cd packages/eva/audio && .venv/bin/python -m unittest discover -s tests -v`
+  - result: `Ran 8 tests ... OK`
+- Compile checks pass:
+  - `cd packages/eva/audio && python3 -m compileall -f app tests`
+
+### Gating matrix documentation in test output
+`unittest -v` output includes explicit matrix test names:
+- `test_gating_matrix_presence_true_no_phrase_accepts`
+- `test_gating_matrix_presence_false_phrase_match_accepts`
+- `test_gating_matrix_presence_false_no_phrase_rejects`
+
+### Manual run steps
+1. Run tests:
+   - `cd packages/eva/audio`
+   - `.venv/bin/python -m unittest discover -s tests -v`
+2. Optional compile pass:
+   - `python3 -m compileall -f app tests`
+3. Review verbose test output for gating matrix coverage and active-window continuity test.
+
+### Notes
+- Tests use deterministic fakes/stubs for runtime dependencies to keep coverage fast and stable while still exercising the real `listen_socket` gating flow.
+- Legacy Porcupine key rejection is now enforced at config-load time and covered by regression tests.
+
+## Iteration 228 — Docs + final regression guardrails
+
+**Status:** ✅ Completed (2026-03-03)
+
+### Completed
+- Added transcript-wake operator runbook:
+  - new file: `docs/audio-transcript-wake-runbook.md`
+  - documents:
+    - current wake config shape (`wake.phrases`, `match_mode`, `case_sensitive`, `min_confidence`)
+    - non-active gating behavior (presence bypass + transcript wake fallback)
+    - explicit verification checklist:
+      - Presence TRUE + no wake phrase
+      - Presence FALSE + wake phrase
+      - Presence FALSE + no wake phrase
+      - active-window continuation check
+- Updated root docs for consistency:
+  - `README.md` now includes Audio component/runtime in architecture + ports + dev run instructions
+  - added transcript wake behavior summary and runbook link
+  - updated regression guardrails section to include new audio wake guardrail command.
+- Added final static guardrail script to prevent Porcupine reintroduction:
+  - new script: `packages/eva/scripts/check-audio-wake-cutover-guardrails.mjs`
+  - new npm script: `packages/eva/package.json` → `check:audio-wake-guardrails`
+  - guardrail assertions enforce:
+    - no `pvporcupine` in audio requirements
+    - no legacy provider/access-key wake keys in committed audio settings
+    - no runtime Porcupine/PV key references in active audio runtime sources
+    - README/runbook alignment with transcript wake + presence bypass.
+
+### Files changed
+- `docs/audio-transcript-wake-runbook.md` (new)
+- `README.md`
+- `packages/eva/scripts/check-audio-wake-cutover-guardrails.mjs` (new)
+- `packages/eva/package.json`
+- `progress.md`
+
+### Verification
+- Audio guardrail check passes:
+  - `cd packages/eva && npm run check:audio-wake-guardrails`
+  - output: `PASS: audio transcript wake cutover guardrails`
+- Existing presence guardrail check still passes:
+  - `cd packages/eva && npm run check:presence-guardrails`
+- Audio tests still pass:
+  - `cd packages/eva/audio && .venv/bin/python -m unittest discover -s tests -v`
+  - result: `Ran 8 tests ... OK`
+- Audio compile check passes:
+  - `cd packages/eva/audio && python3 -m compileall -f app tests`
+
+### Manual run steps
+1. Run static guardrails:
+   - `cd packages/eva`
+   - `npm run check:audio-wake-guardrails`
+2. Review transcript wake runbook:
+   - `docs/audio-transcript-wake-runbook.md`
+3. Execute runbook checklist in a live stack to validate presence-bypass and transcript-wake behavior.
+
+### Notes
+- Historical implementation plan files and `progress.md` intentionally retain legacy Porcupine references as project history; active runtime/docs surfaces are now aligned with transcript wake architecture.
