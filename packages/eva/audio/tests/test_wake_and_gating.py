@@ -12,8 +12,6 @@ from app.config import (
     BASE_DIR,
     AppConfig,
     ConversationConfig,
-    ExecutiveConfig,
-    GatingConfig,
     STTConfig,
     ServerConfig,
     SpeakerConfig,
@@ -23,7 +21,6 @@ from app.config import (
     config_summary,
     load_app_config,
 )
-from app.executive_client import PresenceSnapshot
 from app.protocol import BINARY_META_LENGTH_BYTES, PROTOCOL_VERSION
 from app.speaker import SpeakerCheckResult, SpeakerReference, SpeakerReferenceResult
 from app.stt import TranscriptResult
@@ -34,7 +31,6 @@ from app.wake import build_wake_detector
 def _make_config(*, speaker_enabled: bool) -> AppConfig:
     return AppConfig(
         server=ServerConfig(host="127.0.0.1", port=8793),
-        executive=ExecutiveConfig(base_url="http://127.0.0.1:8791", timeout_ms=3000),
         vad=VADConfig(aggressiveness=2, preroll_ms=200, end_silence_ms=400, min_utterance_ms=300),
         wake=WakeConfig(
             phrases=("hey eva", "okay eva"),
@@ -42,7 +38,6 @@ def _make_config(*, speaker_enabled: bool) -> AppConfig:
             case_sensitive=False,
             min_confidence=0.0,
         ),
-        gating=GatingConfig(presence_window_ms=1500),
         stt=STTConfig(
             model_id="small.en",
             device="cpu",
@@ -128,20 +123,6 @@ class _FakeWebSocket:
             return self._messages.pop(0)
 
         return {"type": "websocket.disconnect"}
-
-
-class _StubExecutiveClient:
-    def __init__(self, responses: list[PresenceSnapshot]) -> None:
-        self._responses = list(responses)
-        self.calls = 0
-
-    async def get_presence(self, *, window_ms: int) -> PresenceSnapshot:
-        self.calls += 1
-        if window_ms <= 0:
-            raise AssertionError("presence window must be positive")
-        if not self._responses:
-            raise AssertionError("No more stubbed presence responses")
-        return self._responses.pop(0)
 
 
 class _StubSttTranscriber:
@@ -282,7 +263,6 @@ class GatingFlowTests(unittest.IsolatedAsyncioTestCase):
         *,
         config: AppConfig,
         utterances: list[CompletedUtterance],
-        executive_client: _StubExecutiveClient,
         stt_transcriber: _StubSttTranscriber,
         speaker_verifier: object,
         voiceprint_store: _StubVoiceprintStore,
@@ -303,7 +283,6 @@ class GatingFlowTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(main, "_get_app_config", return_value=config),
             patch.object(main, "_get_wake_detector", return_value=wake_detector),
-            patch.object(main, "_get_executive_client", return_value=executive_client),
             patch.object(main, "_get_stt_transcriber", return_value=stt_transcriber),
             patch.object(main, "_get_speaker_verifier", return_value=speaker_verifier),
             patch.object(main, "_get_voiceprint_store", return_value=voiceprint_store),
@@ -313,11 +292,8 @@ class GatingFlowTests(unittest.IsolatedAsyncioTestCase):
 
         return ws, main._ws_stats
 
-    async def test_gating_matrix_presence_true_no_phrase_rejects(self) -> None:
+    async def test_idle_no_wake_phrase_rejects(self) -> None:
         config = _make_config(speaker_enabled=False)
-        executive = _StubExecutiveClient(
-            [PresenceSnapshot(found=True, preson_present=True, person_facing_me=True, age_ms=20, ts_ms=10)]
-        )
         stt = _StubSttTranscriber([TranscriptResult(text="what time is it", confidence=0.95)])
         speaker = _NoopSpeakerVerifier()
         voiceprints = _StubVoiceprintStore()
@@ -325,7 +301,6 @@ class GatingFlowTests(unittest.IsolatedAsyncioTestCase):
         ws, stats = await self._run_session(
             config=config,
             utterances=[_make_utterance(end_ts_ms=1_000)],
-            executive_client=executive,
             stt_transcriber=stt,
             speaker_verifier=speaker,
             voiceprint_store=voiceprints,
@@ -333,19 +308,13 @@ class GatingFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(ws.accepted)
         self.assertEqual([msg.get("type") for msg in ws.sent_json], ["hello"])
-        self.assertEqual(stats.accepted_by_presence, 0)
-        self.assertEqual(stats.accepted_by_wake_phrase, 0)
-        self.assertEqual(stats.wake_phrase_checks, 1)
         self.assertEqual(stats.utterances_rejected, 1)
+        self.assertEqual(stats.wake_phrase_checks, 1)
+        self.assertEqual(stats.wake_phrase_matches, 0)
         self.assertEqual(stats.transcripts_emitted, 0)
-        self.assertEqual(executive.calls, 1)
-        self.assertEqual(stt.calls, 1)
 
-    async def test_gating_matrix_presence_false_phrase_match_accepts(self) -> None:
+    async def test_idle_wake_phrase_accepts(self) -> None:
         config = _make_config(speaker_enabled=False)
-        executive = _StubExecutiveClient(
-            [PresenceSnapshot(found=True, preson_present=False, person_facing_me=False, age_ms=20, ts_ms=10)]
-        )
         stt = _StubSttTranscriber([TranscriptResult(text="hey eva what time is it", confidence=0.92)])
         speaker = _NoopSpeakerVerifier()
         voiceprints = _StubVoiceprintStore()
@@ -353,7 +322,6 @@ class GatingFlowTests(unittest.IsolatedAsyncioTestCase):
         ws, stats = await self._run_session(
             config=config,
             utterances=[_make_utterance(end_ts_ms=1_000)],
-            executive_client=executive,
             stt_transcriber=stt,
             speaker_verifier=speaker,
             voiceprint_store=voiceprints,
@@ -364,41 +332,9 @@ class GatingFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.accepted_by_wake_phrase, 1)
         self.assertEqual(stats.wake_phrase_checks, 1)
         self.assertEqual(stats.wake_phrase_matches, 1)
-        self.assertEqual(stats.last_wake_phrase, "hey eva")
-        self.assertEqual(stats.utterances_rejected, 0)
-        self.assertEqual(executive.calls, 1)
-
-    async def test_gating_matrix_presence_false_no_phrase_rejects(self) -> None:
-        config = _make_config(speaker_enabled=False)
-        executive = _StubExecutiveClient(
-            [PresenceSnapshot(found=True, preson_present=False, person_facing_me=False, age_ms=20, ts_ms=10)]
-        )
-        stt = _StubSttTranscriber([TranscriptResult(text="what time is it", confidence=0.9)])
-        speaker = _NoopSpeakerVerifier()
-        voiceprints = _StubVoiceprintStore()
-
-        ws, stats = await self._run_session(
-            config=config,
-            utterances=[_make_utterance(end_ts_ms=1_000)],
-            executive_client=executive,
-            stt_transcriber=stt,
-            speaker_verifier=speaker,
-            voiceprint_store=voiceprints,
-        )
-
-        self.assertEqual([msg.get("type") for msg in ws.sent_json], ["hello"])
-        self.assertEqual(stats.accepted_by_presence, 0)
-        self.assertEqual(stats.accepted_by_wake_phrase, 0)
-        self.assertEqual(stats.utterances_rejected, 1)
-        self.assertEqual(stats.transcripts_emitted, 0)
-        self.assertEqual(stats.wake_phrase_checks, 1)
-        self.assertEqual(stats.wake_phrase_matches, 0)
 
     async def test_active_window_continuation_still_accepts_active_utterances(self) -> None:
         config = _make_config(speaker_enabled=True)
-        executive = _StubExecutiveClient(
-            [PresenceSnapshot(found=True, preson_present=False, person_facing_me=False, age_ms=20, ts_ms=10)]
-        )
         stt = _StubSttTranscriber(
             [
                 TranscriptResult(text="hey eva start", confidence=0.91),
@@ -414,7 +350,6 @@ class GatingFlowTests(unittest.IsolatedAsyncioTestCase):
                 _make_utterance(end_ts_ms=1_000),
                 _make_utterance(end_ts_ms=2_000),
             ],
-            executive_client=executive,
             stt_transcriber=stt,
             speaker_verifier=speaker,
             voiceprint_store=voiceprints,
@@ -425,9 +360,7 @@ class GatingFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.accepted_by_active, 1)
         self.assertEqual(stats.transcripts_emitted, 2)
         self.assertEqual(stats.utterances_rejected, 0)
-        self.assertEqual(stats.presence_checks, 1)
         self.assertEqual(stats.wake_phrase_checks, 1)
-        self.assertEqual(executive.calls, 1)
         self.assertEqual(speaker.build_calls, 1)
         self.assertEqual(speaker.verify_calls, 1)
         self.assertEqual(voiceprints.upsert_calls, 1)

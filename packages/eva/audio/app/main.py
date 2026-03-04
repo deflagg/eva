@@ -7,7 +7,6 @@ from typing import Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from .config import AppConfig, config_summary, load_app_config
-from .executive_client import ExecutiveClient, ExecutiveClientError, PresenceSnapshot
 from .protocol import (
     BinaryAudioParseError,
     decode_binary_audio_envelope,
@@ -41,16 +40,8 @@ class WsRuntimeStats:
     wake_phrase_checks: int = 0
     wake_phrase_matches: int = 0
     last_wake_phrase: str | None = None
-    presence_checks: int = 0
-    presence_check_errors: int = 0
-    last_presence_found: bool | None = None
-    last_presence_preson_present: bool | None = None
-    last_presence_person_facing_me: bool | None = None
-    last_presence_age_ms: int | None = None
-    last_presence_ts_ms: int | None = None
     utterances_accepted: int = 0
     accepted_by_wake_phrase: int = 0
-    accepted_by_presence: int = 0
     accepted_by_active: int = 0
     utterances_rejected: int = 0
     last_accept_reason: str | None = None
@@ -78,7 +69,6 @@ class WsRuntimeStats:
 
 _app_config: AppConfig | None = None
 _wake_detector: WakeWordDetector | None = None
-_executive_client: ExecutiveClient | None = None
 _stt_transcriber: WhisperTranscriber | None = None
 _speaker_verifier: SpeakerVerifier | None = None
 _voiceprint_store: VoiceprintStore | None = None
@@ -103,18 +93,6 @@ def _get_wake_detector() -> WakeWordDetector:
 
     return _wake_detector
 
-
-def _get_executive_client() -> ExecutiveClient:
-    global _executive_client
-
-    if _executive_client is None:
-        config = _get_app_config()
-        _executive_client = ExecutiveClient(
-            base_url=config.executive.base_url,
-            timeout_ms=config.executive.timeout_ms,
-        )
-
-    return _executive_client
 
 
 def _get_stt_transcriber() -> WhisperTranscriber:
@@ -154,7 +132,6 @@ async def startup_event() -> None:
     stt_transcriber = _get_stt_transcriber()
     speaker_verifier = _get_speaker_verifier()
     voiceprint_store = _get_voiceprint_store()
-    executive_client = _get_executive_client()
 
     wake_status = wake_detector.status()
     stt_status = stt_transcriber.status()
@@ -170,7 +147,6 @@ async def startup_event() -> None:
     print(
         "[audio] startup summary "
         f"listen={config.server.host}:{config.server.port} "
-        f"executive={executive_client.base_url} "
         f"wake={'ready' if wake_status.ready else 'unavailable'} "
         f"stt={'ready' if stt_status.ready else 'unavailable'} "
         f"speaker={speaker_state} "
@@ -210,7 +186,6 @@ async def startup_event() -> None:
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     global _wake_detector
-    global _executive_client
     global _stt_transcriber
     global _speaker_verifier
     global _voiceprint_store
@@ -218,10 +193,6 @@ async def shutdown_event() -> None:
     if _wake_detector is not None:
         _wake_detector.close()
         _wake_detector = None
-
-    if _executive_client is not None:
-        await _executive_client.close()
-        _executive_client = None
 
     _stt_transcriber = None
     _speaker_verifier = None
@@ -293,16 +264,8 @@ async def health() -> dict[str, Any]:
             "wake_phrase_checks": _ws_stats.wake_phrase_checks,
             "wake_phrase_matches": _ws_stats.wake_phrase_matches,
             "last_wake_phrase": _ws_stats.last_wake_phrase,
-            "presence_checks": _ws_stats.presence_checks,
-            "presence_check_errors": _ws_stats.presence_check_errors,
-            "last_presence_found": _ws_stats.last_presence_found,
-            "last_presence_preson_present": _ws_stats.last_presence_preson_present,
-            "last_presence_person_facing_me": _ws_stats.last_presence_person_facing_me,
-            "last_presence_age_ms": _ws_stats.last_presence_age_ms,
-            "last_presence_ts_ms": _ws_stats.last_presence_ts_ms,
             "utterances_accepted": _ws_stats.utterances_accepted,
             "accepted_by_wake_phrase": _ws_stats.accepted_by_wake_phrase,
-            "accepted_by_presence": _ws_stats.accepted_by_presence,
             "accepted_by_active": _ws_stats.accepted_by_active,
             "utterances_rejected": _ws_stats.utterances_rejected,
             "last_accept_reason": _ws_stats.last_accept_reason,
@@ -342,7 +305,6 @@ async def listen_socket(ws: WebSocket) -> None:
 
     config = _get_app_config()
     wake_detector = _get_wake_detector()
-    executive_client = _get_executive_client()
     stt_transcriber = _get_stt_transcriber()
     speaker_verifier = _get_speaker_verifier()
     voiceprint_store = _get_voiceprint_store()
@@ -463,7 +425,6 @@ async def listen_socket(ws: WebSocket) -> None:
                     wake_match_reason = "not_checked"
                     accepted = False
                     accept_reason = "rejected"
-                    presence_snapshot: PresenceSnapshot | None = None
                     speaker_reject_detail = "speaker=not_checked"
                     transcript = None
                     was_active = active_until_ms is not None and utterance_decision_ts_ms <= active_until_ms
@@ -528,75 +489,36 @@ async def listen_socket(ws: WebSocket) -> None:
                         speaker_reject_detail = "speaker=not_active"
                         _ws_stats.last_wake_phrase = None
 
-                        _ws_stats.presence_checks += 1
+                        _ws_stats.stt_runs += 1
                         try:
-                            presence_snapshot = await executive_client.get_presence(
-                                window_ms=config.gating.presence_window_ms,
-                            )
-                            _ws_stats.last_presence_found = presence_snapshot.found
-                            _ws_stats.last_presence_preson_present = presence_snapshot.preson_present
-                            _ws_stats.last_presence_person_facing_me = presence_snapshot.person_facing_me
-                            _ws_stats.last_presence_age_ms = presence_snapshot.age_ms
-                            _ws_stats.last_presence_ts_ms = presence_snapshot.ts_ms
-
-                            if (
-                                presence_snapshot.found
-                                and presence_snapshot.preson_present
-                                and presence_snapshot.person_facing_me
-                            ):
-                                wake_match_reason = "presence_seen_phrase_required"
-                        except ExecutiveClientError as exc:
-                            _ws_stats.presence_check_errors += 1
-                            wake_match_reason = "presence_error_phrase_required"
+                            transcript = await stt_transcriber.transcribe(utterance.audio_bytes)
+                        except Exception as exc:
+                            _ws_stats.stt_errors += 1
+                            wake_match_reason = "stt_error_for_wake_phrase"
                             print(
-                                "[audio] gating presence check failed "
-                                f"code={exc.code} "
+                                "[audio] stt transcription failed during wake phrase check "
                                 f"reason={exc}"
                             )
-
-                        if not accepted:
-                            _ws_stats.stt_runs += 1
-                            try:
-                                transcript = await stt_transcriber.transcribe(utterance.audio_bytes)
-                            except Exception as exc:
-                                _ws_stats.stt_errors += 1
-                                wake_match_reason = "stt_error_for_wake_phrase"
-                                print(
-                                    "[audio] stt transcription failed during wake phrase check "
-                                    f"reason={exc}"
-                                )
+                        else:
+                            if transcript is None:
+                                wake_match_reason = "empty_transcript_for_wake_phrase"
                             else:
-                                if transcript is None:
-                                    wake_match_reason = "empty_transcript_for_wake_phrase"
-                                else:
-                                    _ws_stats.wake_phrase_checks += 1
-                                    wake_match = wake_detector.match_transcript(
-                                        transcript.text,
-                                        confidence=transcript.confidence,
-                                    )
-                                    wake_detected = wake_match.matched
-                                    _ws_stats.last_wake_phrase = wake_match.phrase
-                                    wake_match_reason = wake_match.reason
-                                    if wake_detected:
-                                        _ws_stats.wake_phrase_matches += 1
-                                        accepted = True
-                                        accept_reason = "wake_phrase"
+                                _ws_stats.wake_phrase_checks += 1
+                                wake_match = wake_detector.match_transcript(
+                                    transcript.text,
+                                    confidence=transcript.confidence,
+                                )
+                                wake_detected = wake_match.matched
+                                _ws_stats.last_wake_phrase = wake_match.phrase
+                                wake_match_reason = wake_match.reason
+                                if wake_detected:
+                                    _ws_stats.wake_phrase_matches += 1
+                                    accepted = True
+                                    accept_reason = "wake_phrase"
 
                     if not accepted:
                         _ws_stats.utterances_rejected += 1
                         _ws_stats.last_accept_reason = "rejected"
-
-                        presence_detail = (
-                            "presence=none"
-                            if presence_snapshot is None
-                            else (
-                                "presence="
-                                f"found:{presence_snapshot.found},"
-                                f"preson_present:{presence_snapshot.preson_present},"
-                                f"person_facing_me:{presence_snapshot.person_facing_me},"
-                                f"age_ms:{presence_snapshot.age_ms}"
-                            )
-                        )
 
                         transcript_detail = (
                             "stt_transcript=none"
@@ -615,7 +537,6 @@ async def listen_socket(ws: WebSocket) -> None:
                             f"wake_phrase_matched={wake_detected} "
                             f"wake_match_reason={wake_match_reason} "
                             f"{transcript_detail} "
-                            f"{presence_detail} "
                             f"{speaker_reject_detail}"
                         )
                         continue

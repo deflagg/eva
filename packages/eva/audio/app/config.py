@@ -15,12 +15,6 @@ class ServerConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutiveConfig:
-    base_url: str
-    timeout_ms: int
-
-
-@dataclass(frozen=True, slots=True)
 class VADConfig:
     aggressiveness: int
     preroll_ms: int
@@ -34,11 +28,6 @@ class WakeConfig:
     match_mode: str
     case_sensitive: bool
     min_confidence: float
-
-
-@dataclass(frozen=True, slots=True)
-class GatingConfig:
-    presence_window_ms: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,10 +64,8 @@ class VoiceprintsConfig:
 @dataclass(frozen=True, slots=True)
 class AppConfig:
     server: ServerConfig
-    executive: ExecutiveConfig
     vad: VADConfig
     wake: WakeConfig
-    gating: GatingConfig
     stt: STTConfig
     conversation: ConversationConfig
     speaker: SpeakerConfig
@@ -266,10 +253,6 @@ def _build_app_config(settings: Dynaconf) -> AppConfig:
             host=_read_non_empty_string(settings, "server.host", "127.0.0.1"),
             port=_read_int(settings, "server.port", 8793, minimum=1, maximum=65_535),
         ),
-        executive=ExecutiveConfig(
-            base_url=_read_non_empty_string(settings, "executive.base_url", "http://127.0.0.1:8791"),
-            timeout_ms=_read_int(settings, "executive.timeout_ms", 3_000, minimum=1),
-        ),
         vad=VADConfig(
             aggressiveness=_read_int(settings, "vad.aggressiveness", 2, minimum=0, maximum=3),
             preroll_ms=_read_int(settings, "vad.preroll_ms", 200, minimum=0),
@@ -285,9 +268,6 @@ def _build_app_config(settings: Dynaconf) -> AppConfig:
             match_mode=wake_match_mode,
             case_sensitive=_read_bool(settings, "wake.case_sensitive", False),
             min_confidence=_read_float(settings, "wake.min_confidence", 0.0, minimum=0, maximum=1),
-        ),
-        gating=GatingConfig(
-            presence_window_ms=_read_int(settings, "gating.presence_window_ms", 1_500, minimum=1),
         ),
         stt=STTConfig(
             model_id=_read_non_empty_string(settings, "stt.model_id", "small.en"),
@@ -331,10 +311,6 @@ def config_summary(config: AppConfig) -> dict[str, object]:
             "host": config.server.host,
             "port": config.server.port,
         },
-        "executive": {
-            "base_url": config.executive.base_url,
-            "timeout_ms": config.executive.timeout_ms,
-        },
         "vad": {
             "aggressiveness": config.vad.aggressiveness,
             "preroll_ms": config.vad.preroll_ms,
@@ -346,9 +322,6 @@ def config_summary(config: AppConfig) -> dict[str, object]:
             "match_mode": config.wake.match_mode,
             "case_sensitive": config.wake.case_sensitive,
             "min_confidence": config.wake.min_confidence,
-        },
-        "gating": {
-            "presence_window_ms": config.gating.presence_window_ms,
         },
         "stt": {
             "model_id": config.stt.model_id,

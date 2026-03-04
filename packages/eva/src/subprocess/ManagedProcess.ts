@@ -1,6 +1,13 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 
 import { sleep, waitForHttpHealthy } from './health.js';
+
+export interface ManagedProcessLine {
+  service: string;
+  stream: 'stdout' | 'stderr';
+  line: string;
+}
 
 export interface ManagedProcessOptions {
   name: string;
@@ -9,6 +16,7 @@ export interface ManagedProcessOptions {
   healthUrl: string;
   readyTimeoutMs: number;
   shutdownTimeoutMs: number;
+  onLine?: (payload: ManagedProcessLine) => void;
 }
 
 function isRunning(child: ChildProcess): boolean {
@@ -33,20 +41,8 @@ function waitForExit(child: ChildProcess): Promise<void> {
   });
 }
 
-function chunkToText(chunk: Buffer | string): string {
-  return Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk;
-}
-
-function emitPrefixedLog(prefix: string, chunk: Buffer | string, level: 'log' | 'error'): void {
-  const text = chunkToText(chunk);
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-
-  for (const line of lines) {
-    console[level](`[${prefix}] ${line}`);
-  }
+function chunkToBuffer(chunk: Buffer | string): Buffer {
+  return Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
 }
 
 export class ManagedProcess {
@@ -73,20 +69,23 @@ export class ManagedProcess {
 
     this.child = child;
 
-    child.stdout?.on('data', (chunk: Buffer | string) => {
-      emitPrefixedLog(this.options.name, chunk, 'log');
-    });
-
-    child.stderr?.on('data', (chunk: Buffer | string) => {
-      emitPrefixedLog(this.options.name, chunk, 'error');
-    });
+    this.bindStream(child.stdout, 'stdout');
+    this.bindStream(child.stderr, 'stderr');
 
     child.on('error', (error) => {
-      console.error(`[${this.options.name}] process error: ${error.message}`);
+      this.options.onLine?.({
+        service: this.options.name,
+        stream: 'stderr',
+        line: `process error: ${error.message}`,
+      });
     });
 
     child.on('exit', (code, signal) => {
-      console.log(`[${this.options.name}] exited (code=${code ?? 'null'}, signal=${signal ?? 'none'})`);
+      this.options.onLine?.({
+        service: this.options.name,
+        stream: 'stderr',
+        line: `exited (code=${code ?? 'null'}, signal=${signal ?? 'none'})`,
+      });
     });
   }
 
@@ -122,7 +121,11 @@ export class ManagedProcess {
     }
 
     if (isRunning(child)) {
-      console.warn(`[${this.options.name}] process did not exit after SIGKILL timeout`);
+      this.options.onLine?.({
+        service: this.options.name,
+        stream: 'stderr',
+        line: 'process did not exit after SIGKILL timeout',
+      });
     }
 
     this.child = null;
@@ -141,6 +144,43 @@ export class ManagedProcess {
 
     this.sendSignal(child, 'SIGKILL');
     this.child = null;
+  }
+
+  private bindStream(stream: NodeJS.ReadableStream | null | undefined, streamName: 'stdout' | 'stderr'): void {
+    if (!stream) {
+      return;
+    }
+
+    const decoder = new StringDecoder('utf8');
+    let remainder = '';
+
+    const emitLine = (line: string): void => {
+      this.options.onLine?.({
+        service: this.options.name,
+        stream: streamName,
+        line,
+      });
+    };
+
+    stream.on('data', (chunk: Buffer | string) => {
+      const text = remainder + decoder.write(chunkToBuffer(chunk));
+      const parts = text.split(/\r?\n/);
+      remainder = parts.pop() ?? '';
+
+      for (const part of parts) {
+        emitLine(part);
+      }
+    });
+
+    stream.on('end', () => {
+      const tail = decoder.end();
+      const final = remainder + tail;
+      remainder = '';
+
+      if (final.length > 0) {
+        emitLine(final);
+      }
+    });
   }
 
   private sendSignal(child: ChildProcess, signal: NodeJS.Signals): void {

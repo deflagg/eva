@@ -48,15 +48,36 @@ Protocol docs/schema live in `packages/protocol`.
 
 ## One-command stack boot (Eva subprocess mode)
 
-After one-time dependency setup, boot Agent + Vision + Eva from one command:
+After one-time dependency setup, boot Agent + Vision + Audio + Eva from one command:
 
 ```bash
 cd packages/eva
 npm run dev
 ```
 
-If your Python path differs, override `subprocesses.vision.command` in `eva.config.local.json`.
-Audio runtime (`packages/eva/audio`) is started separately.
+When `subprocesses.enabled=true` (default in committed config), Eva starts any enabled subprocess blocks under `subprocesses.agent|vision|audio`.
+If your Python path differs, override `subprocesses.vision.command` and/or `subprocesses.audio.command` in `eva.config.local.json`.
+
+## Centralized logs
+
+Eva writes runtime logs under:
+
+- `packages/eva/logs/runs/<runId>/`
+
+Active run pointer:
+
+- `packages/eva/logs/latest.txt`
+  - contains the absolute path to the current run directory
+
+Per-run files include:
+
+- `eva.log`
+- `agent.log`
+- `vision.log`
+- `audio.log`
+- `combined.log`
+
+For operations and console mode usage, see `docs/logging-runbook.md`.
 
 ## Development run instructions
 
@@ -118,12 +139,11 @@ npm run dev
 - UI streams `audio_binary` messages to Eva (`/audio`), and Eva forwards to Audio (`/listen`).
 - Audio emits `speech_transcript` when utterance gating passes.
 
-## Audio wake behavior (transcript + presence bypass)
+## Audio wake behavior (transcript-based)
 
 - Wake activation is transcript-based (`wake.phrases`), not provider-based.
-- Non-active gating is:
-  - presence true/fresh (`preson_present && person_facing_me`) => accept without wake phrase
-  - otherwise STT transcript must match configured wake phrase.
+- Idle acceptance requires transcript wake phrase match.
+- Audio does not use presence gating.
 - See runbook: `docs/audio-transcript-wake-runbook.md`.
 
 ## Presence source of truth (final)

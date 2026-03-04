@@ -2,31 +2,24 @@ server:
   host: 127.0.0.1
   port: 8793
 
-executive:
-  base_url: http://127.0.0.1:8791
-  timeout_ms: 3000
 
 vad:
   aggressiveness: 2
   preroll_ms: 200
   end_silence_ms: 400
-  min_utterance_ms: 300
+  min_utterance_ms: 1000
 
 wake:
   phrases:
-    - hey eva
-    - okay eva
     - eva
   match_mode: contains
   case_sensitive: false
   min_confidence: 0.0
 
-gating:
-  presence_window_ms: 1500
 
 stt:
   model_id: small.en
-  device: cpu
+  device: cuda
   compute_type: int8
   cache_dir: ../memory/models/whisper
 
@@ -34,14 +27,14 @@ conversation:
   active_timeout_ms: 25000
 
 speaker:
-  enabled: true
+  enabled: false
   model_id: speechbrain/spkrec-ecapa-voxceleb
-  device: cpu
+  device: cuda
   cache_dir: ../memory/models/speechbrain
-  similarity_threshold: 0.75
-  min_check_utterance_ms: 500
+  similarity_threshold: 0.20
+  min_check_utterance_ms: 1000
   max_voiced_ms: 2000
-  short_utterance_policy: require_rewake
+  short_utterance_policy: ignore
 
 voiceprints:
   dir: ../memory/voiceprints

@@ -31,6 +31,9 @@ packages/eva/memory/long_term_memory_db/**
 packages/eva/memory/working_memory_assets/**
 !packages/eva/memory/working_memory_assets/.gitkeep
 
+# EVA runtime logs
+packages/eva/logs/**
+
 # EVA LLM trace logs
 packages/eva/llm_logs/**
 !packages/eva/llm_logs/config.example.json

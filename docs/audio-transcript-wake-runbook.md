@@ -21,31 +21,26 @@ There is **no** wake provider switch and no wake credential setup.
 ## Non-active utterance gating rules
 
 When conversation is **not active**:
+1) Run STT on the utterance.
+2) Match transcript against `wake.phrases`.
+3) If match succeeds → accept (`accept_reason=wake_phrase`).
+4) Otherwise → reject (no transcript emitted).
 
-1. Check Executive `/presence`.
-2. If `found && preson_present && person_facing_me` => accept immediately (`accept_reason=presence`).
-3. Otherwise run STT and match transcript wake phrase.
-4. Accept only when phrase match succeeds (`accept_reason=wake_phrase`).
-5. No match => reject utterance.
+Audio runtime does not query Executive `/presence`.
 
 Active-window continuation behavior remains unchanged (`accept_reason=active`).
 
 ## Verification checklist (operator)
 
-1. Start Executive + Audio runtime.
-2. **Presence TRUE + no wake phrase**
-   - Trigger utterance without wake phrase while `/presence` is true/fresh.
-   - Expect transcript emitted with `accept_reason=presence`.
-3. **Presence FALSE + wake phrase**
-   - Make `/presence` false/stale.
-   - Trigger utterance containing configured wake phrase.
-   - Expect transcript emitted with `accept_reason=wake_phrase`.
-4. **Presence FALSE + no wake phrase**
-   - Keep `/presence` false/stale.
+1. Start Audio runtime.
+2. **Idle, no wake phrase**
    - Trigger utterance without wake phrase.
    - Expect utterance rejected (no transcript emitted).
-5. Validate active continuation:
-   - After a successful activation, follow-up utterance in active window should pass with `accept_reason=active`.
+3. **Idle, wake phrase present**
+   - Trigger utterance containing configured wake phrase.
+   - Expect transcript emitted with `accept_reason=wake_phrase`.
+4. Validate active continuation:
+   - After a successful wake activation, follow-up utterance in active window should pass with `accept_reason=active`.
 
 ## Regression guardrails
 

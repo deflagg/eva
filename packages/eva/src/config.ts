@@ -179,6 +179,45 @@ const MotionGateConfigSchema = z
     message: 'motionGate.resetThreshold must be <= motionGate.triggerThreshold',
   });
 
+const ConsoleModeSchema = z.enum([
+  'compact',
+  'follow',
+  'service:eva',
+  'service:agent',
+  'service:vision',
+  'service:audio',
+]);
+
+const LoggingConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  dir: z.string().trim().min(1).default('logs'),
+  rotation: z
+    .object({
+      maxBytes: z.number().int().positive().default(10 * 1024 * 1024),
+      maxFiles: z.number().int().positive().default(10),
+    })
+    .default({
+      maxBytes: 10 * 1024 * 1024,
+      maxFiles: 10,
+    }),
+  retention: z
+    .object({
+      maxRuns: z.number().int().positive().default(20),
+    })
+    .default({
+      maxRuns: 20,
+    }),
+  console: z
+    .object({
+      mode: ConsoleModeSchema.default('compact'),
+      timestamps: z.boolean().default(true),
+    })
+    .default({
+      mode: 'compact',
+      timestamps: true,
+    }),
+});
+
 const EvaConfigSchema = z.object({
   server: z.object({
     port: z.number().int().min(1).max(65_535),
@@ -271,6 +310,21 @@ const EvaConfigSchema = z.object({
       healthUrl: 'http://127.0.0.1:8793/health',
       readyTimeoutMs: 120_000,
       shutdownTimeoutMs: 10_000,
+    },
+  }),
+  logging: LoggingConfigSchema.default({
+    enabled: true,
+    dir: 'logs',
+    rotation: {
+      maxBytes: 10 * 1024 * 1024,
+      maxFiles: 10,
+    },
+    retention: {
+      maxRuns: 20,
+    },
+    console: {
+      mode: 'compact',
+      timestamps: true,
     },
   }),
 });

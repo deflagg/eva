@@ -1,5 +1,57 @@
 # Progress
 
+- Iteration 242 — ✅ Completed (2026-03-04)
+  - Updated wake runbook for wake-only idle gating in `docs/audio-transcript-wake-runbook.md`:
+    - replaced non-active gating rules with wake-only sequence (STT -> `wake.phrases` match -> accept/reject)
+    - added explicit statement: Audio runtime does not query Executive `/presence`.
+    - removed presence TRUE/FALSE verification checklist scenarios.
+  - Updated root `README.md` Audio wake section:
+    - renamed section to transcript-based wake behavior
+    - states idle acceptance requires wake phrase match
+    - states audio does not use presence gating.
+  - Updated guardrail script `packages/eva/scripts/check-audio-wake-cutover-guardrails.mjs`:
+    - removed runbook assertions that required presence-bypass checklist text
+    - added assertions that audio settings do not contain `executive:` or `gating:`
+    - added assertions that audio runtime `main.py` does not reference `/presence` or `get_presence`
+    - added assertion that runbook includes explicit no-presence-query statement and excludes presence-bypass wording
+    - added assertion that root README does not claim `presence true/fresh` bypass behavior.
+  - Verification:
+    - `cd packages/eva && npm run check:audio-wake-guardrails`
+
+- Iteration 241 — ✅ Completed (2026-03-04)
+  - Removed Audio runtime presence integration end-to-end (wake-only idle gating).
+  - Deleted presence HTTP client module: `packages/eva/audio/app/executive_client.py`.
+  - Updated `packages/eva/audio/app/config.py`:
+    - removed `ExecutiveConfig` and `GatingConfig` dataclasses
+    - removed `AppConfig.executive` and `AppConfig.gating`
+    - removed parsing of `executive.base_url`, `executive.timeout_ms`, and `gating.presence_window_ms`
+    - removed `executive` and `gating` from `config_summary(...)`.
+  - Updated committed audio settings in `packages/eva/audio/settings.yaml`:
+    - removed entire `executive:` block
+    - removed entire `gating:` block.
+  - Updated `packages/eva/audio/app/main.py`:
+    - removed `ExecutiveClient` imports, globals, getter, startup wiring, and shutdown close path
+    - removed presence telemetry fields from `WsRuntimeStats`
+    - removed presence fields from `/health` `ws` payload
+    - removed non-active presence check branch from `/listen`
+    - non-active path is now wake-only: STT -> `wake_detector.match_transcript(...)` -> accept only on wake phrase
+    - removed presence detail from rejection logging
+    - removed `accepted_by_presence` counter surface entirely.
+  - Updated `packages/eva/audio/requirements.txt`:
+    - removed `httpx` dependency (kept `requests`).
+  - Updated wake/gating tests in `packages/eva/audio/tests/test_wake_and_gating.py`:
+    - removed Executive/presence stubs and patching
+    - replaced gating matrix with wake-only tests:
+      - `test_idle_no_wake_phrase_rejects`
+      - `test_idle_wake_phrase_accepts`
+      - `test_active_window_continuation_still_accepts_active_utterances`
+    - retained legacy wake regression tests.
+  - Verification:
+    - `cd packages/eva/audio && python3 -m compileall -f app`
+    - `cd packages/eva/audio && .venv/bin/python -m unittest discover -s tests -v`
+      - note: host `python3` unittest path lacked `fastapi`; executed in project `.venv` where runtime deps are installed
+    - `cd packages/eva && npm run build`
+
 - Iteration 240 — ✅ Completed (2026-03-04)
   - Cleaned wake-only intent branches/comments in `packages/eva/audio/app/main.py`.
   - Updated voiceprint-upsert eligibility on new ACTIVE entry:
